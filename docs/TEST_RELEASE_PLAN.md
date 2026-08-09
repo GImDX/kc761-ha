@@ -4,6 +4,8 @@
 
 日期：2026-08-10
 
+当前 RC 的离线验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。真实设备 L 级验证、隔离测试 Home Assistant 联调和正式部署门禁仍未完成。
+
 ## 1. 环境边界
 
 | 环境 | 角色 | 允许的工作 | 禁止的工作 |
