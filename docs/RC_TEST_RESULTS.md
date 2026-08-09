@@ -20,6 +20,8 @@
 
 开发机 `.venv` 的 Ruff 检查通过；开发机 pytest 为 28 passed、1 skipped，唯一 skip 原因是本机未安装 Home Assistant。开发机不能从当前索引安装 `homeassistant==2026.7.4`，因此 HA 运行时结果以固定镜像记录为准。
 
+官方 Hassfest/HACS 容器没有在本次隔离运行中执行。工作流使用的官方 Action 分别对应 `ghcr.io/home-assistant/hassfest` 和 `ghcr.io/hacs/action:main`；两次 `docker pull` 都因 Docker daemon 的既有不可用 proxy connection refused 而失败。未修改 daemon 配置，也未重启宿主 Docker。因此本仓库只能确认工作流配置和静态结构检查，不能宣称官方 Hassfest/HACS validation 已通过。
+
 复验命令：
 
 ```text
@@ -41,14 +43,14 @@ coverage report --fail-under=95
 - HTTP：200；Config Entry：loaded；设备数：1；实体数：13
 - 启用传感器样本：1013 hPa、87%、23.5 °C、100.0 cps
 - diagnostics：`hardware_verified=false`、连接正常、协议错误 0、重连 0、敏感字段 0
-- 重启次数：0；网络检查：2 次；TCP 7601：通过；最终启动命令仅出现只读 `CMD_GET_STA`/`CMD_GET_DEVICE_INFO`，`0x62/0x63/0x64/0x66` 和 `FORBIDDEN` 均为 0；HA/KC 错误样本：0
+- 重启次数：0；bridge network 中容器数 2；TCP 7601：通过；最终启动命令仅出现只读 `CMD_GET_STA`/`CMD_GET_DEVICE_INFO`，`0x62/0x63/0x64/0x66` 和 `FORBIDDEN` 均为 0；HA/KC 错误样本：0
 - 独立客户端历史运行：100/100 重连成功，200 responses/0 failures；断线后 4 个传感器先不可用、随后恢复；HA 重启和 Compose stop/start 回滚均恢复；连续观察超过 10 分钟
 
-服务 UUID 仍未知；BLE 扫描只表明设备在线，未确认可用服务。上述持久栈和模拟器结果不能替代真实设备抓包。
+设备是否在线/可发现未确认，阴性扫描不具证明力，服务 UUID 未知。上述持久栈和模拟器结果不能替代真实设备抓包。
 
 ## 当前结论与剩余门禁
 
-- HACS 根配置 `hacs.json`、全包 branch coverage 门禁、静态检查、固定镜像 HA 生命周期和只读安全门禁已固化。
+- HACS 根配置 `hacs.json`、全包 branch coverage 门禁、静态检查、固定镜像 HA 生命周期和只读安全门禁已固化；官方 Hassfest/HACS 容器验证仍未完成。
 - 首版仍只读；不发送校准、清除统计、设备时间、状态设置或其它写命令。
 - 真实 KC761 L 级证据尚未完成：端序、FP16、累计单位、固件兼容、BAG_LEN、ACK 回显、谱图完成条件、默认端口和 BLE UUID 均不得写成已确认事实。
 - 实机抓包、测试环境长稳和发布前回滚证据完成后，才能另行提升兼容性声明或开放实验性功能。

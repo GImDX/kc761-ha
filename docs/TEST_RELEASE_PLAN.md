@@ -4,7 +4,7 @@
 
 日期：2026-08-10
 
-当前 RC 的离线验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。真实设备 L 级验证、隔离测试 Home Assistant 联调和正式部署门禁仍未完成。
+当前 RC 的验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。隔离测试 Home Assistant 联调已完成；真实设备 L 级验证、官方 Hassfest/HACS 验证器和发布门禁仍未完成。
 
 ## 1. 环境边界
 
@@ -14,7 +14,7 @@
 | 测试 Home Assistant | 测试环境 | 只读联调、故障注入、受控写验证、升级/回滚 | 未备份的破坏性测试、生产数据假设 |
 | 正式 Home Assistant | 正式环境 | 安装固定发布版本、只读验收、监控 | 协议探索、开发目录直拷、未测试升级 |
 
-本阶段没有连接、修改或重启两个远端环境。
+本轮仓库提交未直接连接、修改或重启远端环境；隔离测试 HA 联调由固定镜像验收记录覆盖，真实设备联调尚未完成。
 
 ## 2. 里程碑
 
@@ -118,11 +118,13 @@
 - 仓库只有一个 `custom_components/kc761` 集成；
 - 运行文件全部位于集成目录；
 - `hacs.json`、`manifest.json`、README、翻译和 diagnostics 完整；
-- 当前 Home Assistant Hassfest 与 HACS validation 通过；
+- 门禁要求：Home Assistant Hassfest 与 HACS validation 必须通过；
 - Ruff、pytest、JSON/翻译检查和 Python 编译通过；
 - 干净 HA 实例安装、升级、降级和删除验证通过；
 - release tag 与 manifest version 一致；
 - 发布说明列出兼容型号、固件证据、已知限制和回滚方法。
+
+当前 RC 尚未满足 M5：官方 Hassfest 与 HACS 容器未实际执行，真实设备和发布门禁证据仍缺失。
 
 ### M6 - 正式环境部署
 
