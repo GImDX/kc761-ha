@@ -1,0 +1,66 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "添加 KC761x 辐射计",
+        "description": "连接局域网中的 KC761x TCP 服务。",
+        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+      },
+      "reconfigure": {
+        "title": "重新配置 KC761x 连接",
+        "description": "新地址返回的设备 ID 必须与此配置条目一致。",
+        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接或解析 KC761x 设备。",
+      "device_mismatch": "新地址返回了不同的设备 ID。"
+    },
+    "abort": {
+      "already_configured": "此 KC761x 设备已经配置。",
+      "unknown": "找不到配置条目。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KC761x 轮询选项",
+        "data": {
+          "status_interval": "状态轮询间隔（秒）",
+          "info_interval": "设备信息轮询间隔（秒）"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_percentage": {"name": "电池电量"},
+      "air_pressure": {"name": "气压"},
+      "device_temperature": {"name": "设备温度"},
+      "gamma_avg_cps": {"name": "Gamma 平滑计数率"},
+      "gamma_avg_dose_rate": {"name": "Gamma 平滑剂量率"},
+      "gamma_avg_dose_equivalent_rate": {"name": "Gamma 平滑剂量当量率"},
+      "gamma_raw_cps": {"name": "Gamma 原始计数率"},
+      "gamma_raw_dose_rate": {"name": "Gamma 原始剂量率"},
+      "gamma_raw_dose_equivalent_rate": {"name": "Gamma 原始剂量当量率"},
+      "neutron_avg_cps": {"name": "中子平滑计数率"},
+      "neutron_avg_dose_rate": {"name": "中子平滑剂量率"},
+      "neutron_avg_dose_equivalent_rate": {"name": "中子平滑剂量当量率"},
+      "neutron_raw_cps": {"name": "中子原始计数率"},
+      "neutron_raw_dose_rate": {"name": "中子原始剂量率"},
+      "neutron_raw_dose_equivalent_rate": {"name": "中子原始剂量当量率"},
+      "pin_avg_cps": {"name": "PIN 平滑计数率"},
+      "pin_avg_dose_rate": {"name": "PIN 平滑剂量率"},
+      "pin_avg_dose_equivalent_rate": {"name": "PIN 平滑剂量当量率"},
+      "pin_raw_cps": {"name": "PIN 原始计数率"},
+      "pin_raw_dose_rate": {"name": "PIN 原始剂量率"},
+      "pin_raw_dose_equivalent_rate": {"name": "PIN 原始剂量当量率"}
+    },
+    "binary_sensor": {
+      "auto_upload_enabled": {"name": "自动上传已启用"},
+      "gamma_spectrum_accumulating": {"name": "Gamma 谱图累计中"},
+      "neutron_spectrum_accumulating": {"name": "中子谱图累计中"},
+      "pin_spectrum_accumulating": {"name": "PIN 谱图累计中"}
+    }
+  }
+}

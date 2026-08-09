@@ -1,0 +1,66 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add KC761x radiation meter",
+        "description": "Connect to the KC761x TCP service on your local network.",
+        "data": {"host": "Host or IP address", "port": "TCP port"}
+      },
+      "reconfigure": {
+        "title": "Reconfigure KC761x connection",
+        "description": "The device ID returned by the new endpoint must match this entry.",
+        "data": {"host": "Host or IP address", "port": "TCP port"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect or decode the KC761x device.",
+      "device_mismatch": "The new endpoint returned a different device ID."
+    },
+    "abort": {
+      "already_configured": "This KC761x device is already configured.",
+      "unknown": "The configuration entry was not found."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KC761x polling options",
+        "data": {
+          "status_interval": "Status polling interval (seconds)",
+          "info_interval": "Device information polling interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_percentage": {"name": "Battery"},
+      "air_pressure": {"name": "Air pressure"},
+      "device_temperature": {"name": "Device temperature"},
+      "gamma_avg_cps": {"name": "Gamma average count rate"},
+      "gamma_avg_dose_rate": {"name": "Gamma average dose rate"},
+      "gamma_avg_dose_equivalent_rate": {"name": "Gamma average dose equivalent rate"},
+      "gamma_raw_cps": {"name": "Gamma raw count rate"},
+      "gamma_raw_dose_rate": {"name": "Gamma raw dose rate"},
+      "gamma_raw_dose_equivalent_rate": {"name": "Gamma raw dose equivalent rate"},
+      "neutron_avg_cps": {"name": "Neutron average count rate"},
+      "neutron_avg_dose_rate": {"name": "Neutron average dose rate"},
+      "neutron_avg_dose_equivalent_rate": {"name": "Neutron average dose equivalent rate"},
+      "neutron_raw_cps": {"name": "Neutron raw count rate"},
+      "neutron_raw_dose_rate": {"name": "Neutron raw dose rate"},
+      "neutron_raw_dose_equivalent_rate": {"name": "Neutron raw dose equivalent rate"},
+      "pin_avg_cps": {"name": "PIN average count rate"},
+      "pin_avg_dose_rate": {"name": "PIN average dose rate"},
+      "pin_avg_dose_equivalent_rate": {"name": "PIN average dose equivalent rate"},
+      "pin_raw_cps": {"name": "PIN raw count rate"},
+      "pin_raw_dose_rate": {"name": "PIN raw dose rate"},
+      "pin_raw_dose_equivalent_rate": {"name": "PIN raw dose equivalent rate"}
+    },
+    "binary_sensor": {
+      "auto_upload_enabled": {"name": "Automatic upload enabled"},
+      "gamma_spectrum_accumulating": {"name": "Gamma spectrum accumulating"},
+      "neutron_spectrum_accumulating": {"name": "Neutron spectrum accumulating"},
+      "pin_spectrum_accumulating": {"name": "PIN spectrum accumulating"}
+    }
+  }
+}
