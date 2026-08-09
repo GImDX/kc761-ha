@@ -105,14 +105,12 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
-        return KC761OptionsFlow(config_entry)
+        del config_entry
+        return KC761OptionsFlow()
 
 
 class KC761OptionsFlow(config_entries.OptionsFlow):
     """Configure polling only; no transport or control settings."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
