@@ -99,6 +99,8 @@
 - BLE 自动上传对其它连接的影响；
 - Config Entry 如何在 TCP/BLE 间保持同一 DEVICE_ID。
 
+2026-08-10 的第一次测试机实测完成了两轮有界扫描，但没有发现可唯一识别的 KC761 广播，因此未建立 GATT 连接，服务 UUID 仍保持未确认。该结果不能作为标准 NUS UUID 的正向证据。
+
 ## D-011 串口与云不实现
 
 状态：Rejected for current scope
