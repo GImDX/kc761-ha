@@ -1,0 +1,184 @@
+# Home Assistant 实体模型
+
+状态：首版候选，受协议实机验证门禁约束
+
+日期：2026-08-10
+
+## 1. 建模原则
+
+- 一台物理 KC761x 对应一个 Home Assistant Device。
+- 只为设备实际安装的通道创建实体；RAD0=Gamma、RAD1=Neutron、RAD2=PIN。
+- 通道已安装但当前关闭并返回 `-1` 时，实体值为 `unknown`，不伪装为 0。
+- 设备/实体唯一标识来自 `DEVICE_ID` 和稳定字段 key，不使用 IP、端口或用户名称。
+- 测量实体只读取 Coordinator 内存快照，属性访问不得触发网络 I/O。
+- 平滑测量默认开启；上一秒原始测量默认关闭，降低 Recorder 压力。
+- 单位不确定的累计量在完成实机校准前默认关闭，且不得声明长期统计。
+- 完整谱图和脉冲数组不作为实体属性。
+
+## 2. Device Registry
+
+| 属性 | 来源 | 处理 |
+| --- | --- | --- |
+| identifiers | `DEVICE_ID` | `(kc761, normalized_device_id)` |
+| name | 型号 + ID 尾段 | 用户可在 HA 重命名 |
+| model | `DEVICE_MODEL` | 映射为 KC761/KC761A/B/KC761C/KC761CN |
+| hw_version | `HW_VER` | 按十进制一位小数格式化 |
+| sw_version | `FW_VER` | 按十进制两位格式化 |
+| serial_number | `DEVICE_ID` | 仅在 HA 支持且诊断脱敏规则明确时使用 |
+| manufacturer | 待确认 | 不把印行方“科新社”直接当制造商 |
+
+协处理器版本和传感器型号不是 Device Registry 的标准版本字段，保留为诊断实体或诊断输出。
+
+## 3. 设备级只读传感器
+
+| 稳定 key | 显示名称 | 来源 | 单位/设备类 | state class | 默认 | 分类 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `battery_percentage` | 电池电量 | `BAT_PERCENT` | `%` / battery | measurement | 开启 | 普通 |
+| `air_pressure` | 气压 | `AIR_PRESSURE3BA` | `hPa` / atmospheric pressure | measurement | 开启 | 普通 |
+| `device_temperature` | 设备温度 | `DEVICE_TEMP / 10` | `°C` / temperature | measurement | 开启 | 普通 |
+| `device_time` | 设备时间 | `DEVICE_TIME` | timestamp | 无 | 关闭 | diagnostic |
+| `clock_offset` | 设备时钟偏差 | 设备时间减 HA 时间 | `s` / duration | measurement | 关闭 | diagnostic |
+| `coprocessor_firmware` | 协处理器固件 | `CO_FW_VER` | 文本 | 无 | 关闭 | diagnostic |
+| `auto_upload_enabled` | 自动上传 | `AUTO_UPLOAD_STATUS` | binary sensor | 无 | 关闭 | diagnostic |
+
+`BAT_PERCENT` 只有在 0-100 范围内才有效；其它值记为未知并增加协议数据错误计数。设备时钟偏差只用于诊断，不触发自动校时。
+
+## 4. 每通道测量实体
+
+对每个已安装通道，以 `gamma`、`neutron`、`pin` 替换下表的 `<channel>`。
+
+| 稳定 key | 显示名称 | 来源 | 原生单位 | state class | 默认 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `<channel>_avg_cps` | 平滑计数率 | `RADn_AVG_CPS` | `cps` | measurement | 开启 | 官方主界面核心指标 |
+| `<channel>_avg_dose_rate` | 平滑剂量率 | `RADn_AVG_DOSE_RATE` | `mGy/h` | measurement | 开启 | 可在展示层转换为更易读单位，但原生值固定 |
+| `<channel>_avg_dose_equivalent_rate` | 平滑剂量当量率 | `RADn_AVG_DOSE_EQ_RATE` | `mSv/h` | measurement | 开启 | UI 可转换为 `µSv/h`，不能改变存储语义 |
+| `<channel>_raw_cps` | 上一秒计数率 | `RADn_RAW_CPS` | `cps` | measurement | 关闭 | 高频、噪声更大 |
+| `<channel>_raw_dose_rate` | 上一秒剂量率 | `RADn_RAW_DOSE_RATE` | `mGy/h` | measurement | 关闭 | FP16 待确认 |
+| `<channel>_raw_dose_equivalent_rate` | 上一秒剂量当量率 | `RADn_RAW_DOSE_EQ_RATE` | `mSv/h` | measurement | 关闭 | FP16 待确认 |
+
+Home Assistant 当前没有针对核辐射剂量率的专用 device class，因此这些量使用明确的原生单位、`measurement` state class 和放射性图标，不错误套用功率、频率或其它不相干设备类。
+
+单位显示策略：
+
+- 解码层始终按手册原生单位输出，不在不同实体间混用 `m` 和 `µ`。
+- 如果 HA 的单位转换系统不支持辐射单位，实体固定发布一种单位；翻译只改变名称，不改变单位。
+- 在确认 FP16 和缩放前，剂量相关实体不能进入稳定版本。
+
+## 5. 每通道累计与诊断实体
+
+| 稳定 key | 显示名称 | 来源 | 候选语义 | 默认 | 发布门禁 |
+| --- | --- | --- | --- | --- | --- |
+| `<channel>_spectrum_runtime` | 谱图累计时间 | `RADn_MC_RUNTIME` | duration `s` | 关闭 | 端序确认 |
+| `<channel>_dose_runtime` | 剂量累计时间 | `RADn_SUM_DOSE_TIME` | duration `s` | 关闭 | 端序确认 |
+| `<channel>_cumulative_dose` | 累计剂量 | `RADn_SUM_DOSE` | total increasing | 关闭 | 单位和缩放确认 |
+| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `RADn_SUM_DOSE_EQ` | total increasing | 关闭 | 单位和缩放确认 |
+| `<channel>_spectrum_accumulating` | 谱图正在累计 | `RAD_SENSOR_STATUS` 位 | binary sensor | 关闭 | 位定义实机确认 |
+| `<channel>_sensor_type` | 传感器型号 | `RADn_SENSOR_TYPE` | enum/text | 关闭 | 型号映射确认 |
+
+累计剂量可以被命令 `0x66` 清零，因此若实机确认其只会递增或归零，可使用 `TOTAL_INCREASING`。在单位矛盾解决前不设置 state class，避免在长期统计中固化错误倍率。
+
+## 6. 可选控制实体的后续设计
+
+首版不创建任何控制实体。只有 Options Flow 显式启用设备控制、测试环境完成 ACK 与读回验证后，才评估以下平台。
+
+### 6.1 Select
+
+| key | 候选项 | 线协议字段 | 风险 |
+| --- | --- | --- | --- |
+| `active_sensor` | Gamma / Neutron / PIN | `RAD_SENSOR_STATUS` bit 0-1 | PIN 会关闭其它通道；中子与伽玛可能绑定 |
+| `global_volume` | 静音 / 小 / 大 | `VOLUME_STATUS` bit 0-1 | 告警音不受此设置完全控制 |
+| `backlight_brightness` | 微亮 / 最亮 | `LED_SCREEN_STATUS` bit 2 | 部分固件不支持 |
+
+### 6.2 Switch
+
+| key | 字段 |
+| --- | --- |
+| `key_tone` | `VOLUME_STATUS` bit 3 |
+| `count_tone` | `VOLUME_STATUS` bit 2 |
+| `dense_count_effect` | `VOLUME_STATUS` bit 4 |
+| `count_flash` | `LED_SCREEN_STATUS` bit 0 |
+| `backlight` | `LED_SCREEN_STATUS` bit 1 |
+
+`AUTO_UPLOAD_STATUS` 不规划为普通控制开关。它直接影响协议数据流，也可能影响同时连接的官方上位机，应该由传输策略统一管理；首版只观察不修改。
+
+### 6.3 Button
+
+`sync_device_time` 可作为后续高级按钮，但必须：
+
+- 使用 HA 当前 UTC 时间生成 epoch；
+- 明确设备本地显示的时区语义；
+- 校验 ACK；
+- 立即读回设备时间；
+- 不自动周期执行。
+
+清除谱图、剂量曲线和累计剂量不建模为普通按钮。按钮单击缺少足够的强确认，不适合破坏性操作。
+
+## 7. 高风险动作
+
+以下能力即使未来实现，也只能作为显式 action/service，并要求目标设备 ID 确认、字段白名单、范围校验、ACK 和读回：
+
+- 写入校准数据；
+- 切换工厂/自定义能量刻度；
+- 写入能量多项式；
+- 修改触发阈值、中子窗口、剂量缩放；
+- 清除某通道谱图；
+- 清除剂量曲线；
+- 清除累计剂量。
+
+首个稳定版本不注册这些 action，避免“隐藏但可调用”的未验证写入口。
+
+## 8. 谱图呈现
+
+### 8.1 不采用的方案
+
+- 不把完整数组放入 sensor attributes；
+- 不为每个道址创建一个实体；
+- 不每秒产生带完整谱图的 event；
+- 不默认把谱图写入本地文件系统；
+- 不让 Recorder 保存原始脉冲流。
+
+### 8.2 后续候选
+
+在谱图重组完成条件、能量刻度和数据量经过实机验证后，可分阶段评估：
+
+1. `capture_spectrum` 按需 action，以响应数据返回当前谱图；
+2. 小型派生实体，例如峰值道址、峰值能量、谱图总计数和谱图累计时间；
+3. 单独的 Lovelace 卡片，通过受限 API 请求数据，不借用状态机持久化大数组。
+
+任何派生实体都必须定义算法版本、输入谱图来源、是否应用 `MC_RATIO`、能量校准段选择和空/缺包处理。
+
+## 9. 实体唯一 ID 与迁移
+
+实体 unique ID 格式固定为：
+
+```text
+<normalized_device_id>_<stable_key>
+```
+
+`stable_key` 使用英文协议语义，不包含翻译、用户名称、单位或 IP。例如：
+
+- `7601-0000-000001_gamma_avg_cps`
+- `7601-0000-000001_device_temperature`
+
+一旦发布不得因中文名称调整而改变。若后续修正单位，只迁移单位和数值，不重建 unique ID。
+
+## 10. 数值质量规则
+
+- `-1` 仅按手册在关闭通道字段中转换为 `None`；不能把所有负数都丢弃，因为温度可为负。
+- 电池只接受 0-100。
+- `MC_RATIO` 必须大于等于 1。
+- 浮点值拒绝 NaN 和无穷；合理量程告警阈值需由实机数据确定，不凭空截断高辐射值。
+- 时间戳必须能转换为合理日期；异常值不触发自动校时。
+- 版本号按整数位拆分，避免 `1.80` 被展示成 `1.8` 而失去固件辨识度。
+- 未安装传感器不创建通道实体；未知传感器索引保留诊断原值并采用通用通道名称。
+
+## 11. 默认启用摘要
+
+首版在对应通道存在且协议解码已完成 L 级验证后，默认只启用：
+
+- 电池、气压、设备温度；
+- 各已安装通道的平滑计数率；
+- 各已安装通道的平滑剂量率；
+- 各已安装通道的平滑剂量当量率。
+
+原始读数、时钟、固件附加信息、累计时间、累计剂量、谱图累积状态和传感器型号默认关闭或仅进入 Device/Diagnostics。这样保留核心测量体验，同时控制实体数量和历史数据体积。

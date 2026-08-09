@@ -1,0 +1,38 @@
+# Local development environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local scratch and runtime artifacts
+tmp/
+logs/
+*.log
+.env
+.env.*
+
+# Local vendor reference material; track reviewed hashes and findings in Markdown
+/docs/*.pdf
+/docs/KCSDI_*.png
+
+# Never commit deployment credentials or Home Assistant secrets
+ssh_password.txt
+secrets.yaml
+*.pem
+*.key
