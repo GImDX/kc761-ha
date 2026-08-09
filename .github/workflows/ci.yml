@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install test dependencies
         run: python -m pip install -r requirements_test.txt
       - name: Ruff
@@ -27,7 +27,7 @@ jobs:
       - name: Compile
         run: python -m compileall -q custom_components tests
       - name: Protocol and integration tests
-        run: python -m pytest -q --cov=custom_components/kc761/protocol --cov-report=term-missing --cov-fail-under=95
+        run: python -m pytest -q --cov=custom_components/kc761 --cov-branch --cov-report=term-missing --cov-fail-under=95
       - name: Hassfest
         uses: home-assistant/actions/hassfest@master
       - name: HACS validation

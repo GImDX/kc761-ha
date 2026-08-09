@@ -6,6 +6,7 @@ import asyncio
 import math
 import struct
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.kc761.const import CMD_GET_STA, FLAG_STATUS_QUERY
 from custom_components.kc761.protocol.client import KC761Client
@@ -19,6 +20,7 @@ from custom_components.kc761.protocol.codec import (
     encode_read_request,
     model_name,
     sensor_name,
+    DecodedFrame,
 )
 from custom_components.kc761.protocol.framing import FrameParser, frame_bytes
 from custom_components.kc761.protocol.models import (
@@ -69,12 +71,23 @@ class FramingTests(unittest.TestCase):
         self.assertGreater(parser.errors, 0)
 
     def test_fixed_and_stream_invalid_lengths_resynchronize(self) -> None:
+        short_parser = FrameParser()
+        short_parser.feed(b"\x01\xfe\x02\x00")
+        self.assertGreater(short_parser.errors, 0)
+
         parser = FrameParser()
         self.assertEqual(parser.feed(frame_bytes(1, FLAG_STATUS_QUERY, b"x")), [])
         self.assertEqual(parser.feed(frame_bytes(2, 0xA4, b"x")), [])
+
+        valid_parser = FrameParser()
+        valid_stream = valid_parser.feed(frame_bytes(3, 0xA4, b"\x00\x01"))
+        self.assertEqual(valid_stream[0].sync, 3)
+        self.assertTrue(valid_stream[0].known)
         parser.feed(b"\x01\x02")
         parser.flush()
         self.assertGreaterEqual(parser.errors, 3)
+        parser.feed(b"")
+        parser._resync("empty")
 
     def test_frame_builder_rejects_out_of_range_values(self) -> None:
         with self.assertRaises(ValueError):
@@ -155,6 +168,8 @@ class CodecTests(unittest.TestCase):
         bad_info = RawFrame(0, 0xA5, 99, b"\x00" * 95, b"\x00" * 99)
         with self.assertRaises(DecodeError):
             decode_device_info(bad_info)
+        with self.assertRaises(DecodeError):
+            decode_device_info(RawFrame(0, 0xA2, 100, b"\x00" * 96, b"\x00" * 100))
 
     def test_device_id_and_public_helpers(self) -> None:
         empty = bytearray(build_device_info_frame(1)[4:])
@@ -165,6 +180,10 @@ class CodecTests(unittest.TestCase):
         non_ascii[9] = 0xFF
         with self.assertRaises(DecodeError):
             decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(non_ascii)))[0])
+        control = bytearray(build_device_info_frame(1)[4:])
+        control[9] = 1
+        with self.assertRaises(DecodeError):
+            decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(control)))[0])
         info = decode_device_info(FrameParser().feed(build_device_info_frame(1))[0])
         status = decode_status(FrameParser().feed(build_status_frame(1))[0])
         self.assertEqual(format_fw_version(180), "V1.80")
@@ -177,6 +196,11 @@ class CodecTests(unittest.TestCase):
         self.assertIsNone(utc_from_epoch(0))
         self.assertIsNone(utc_from_epoch(2**63))
 
+        with self.assertRaises(ValueError):
+            from custom_components.kc761.protocol.codec import build_device_info_frame as build_info
+
+            build_info(1, device_id="x" * 17)
+
     def test_transport_without_connection_errors(self) -> None:
         async def run() -> None:
             transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, read_timeout=0.01)
@@ -188,6 +212,33 @@ class CodecTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_transport_error_paths(self) -> None:
+        async def run() -> None:
+            transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, read_timeout=0.01)
+            with self.assertRaises(TransportError):
+                await transport.async_connect()
+
+            transport.reader = MagicMock()
+            transport.reader.read = AsyncMock(side_effect=OSError("read"))
+            with self.assertRaises(TransportError):
+                await transport.async_read()
+
+            transport.writer = MagicMock()
+            transport.writer.is_closing.return_value = False
+            transport.writer.drain = AsyncMock(side_effect=OSError("write"))
+            with self.assertRaises(TransportError):
+                await transport.async_write(b"x")
+
+            transport.writer.wait_closed = AsyncMock(side_effect=OSError("close"))
+            await transport.async_close()
+
+            connected = TcpTransport("host", 1)
+            connected.writer = MagicMock()
+            connected.writer.is_closing.return_value = False
+            await connected.async_connect()
+
+        asyncio.run(run())
+
 
 class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_rejects_non_read_commands(self) -> None:
@@ -196,6 +247,35 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
             await client.async_request(0x66)
         with self.assertRaises(ValueError):
             await client.async_request(0x52)
+
+    async def test_client_pending_close_wrong_types_and_routes(self) -> None:
+        client = KC761Client("127.0.0.1", 1)
+        loop = asyncio.get_running_loop()
+        pending = loop.create_future()
+        client._pending[1] = (frozenset({0xA2}), pending)
+        await client._route_frame(RawFrame(1, 0xA2, 81, b"bad", b"bad"))
+        self.assertEqual(client.protocol_errors, 1)
+        pending.set_result(None)
+        await client._route_frame(RawFrame(1, 0xFE, 4, b"", b"\x01\xfe\x04\x00", known=False))
+        client.on_push = lambda decoded: None
+        await client._route_frame(RawFrame(2, 0xFE, 4, b"", b"\x02\xfe\x04\x00", known=False))
+        client._pending.clear()
+        client._pending[3] = (frozenset({0xA2}), loop.create_future())
+        await client._route_frame(RawFrame(3, 0xA2, 81, b"bad", b"bad"))
+        await client.async_close()
+
+        bad_status = KC761Client("127.0.0.1", 1)
+        bad_status.async_request = AsyncMock(
+            return_value=DecodedFrame(RawFrame(0, 0xA2, 81, b"", b""), "status", None)
+        )
+        with self.assertRaises(TransactionError):
+            await bad_status.async_get_status()
+        bad_info = KC761Client("127.0.0.1", 1)
+        bad_info.async_request = AsyncMock(
+            return_value=DecodedFrame(RawFrame(0, 0xA5, 100, b"", b""), "device_info", None)
+        )
+        with self.assertRaises(TransactionError):
+            await bad_info.async_get_device_info()
 
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:

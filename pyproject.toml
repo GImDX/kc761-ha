@@ -19,3 +19,10 @@ select = ["E", "F", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
+source = ["custom_components/kc761"]
+
+[tool.coverage.report]
+fail_under = 95
