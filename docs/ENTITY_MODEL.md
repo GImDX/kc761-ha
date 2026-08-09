@@ -157,8 +157,8 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 
 `stable_key` 使用英文协议语义，不包含翻译、用户名称、单位或 IP。例如：
 
-- `7601-0000-000001_gamma_avg_cps`
-- `7601-0000-000001_device_temperature`
+- `<normalized_device_id>_gamma_avg_cps`
+- `<normalized_device_id>_device_temperature`
 
 一旦发布不得因中文名称调整而改变。若后续修正单位，只迁移单位和数值，不重建 unique ID。
 
