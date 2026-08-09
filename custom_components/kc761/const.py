@@ -1,0 +1,86 @@
+"""Constants for the KC761 integration."""
+
+from __future__ import annotations
+
+try:
+    from homeassistant.const import Platform
+except ImportError:  # pragma: no cover - allows protocol-only offline tests
+    class Platform:
+        """Minimal fallback used when Home Assistant is not installed."""
+
+        SENSOR = "sensor"
+        BINARY_SENSOR = "binary_sensor"
+
+DOMAIN = "kc761"
+NAME = "KC761x Radiation Meter"
+VERSION = "0.1.0-rc.1"
+DEFAULT_PORT = 7601
+DEFAULT_STATUS_INTERVAL = 5
+DEFAULT_INFO_INTERVAL = 60
+MIN_STATUS_INTERVAL = 5
+MAX_STATUS_INTERVAL = 60
+MIN_INFO_INTERVAL = 60
+MAX_INFO_INTERVAL = 3600
+CONNECT_TIMEOUT = 5.0
+READ_TIMEOUT = 8.0
+MAX_FRAME_LENGTH = 8192
+MAX_BUFFER_LENGTH = 16384
+
+CMD_GET_MC_DATA = 0x52
+CMD_GET_STA = 0x53
+CMD_GET_DEVICE_INFO = 0x54
+CMD_GET_CAL_DATA = 0x55
+CMD_SET_STA = 0x62
+CMD_SET_DEVICE_TIME = 0x63
+CMD_SET_REVISED_DATA = 0x64
+CMD_SET_CLEAR = 0x66
+
+FLAG_MC_DATA_QUERY = 0xA0
+FLAG_MC_DATA_UPLOAD = 0xA1
+FLAG_STATUS_QUERY = 0xA2
+FLAG_STATUS_UPLOAD = 0xA3
+FLAG_STREAM_DATA = 0xA4
+FLAG_DEVICE_INFO = 0xA5
+FLAG_CAL_DATA = 0xA6
+FLAG_ACK = 0xAA
+
+KNOWN_FLAGS = {
+    FLAG_MC_DATA_QUERY,
+    FLAG_MC_DATA_UPLOAD,
+    FLAG_STATUS_QUERY,
+    FLAG_STATUS_UPLOAD,
+    FLAG_STREAM_DATA,
+    FLAG_DEVICE_INFO,
+    FLAG_CAL_DATA,
+    FLAG_ACK,
+}
+
+READ_COMMANDS = {CMD_GET_STA, CMD_GET_DEVICE_INFO}
+FORBIDDEN_WRITE_COMMANDS = {
+    CMD_SET_STA,
+    CMD_SET_DEVICE_TIME,
+    CMD_SET_REVISED_DATA,
+    CMD_SET_CLEAR,
+}
+
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+
+MODEL_NAMES = {
+    10: "KC761 prototype",
+    11: "KC761",
+    12: "KC761A/B",
+    13: "KC761C",
+    14: "KC761CN",
+}
+
+SENSOR_NAMES = {
+    0x00: "None",
+    0x01: "KC7601.21 CsI",
+    0x02: "KC7601.24 CsI",
+    0x03: "KC7601.25 CsI",
+    0x04: "KC7601.26 CsI",
+    0x05: "PIN",
+    0x06: "PIN",
+    0x07: "PIN",
+    0x08: "KC7601.31 6Li",
+}
