@@ -15,9 +15,9 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
     ConfigEntry = Any  # type: ignore[misc,assignment]
     HomeAssistant = Any  # type: ignore[misc,assignment]
     ConfigEntryNotReady = RuntimeError
-    CONFIG_SCHEMA: Any = None
-else:
-    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+    cv = None  # type: ignore[assignment]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
