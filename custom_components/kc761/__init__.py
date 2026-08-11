@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from .const import DOMAIN, PLATFORMS
+
 try:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.helpers import config_validation as cv
 except ImportError:  # pragma: no cover - permits protocol-only offline checks
     ConfigEntry = Any  # type: ignore[misc,assignment]
     HomeAssistant = Any  # type: ignore[misc,assignment]
     ConfigEntryNotReady = RuntimeError
-
-from .const import DOMAIN, PLATFORMS
+    CONFIG_SCHEMA: Any = None
+else:
+    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

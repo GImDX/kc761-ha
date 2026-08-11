@@ -22,7 +22,7 @@ class IntegrationStaticTests(unittest.TestCase):
             (ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8")
         )
         self.assertEqual(manifest["version"], "0.1.0-rc.1")
-        self.assertEqual(manifest["homeassistant"], "2026.7.0")
+        self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
         self.assertEqual(manifest["iot_class"], "local_polling")
         hacs = json.loads((ROOT / "hacs.json").read_text(encoding="utf-8"))

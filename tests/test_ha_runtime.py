@@ -18,6 +18,7 @@ pytest.importorskip("homeassistant")
 
 from homeassistant.exceptions import ConfigEntryNotReady  # noqa: E402
 from custom_components.kc761 import (  # noqa: E402
+    CONFIG_SCHEMA,
     async_reload_entry,
     async_setup,
     async_setup_entry,
@@ -127,6 +128,7 @@ class FakeClient:
 
 def test_entry_setup_unload_reload_and_failure() -> None:
     hass = make_hass()
+    assert callable(CONFIG_SCHEMA)
     assert run(async_setup(hass, {})) is True
     assert hass.data[DOMAIN] == {}
     entry = make_entry()
