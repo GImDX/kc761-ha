@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前分支实现 `0.1.0-rc.1` 只读候选：包含协议候选实现、异步 TCP 模拟器、Home Assistant 生命周期测试和 HACS 校验配置。固定 Home Assistant 2026.7.4 镜像的全包 branch coverage 与部署回滚证据已记录在 [RC 验证记录](docs/RC_TEST_RESULTS.md)；真实 KC761 协议字段仍未完成 L 级实机确认，不能据此宣称硬件兼容。
+当前分支实现 `0.1.0-rc.1` 只读候选：包含协议候选实现、异步 TCP 模拟器、Home Assistant 生命周期测试和 HACS 校验配置。固定 Home Assistant 2026.7.4 镜像的全包 branch coverage 与部署回滚证据、以及 GitHub runner 上通过的 Hassfest/HACS 官方验证，均已记录在 [RC 验证记录](docs/RC_TEST_RESULTS.md)；真实 KC761 协议字段仍未完成 L 级实机确认，不能据此宣称硬件兼容。
 
 ## 已确定的首版范围
 
@@ -71,6 +71,7 @@ tests/               # 纯协议测试与 asyncio 模拟器
 
 ## RC 验证边界
 
+- GitHub Actions 已通过 Ruff、JSON、编译、32 项 pytest、98.81% branch coverage、Hassfest 和 HACS 9/9 checks；这是软件 RC 证据，不是实机协议证据。
 - 模拟器允许验证 TCP 分片、粘包、重连、自动上传交错和畸形帧恢复；模拟结果不能替代实机 L 级证据。
 - 默认不创建完整谱图实体、不注册 service/action，也不会发送 `0x62`、`0x63`、`0x64`、`0x66`。
 - 端序、FP16、累计单位、TCP 端口、固件兼容性和谱图完成条件在获得真实抓包前均保持 `hardware-unverified`。

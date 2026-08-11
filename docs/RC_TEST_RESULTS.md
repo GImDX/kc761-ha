@@ -1,7 +1,9 @@
 # KC761 v0.1.0-rc.1 验证记录
 
-日期：2026-08-10  
-分支：`feat/kc761-v0.1.0-rc1`  
+日期：2026-08-11
+
+分支：`ci/kc761-v0.1.0-rc1-validation`
+
 架构基线：`a56c01a8daa0cfc31fc122caa90ea9d5c2a47c64`
 
 本文记录 RC 候选的可复现实验和外部验收证据。协议端序、FP16、累计量单位、设备兼容性及 BLE 服务 UUID 仍按 `hardware-unverified` 处理；模拟器和 fixture 证据不得冒充真实 KC761 实机证据。
@@ -20,7 +22,21 @@
 
 开发机 `.venv` 的 Ruff 检查通过；开发机 pytest 为 28 passed、1 skipped，唯一 skip 原因是本机未安装 Home Assistant。开发机不能从当前索引安装 `homeassistant==2026.7.4`，因此 HA 运行时结果以固定镜像记录为准。
 
-官方 Hassfest/HACS 镜像已由 crane v0.21.9 完成 digest 校验并加载，但容器仍未实际执行：Hassfest digest 为 `sha256:8cd7bdb8f82430c2c13703290b1fc38dcc99957dd76ad3f230035ecee70b672d`，HACS digest 为 `sha256:41f6310585d9fb72c7a0e183cce0594355715bc24112b62bc4279b83412edccb`；两者均仅提供 amd64，测试宿主为 ARM64，直接运行得到 `exec /bin/sh: exec format error`。未安装或注册 binfmt、未使用 privileged；项目内 QEMU 7.2.18 builtin probe 虽 exit 0，子进程仍需要 binfmt。未修改 Docker daemon 或重启宿主。因此本仓库只能确认镜像身份、工作流配置和静态结构检查，不能宣称官方 Hassfest/HACS validation 已通过。
+测试宿主上的官方 Hassfest/HACS 镜像离线探测仍受架构限制：Hassfest digest 为 `sha256:8cd7bdb8f82430c2c13703290b1fc38dcc99957dd76ad3f230035ecee70b672d`，HACS digest 为 `sha256:41f6310585d9fb72c7a0e183cce0594355715bc24112b62bc4279b83412edccb`；两者均仅提供 amd64，ARM64 宿主直接运行得到 `exec /bin/sh: exec format error`。未安装或注册 binfmt、未使用 privileged，未修改 Docker daemon 或重启宿主。该限制只影响测试宿主上的离线容器复跑，不再构成官方验证结论的阻塞。
+
+## 官方 GitHub 验证
+
+公开仓库 `GImDX/kc761-ha` 的 Draft PR #1 使用验证分支运行 `.github/workflows/ci.yml`。GitHub Actions run `31448849047` attempt 2 在提交 `132539d854a666ff936eb1d7c54c9b2c206769c4` 上完成，结论为 `success`；仓库默认分支 `main` 的许可证基线为 `30e8f52930acba4be9541e24dad61b41e1145e55`，GitHub 识别 SPDX 为 `MIT`。
+
+- Ruff、JSON validation、Python compileall：通过
+- 完整 pytest：32 passed，1 warning，3.39 秒
+- branch coverage：98.81%（843 statements，missing 4；162 branches，missing 8），95% 门禁通过
+- 唯一 pytest warning：HA 依赖自身对 aiohttp `web.Application` 继承的 `DeprecationWarning`，不是集成代码告警
+- Hassfest：1 个 integration，`Invalid integrations: 0`
+- HACS validation：topics、issues、archived、description、license、information、brands、integration manifest、hacs.json 共 9/9 通过
+- workflow 结论：`success`；另有 GitHub runner 对 `actions/checkout@v4`、`actions/setup-python@v5` 的 Node.js 20 弃用提示，不影响各步骤结论
+
+验证链接：<https://github.com/GImDX/kc761-ha/actions/runs/31448849047/attempts/2>
 
 复验命令：
 
@@ -50,7 +66,7 @@ coverage report --fail-under=95
 
 ## 当前结论与剩余门禁
 
-- HACS 根配置 `hacs.json`、全包 branch coverage 门禁、静态检查、固定镜像 HA 生命周期和只读安全门禁已固化；官方 Hassfest/HACS 容器验证仍未完成。
+- HACS 根配置 `hacs.json`、全包 branch coverage 门禁、静态检查、固定镜像 HA 生命周期、只读安全门禁、官方 Hassfest 与 HACS validation 均已通过。
 - 首版仍只读；不发送校准、清除统计、设备时间、状态设置或其它写命令。
 - 真实 KC761 L 级证据尚未完成：端序、FP16、累计单位、固件兼容、BAG_LEN、ACK 回显、谱图完成条件、默认端口和 BLE UUID 均不得写成已确认事实。
 - 实机抓包、测试环境长稳和发布前回滚证据完成后，才能另行提升兼容性声明或开放实验性功能。
