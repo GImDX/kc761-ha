@@ -27,6 +27,8 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertEqual(manifest["iot_class"], "local_polling")
         hacs = json.loads((ROOT / "hacs.json").read_text(encoding="utf-8"))
         self.assertEqual(hacs, {"name": "KC761x", "homeassistant": "2026.7.0"})
+        brand_dir = ROOT / "custom_components" / "kc761" / "brand"
+        self.assertTrue((brand_dir / "icon.png").is_file())
 
     def test_only_two_read_commands_are_client_api(self) -> None:
         self.assertEqual({CMD_GET_STA, CMD_GET_DEVICE_INFO}, {0x53, 0x54})
