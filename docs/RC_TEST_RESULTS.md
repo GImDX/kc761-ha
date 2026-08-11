@@ -20,7 +20,7 @@
 
 开发机 `.venv` 的 Ruff 检查通过；开发机 pytest 为 28 passed、1 skipped，唯一 skip 原因是本机未安装 Home Assistant。开发机不能从当前索引安装 `homeassistant==2026.7.4`，因此 HA 运行时结果以固定镜像记录为准。
 
-官方 Hassfest/HACS 容器没有在本次隔离运行中执行。工作流使用的官方 Action 分别对应 `ghcr.io/home-assistant/hassfest` 和 `ghcr.io/hacs/action:main`；两次 `docker pull` 都因 Docker daemon 的既有不可用 proxy connection refused 而失败。未修改 daemon 配置，也未重启宿主 Docker。因此本仓库只能确认工作流配置和静态结构检查，不能宣称官方 Hassfest/HACS validation 已通过。
+官方 Hassfest/HACS 镜像已由 crane v0.21.9 完成 digest 校验并加载，但容器仍未实际执行：Hassfest digest 为 `sha256:8cd7bdb8f82430c2c13703290b1fc38dcc99957dd76ad3f230035ecee70b672d`，HACS digest 为 `sha256:41f6310585d9fb72c7a0e183cce0594355715bc24112b62bc4279b83412edccb`；两者均仅提供 amd64，测试宿主为 ARM64，直接运行得到 `exec /bin/sh: exec format error`。未安装或注册 binfmt、未使用 privileged；项目内 QEMU 7.2.18 builtin probe 虽 exit 0，子进程仍需要 binfmt。未修改 Docker daemon 或重启宿主。因此本仓库只能确认镜像身份、工作流配置和静态结构检查，不能宣称官方 Hassfest/HACS validation 已通过。
 
 复验命令：
 

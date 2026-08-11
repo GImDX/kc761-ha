@@ -124,7 +124,7 @@
 - release tag 与 manifest version 一致；
 - 发布说明列出兼容型号、固件证据、已知限制和回滚方法。
 
-当前 RC 尚未满足 M5：官方 Hassfest 与 HACS 容器未实际执行，真实设备和发布门禁证据仍缺失。
+当前 RC 尚未满足 M5：官方 Hassfest/HACS 镜像虽已校验并加载，但因 amd64 镜像在 ARM64 宿主上的 `exec format error`、未安装或注册 binfmt 且未使用 privileged 而未实际执行；真实设备和发布门禁证据仍缺失。
 
 ### M6 - 正式环境部署
 
