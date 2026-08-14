@@ -72,27 +72,28 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         host = str(user_input[CONF_HOST]).strip()
         port = int(user_input[CONF_PORT])
         client = KC761Client(host, port)
+        info = None
+        error: str | None = None
         try:
             await client.async_connect()
             info = await client.async_get_device_info()
-            expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
-            if info.device_id != expected_device_id:
-                raise ValueError("DEVICE_ID mismatch")
-        except ValueError:
+        except Exception:
+            error = "cannot_connect"
+        finally:
             await client.async_close()
+        if error is not None or info is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=_connection_schema(user_input),
+                errors={"base": error or "cannot_connect"},
+            )
+        expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
+        if info.device_id != expected_device_id:
             return self.async_show_form(
                 step_id="reconfigure",
                 data_schema=_connection_schema(user_input),
                 errors={"base": "device_mismatch"},
             )
-        except Exception:
-            await client.async_close()
-            return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=_connection_schema(user_input),
-                errors={"base": "cannot_connect"},
-            )
-        await client.async_close()
         return self.async_update_reload_and_abort(
             entry,
             data_updates={CONF_HOST: host, CONF_PORT: port},

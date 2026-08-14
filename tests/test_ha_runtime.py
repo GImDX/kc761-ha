@@ -163,6 +163,47 @@ def test_entry_setup_unload_reload_and_failure() -> None:
             run(async_setup_entry(hass, make_entry()))
     broken.async_shutdown.assert_awaited_once()
 
+    cancelled = MagicMock()
+    cancelled.async_config_entry_first_refresh = AsyncMock(side_effect=asyncio.CancelledError)
+    cancelled.async_shutdown = AsyncMock()
+    with patch(
+        "custom_components.kc761.coordinator.KC761Coordinator",
+        return_value=cancelled,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            run(async_setup_entry(make_hass(), make_entry()))
+    cancelled.async_shutdown.assert_awaited_once()
+
+    forward_hass = make_hass()
+    forward_hass.config_entries.async_forward_entry_setups = AsyncMock(side_effect=RuntimeError("platform failed"))
+    forward_entry = make_entry()
+    forward_failure = MagicMock()
+    forward_failure.async_config_entry_first_refresh = AsyncMock()
+    forward_failure.async_shutdown = AsyncMock()
+    with patch(
+        "custom_components.kc761.coordinator.KC761Coordinator",
+        return_value=forward_failure,
+    ):
+        with pytest.raises(RuntimeError, match="platform failed"):
+            run(async_setup_entry(forward_hass, forward_entry))
+    forward_failure.async_shutdown.assert_awaited_once()
+    assert forward_entry.entry_id not in forward_hass.data[DOMAIN]
+
+    forward_cancel_hass = make_hass()
+    forward_cancel_hass.config_entries.async_forward_entry_setups = AsyncMock(side_effect=asyncio.CancelledError)
+    forward_cancel_entry = make_entry()
+    forward_cancelled = MagicMock()
+    forward_cancelled.async_config_entry_first_refresh = AsyncMock()
+    forward_cancelled.async_shutdown = AsyncMock()
+    with patch(
+        "custom_components.kc761.coordinator.KC761Coordinator",
+        return_value=forward_cancelled,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            run(async_setup_entry(forward_cancel_hass, forward_cancel_entry))
+    forward_cancelled.async_shutdown.assert_awaited_once()
+    assert forward_cancel_entry.entry_id not in forward_cancel_hass.data[DOMAIN]
+
     migration_entry = make_entry(unique_id="7601_0000_000001")
     migration_entry.version = 1
     hass.config_entries.async_update_entry = MagicMock()
@@ -260,6 +301,19 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         with patch.object(config_flow_module, "KC761Client", FailingReconfigureClient):
             result = await failed_reconfigure.async_step_reconfigure({"host": "offline", "port": 7602})
         assert result["type"] == "form"
+
+        class MalformedReconfigureClient(Client):
+            async def async_get_device_info(self):
+                raise ValueError("malformed device information")
+
+        malformed_reconfigure = config_flow_module.KC761ConfigFlow()
+        malformed_reconfigure.hass = hass
+        malformed_reconfigure.context = {"entry_id": entry.entry_id}
+        malformed_reconfigure.async_show_form = MagicMock(return_value={"type": "form"})
+        with patch.object(config_flow_module, "KC761Client", MalformedReconfigureClient):
+            result = await malformed_reconfigure.async_step_reconfigure({"host": "malformed", "port": 7602})
+        assert result["type"] == "form"
+        assert malformed_reconfigure.async_show_form.call_args.kwargs["errors"] == {"base": "cannot_connect"}
 
         mismatch_info = make_info()
         mismatch_info = mismatch_info.__class__(
