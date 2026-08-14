@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -12,25 +12,30 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfPressure, UnitOfTemperature
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfPressure,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import KC761Coordinator
+from .protocol.codec import CODEC_PROFILE
 from .protocol.models import ChannelReading
 
 
 CHANNEL_NAMES = ("gamma", "neutron", "pin")
-CHANNEL_LABELS = {"gamma": "Gamma", "neutron": "Neutron", "pin": "PIN"}
 
 
 @dataclass(frozen=True, kw_only=True)
 class KC761SensorDescription(SensorEntityDescription):
     value_key: str
     channel_index: int | None = None
-    verified_required: bool = False
+    raw_reading: bool = False
 
 
 DEVICE_DESCRIPTIONS = (
@@ -58,14 +63,37 @@ DEVICE_DESCRIPTIONS = (
         state_class=SensorStateClass.MEASUREMENT,
         value_key="device_temperature_c",
     ),
+    KC761SensorDescription(
+        key="device_time",
+        translation_key="device_time",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_key="device_time",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    KC761SensorDescription(
+        key="clock_offset",
+        translation_key="clock_offset",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_key="clock_offset",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    KC761SensorDescription(
+        key="coprocessor_firmware",
+        translation_key="coprocessor_firmware",
+        value_key="coprocessor_firmware",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
 )
 
 
 def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
     result: list[KC761SensorDescription] = []
     for index, channel in enumerate(CHANNEL_NAMES):
-        label = CHANNEL_LABELS[channel]
-        del label  # labels are supplied by translations via translation_key
         result.extend(
             (
                 KC761SensorDescription(
@@ -75,6 +103,7 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     state_class=SensorStateClass.MEASUREMENT,
                     value_key="avg_cps",
                     channel_index=index,
+                    icon="mdi:radioactive",
                 ),
                 KC761SensorDescription(
                     key=f"{channel}_avg_dose_rate",
@@ -83,9 +112,7 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     state_class=SensorStateClass.MEASUREMENT,
                     value_key="avg_dose_rate",
                     channel_index=index,
-                    entity_category=EntityCategory.DIAGNOSTIC,
-                    entity_registry_enabled_default=False,
-                    verified_required=True,
+                    icon="mdi:radioactive",
                 ),
                 KC761SensorDescription(
                     key=f"{channel}_avg_dose_equivalent_rate",
@@ -94,9 +121,7 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     state_class=SensorStateClass.MEASUREMENT,
                     value_key="avg_dose_equivalent_rate",
                     channel_index=index,
-                    entity_category=EntityCategory.DIAGNOSTIC,
-                    entity_registry_enabled_default=False,
-                    verified_required=True,
+                    icon="mdi:radioactive",
                 ),
                 KC761SensorDescription(
                     key=f"{channel}_raw_cps",
@@ -107,6 +132,8 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     channel_index=index,
                     entity_category=EntityCategory.DIAGNOSTIC,
                     entity_registry_enabled_default=False,
+                    raw_reading=True,
+                    icon="mdi:radioactive",
                 ),
                 KC761SensorDescription(
                     key=f"{channel}_raw_dose_rate",
@@ -117,7 +144,8 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     channel_index=index,
                     entity_category=EntityCategory.DIAGNOSTIC,
                     entity_registry_enabled_default=False,
-                    verified_required=True,
+                    raw_reading=True,
+                    icon="mdi:radioactive",
                 ),
                 KC761SensorDescription(
                     key=f"{channel}_raw_dose_equivalent_rate",
@@ -128,7 +156,8 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     channel_index=index,
                     entity_category=EntityCategory.DIAGNOSTIC,
                     entity_registry_enabled_default=False,
-                    verified_required=True,
+                    raw_reading=True,
+                    icon="mdi:radioactive",
                 ),
             )
         )
@@ -149,14 +178,15 @@ async def async_setup_entry(
     descriptions = list(DEVICE_DESCRIPTIONS)
     for index, sensor_type in enumerate(info.sensor_types):
         if sensor_type:
-            descriptions.extend(
-                description
-                for description in _channel_descriptions()
-                if description.channel_index == index
-            )
-    async_add_entities(
-        [KC761Sensor(coordinator, description) for description in descriptions]
-    )
+            for description in _channel_descriptions():
+                if description.channel_index != index:
+                    continue
+                if description.raw_reading:
+                    if not coordinator.create_raw_entities:
+                        continue
+                    description = replace(description, entity_registry_enabled_default=True)
+                descriptions.append(description)
+    async_add_entities([KC761Sensor(coordinator, description) for description in descriptions])
 
 
 class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
@@ -165,9 +195,7 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
     entity_description: KC761SensorDescription
     _attr_has_entity_name = True
 
-    def __init__(
-        self, coordinator: KC761Coordinator, description: KC761SensorDescription
-    ) -> None:
+    def __init__(self, coordinator: KC761Coordinator, description: KC761SensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         info = coordinator.device_info
@@ -187,6 +215,12 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         if snapshot is None:
             return None
         if self.entity_description.channel_index is None:
+            if self.entity_description.value_key == "clock_offset":
+                if snapshot.status.device_time is None:
+                    return None
+                return (snapshot.status.device_time - snapshot.received_at).total_seconds()
+            if self.entity_description.value_key == "coprocessor_firmware":
+                return snapshot.device_info.co_fw_version_text
             return getattr(snapshot.status, self.entity_description.value_key)
         channel: ChannelReading = snapshot.status.channels[self.entity_description.channel_index]
         return getattr(channel, self.entity_description.value_key)
@@ -195,5 +229,5 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "hardware_verified": self.coordinator.hardware_verified,
-            "codec_profile": "manual_v1_8_candidate",
+            "codec_profile": CODEC_PROFILE,
         }

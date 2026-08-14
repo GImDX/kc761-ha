@@ -27,7 +27,8 @@
         "title": "KC761x 轮询选项",
         "data": {
           "status_interval": "状态轮询间隔（秒）",
-          "info_interval": "设备信息轮询间隔（秒）"
+          "info_interval": "设备信息轮询间隔（秒）",
+          "create_raw_entities": "创建高频原始读数实体"
         }
       }
     }
@@ -37,6 +38,9 @@
       "battery_percentage": {"name": "电池电量"},
       "air_pressure": {"name": "气压"},
       "device_temperature": {"name": "设备温度"},
+      "device_time": {"name": "设备时间"},
+      "clock_offset": {"name": "设备时钟偏差"},
+      "coprocessor_firmware": {"name": "协处理器固件"},
       "gamma_avg_cps": {"name": "Gamma 平滑计数率"},
       "gamma_avg_dose_rate": {"name": "Gamma 平滑剂量率"},
       "gamma_avg_dose_equivalent_rate": {"name": "Gamma 平滑剂量当量率"},

@@ -8,11 +8,13 @@ from .const import DOMAIN, PLATFORMS
 
 try:
     from homeassistant.config_entries import ConfigEntry
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
     from homeassistant.core import HomeAssistant
     from homeassistant.exceptions import ConfigEntryNotReady
     from homeassistant.helpers import config_validation as cv
 except ImportError:  # pragma: no cover - permits protocol-only offline checks
     ConfigEntry = Any  # type: ignore[misc,assignment]
+    EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
     HomeAssistant = Any  # type: ignore[misc,assignment]
     ConfigEntryNotReady = RuntimeError
     cv = None  # type: ignore[assignment]
@@ -42,6 +44,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.runtime_data = coordinator
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+
+    async def _async_stop(_event: Any) -> None:
+        await coordinator.async_shutdown()
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

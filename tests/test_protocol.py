@@ -141,10 +141,22 @@ class CodecTests(unittest.TestCase):
         self.assertIsNone(data.channels[0].raw_cps)
         self.assertIsNone(data.channels[0].avg_dose_rate)
 
-    def test_invalid_battery_is_unknown(self) -> None:
-        raw = build_status_frame(1, battery_percent=101)
+    def test_invalid_scalar_status_values_are_unknown_and_counted(self) -> None:
+        raw = build_status_frame(1, battery_percent=101, auto_upload_status=7)
         data = decode_status(FrameParser().feed(raw)[0])
         self.assertIsNone(data.battery_percent)
+        self.assertIsNone(data.auto_upload_status)
+        self.assertEqual(
+            data.validation_errors,
+            ("auto_upload_status", "battery_percent"),
+        )
+
+        async def route() -> None:
+            client = KC761Client("127.0.0.1", 1)
+            await client._route_frame(FrameParser().feed(raw)[0])
+            self.assertEqual(client.data_errors, 2)
+
+        asyncio.run(route())
 
     def test_nan_is_rejected(self) -> None:
         body = bytearray(build_status_frame(1)[4:])
@@ -174,9 +186,7 @@ class CodecTests(unittest.TestCase):
 
     def test_request_rejects_write_and_unknown_commands(self) -> None:
         self.assertEqual(encode_read_request(1, CMD_GET_STA), b"\x00\x53\x01\x00")
-        self.assertEqual(
-            encode_read_request(0xFF, CMD_GET_DEVICE_INFO), b"\x00\x54\xff\x00"
-        )
+        self.assertEqual(encode_read_request(0xFF, CMD_GET_DEVICE_INFO), b"\x00\x54\xff\x00")
         with self.assertRaises(ValueError):
             encode_read_request(1, 0x66)
 
@@ -289,9 +299,7 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         await client.async_close()
 
         bad_status = KC761Client("127.0.0.1", 1)
-        bad_status.async_request = AsyncMock(
-            return_value=DecodedFrame(RawFrame(0, 0xA2, 81, b"", b""), "status", None)
-        )
+        bad_status.async_request = AsyncMock(return_value=DecodedFrame(RawFrame(0, 0xA2, 81, b"", b""), "status", None))
         with self.assertRaises(TransactionError):
             await bad_status.async_get_status()
         bad_info = KC761Client("127.0.0.1", 1)

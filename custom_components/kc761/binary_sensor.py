@@ -18,6 +18,7 @@ from .coordinator import KC761Coordinator
 @dataclass(frozen=True, kw_only=True)
 class KC761BinaryDescription(BinarySensorEntityDescription):
     value_key: str
+    channel_index: int | None = None
 
 
 DESCRIPTIONS = (
@@ -32,6 +33,7 @@ DESCRIPTIONS = (
         key="gamma_spectrum_accumulating",
         translation_key="gamma_spectrum_accumulating",
         value_key="spectrum_gamma",
+        channel_index=0,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
@@ -39,6 +41,7 @@ DESCRIPTIONS = (
         key="neutron_spectrum_accumulating",
         translation_key="neutron_spectrum_accumulating",
         value_key="spectrum_neutron",
+        channel_index=1,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
@@ -46,6 +49,7 @@ DESCRIPTIONS = (
         key="pin_spectrum_accumulating",
         translation_key="pin_spectrum_accumulating",
         value_key="spectrum_pin",
+        channel_index=2,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
     ),
@@ -59,7 +63,15 @@ async def async_setup_entry(
 ) -> None:
     del hass
     coordinator: KC761Coordinator = entry.runtime_data
-    async_add_entities([KC761BinarySensor(coordinator, description) for description in DESCRIPTIONS])
+    info = coordinator.device_info
+    if info is None:
+        return
+    descriptions = [
+        description
+        for description in DESCRIPTIONS
+        if description.channel_index is None or bool(info.sensor_types[description.channel_index])
+    ]
+    async_add_entities([KC761BinarySensor(coordinator, description) for description in descriptions])
 
 
 class KC761BinarySensor(CoordinatorEntity[KC761Coordinator], BinarySensorEntity):
@@ -68,9 +80,7 @@ class KC761BinarySensor(CoordinatorEntity[KC761Coordinator], BinarySensorEntity)
     entity_description: KC761BinaryDescription
     _attr_has_entity_name = True
 
-    def __init__(
-        self, coordinator: KC761Coordinator, description: KC761BinaryDescription
-    ) -> None:
+    def __init__(self, coordinator: KC761Coordinator, description: KC761BinaryDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         info = coordinator.device_info
@@ -90,11 +100,12 @@ class KC761BinarySensor(CoordinatorEntity[KC761Coordinator], BinarySensorEntity)
         if snapshot is None:
             return None
         if self.entity_description.value_key == "auto_upload_status":
-            return bool(snapshot.status.auto_upload_status)
-        index = {"spectrum_gamma": 0, "spectrum_neutron": 1, "spectrum_pin": 2}[self.entity_description.value_key]
+            value = snapshot.status.auto_upload_status
+            return None if value is None else bool(value)
+        index = self.entity_description.channel_index
+        assert index is not None
         return snapshot.status.spectrum_accumulating[index]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"hardware_verified": self.coordinator.hardware_verified}
-

@@ -78,9 +78,17 @@ def decode_status(frame: RawFrame) -> StatusData:
     if frame.bag_len != 81 or len(frame.payload) != 77:
         raise DecodeError(f"status length {frame.bag_len}, expected 81")
     body = frame.payload
+    validation_errors: list[str] = []
+    auto_upload_status = body[3]
+    if auto_upload_status not in (0, 1):
+        auto_upload_value: int | None = None
+        validation_errors.append("auto_upload_status")
+    else:
+        auto_upload_value = auto_upload_status
     battery = body[4]
     if battery > 100:
         battery_value: int | None = None
+        validation_errors.append("battery_percent")
     else:
         battery_value = battery
     air_pressure = struct.unpack_from("<H", body, 5)[0]
@@ -110,7 +118,7 @@ def decode_status(frame: RawFrame) -> StatusData:
         sensor_status=body[0],
         volume_status=body[1],
         led_screen_status=body[2],
-        auto_upload_status=body[3],
+        auto_upload_status=auto_upload_value,
         battery_percent=battery_value,
         air_pressure_hpa=air_pressure,
         device_temperature_c=temperature,
@@ -118,6 +126,7 @@ def decode_status(frame: RawFrame) -> StatusData:
         channels=(channels[0], channels[1], channels[2]),
         source_flag=frame.flag,
         raw=frame.raw,
+        validation_errors=tuple(validation_errors),
     )
 
 

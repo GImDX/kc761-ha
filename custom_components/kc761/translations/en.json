@@ -27,7 +27,8 @@
         "title": "KC761x polling options",
         "data": {
           "status_interval": "Status polling interval (seconds)",
-          "info_interval": "Device information polling interval (seconds)"
+          "info_interval": "Device information polling interval (seconds)",
+          "create_raw_entities": "Create high-frequency raw reading entities"
         }
       }
     }
@@ -37,6 +38,9 @@
       "battery_percentage": {"name": "Battery"},
       "air_pressure": {"name": "Air pressure"},
       "device_temperature": {"name": "Device temperature"},
+      "device_time": {"name": "Device time"},
+      "clock_offset": {"name": "Device clock offset"},
+      "coprocessor_firmware": {"name": "Coprocessor firmware"},
       "gamma_avg_cps": {"name": "Gamma average count rate"},
       "gamma_avg_dose_rate": {"name": "Gamma average dose rate"},
       "gamma_avg_dose_equivalent_rate": {"name": "Gamma average dose equivalent rate"},

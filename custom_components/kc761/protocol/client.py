@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 from ..const import (
     CMD_GET_DEVICE_INFO,
@@ -26,8 +27,13 @@ from .models import DeviceInfo, RawFrame, StatusData, TransactionError
 from .transport import TcpTransport, TransportError
 
 PushCallback = Callable[[DecodedFrame], Awaitable[None] | None]
+TaskCreator = Callable[[Coroutine[Any, Any, None], str], asyncio.Task[None]]
 QUERY_RESPONSE_FLAGS = frozenset({FLAG_STATUS_QUERY, FLAG_DEVICE_INFO})
 PUSH_FLAGS = frozenset({FLAG_MC_DATA_UPLOAD, FLAG_STATUS_UPLOAD, FLAG_STREAM_DATA})
+
+
+def _asyncio_task_creator(coroutine: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
+    return asyncio.create_task(coroutine, name=name)
 
 
 class KC761Client:
@@ -40,11 +46,13 @@ class KC761Client:
         *,
         request_timeout: float = REQUEST_TIMEOUT,
         on_push: PushCallback | None = None,
+        task_creator: TaskCreator = _asyncio_task_creator,
     ) -> None:
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
         self.on_push = on_push
+        self.task_creator = task_creator
         self.transport = TcpTransport(host, port)
         self.parser = FrameParser(max_frame_length=MAX_FRAME_LENGTH)
         self._reader_task: asyncio.Task[None] | None = None
@@ -55,6 +63,7 @@ class KC761Client:
         self._closed = False
         self._parser_errors_seen = 0
         self.protocol_errors = 0
+        self.data_errors = 0
         self.consecutive_protocol_errors = 0
         self.responses = 0
         self.push_frames = 0
@@ -64,11 +73,7 @@ class KC761Client:
 
     @property
     def connected(self) -> bool:
-        return (
-            self.transport.connected
-            and self._reader_task is not None
-            and not self._reader_task.done()
-        )
+        return self.transport.connected and self._reader_task is not None and not self._reader_task.done()
 
     async def async_connect(self) -> None:
         async with self._connection_lock:
@@ -85,7 +90,7 @@ class KC761Client:
             await self.transport.async_close()
             await self.transport.async_connect()
             self.consecutive_protocol_errors = 0
-            self._reader_task = asyncio.create_task(self._reader_loop(), name="kc761-reader")
+            self._reader_task = self.task_creator(self._reader_loop(), "kc761-reader")
 
     async def async_close(self) -> None:
         async with self._connection_lock:
@@ -109,11 +114,7 @@ class KC761Client:
         if not self.connected:
             await self.async_connect()
         sync = self._allocate_sync()
-        expected = (
-            frozenset({FLAG_STATUS_QUERY})
-            if command == CMD_GET_STA
-            else frozenset({FLAG_DEVICE_INFO})
-        )
+        expected = frozenset({FLAG_STATUS_QUERY}) if command == CMD_GET_STA else frozenset({FLAG_DEVICE_INFO})
         loop = asyncio.get_running_loop()
         future: asyncio.Future[DecodedFrame] = loop.create_future()
         self._pending[sync] = (expected, future)
@@ -159,10 +160,7 @@ class KC761Client:
                 self._capture_parser_errors()
                 for frame in frames:
                     await self._route_frame(frame)
-                if (
-                    not frames
-                    and self.consecutive_protocol_errors >= MAX_CONSECUTIVE_PROTOCOL_ERRORS
-                ):
+                if not frames and self.consecutive_protocol_errors >= MAX_CONSECUTIVE_PROTOCOL_ERRORS:
                     raise TransportError("too many consecutive KC761 protocol errors")
         except asyncio.CancelledError:
             raise
@@ -188,6 +186,8 @@ class KC761Client:
                 raise TransportError("too many consecutive KC761 decode errors") from err
             return
         self.consecutive_protocol_errors = 0
+        if isinstance(decoded.data, StatusData):
+            self.data_errors += len(decoded.data.validation_errors)
         pending = self._pending.get(frame.sync)
         if pending is not None and frame.flag in pending[0]:
             self.responses += 1

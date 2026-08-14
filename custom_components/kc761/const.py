@@ -5,11 +5,13 @@ from __future__ import annotations
 try:
     from homeassistant.const import Platform
 except ImportError:  # pragma: no cover - allows protocol-only offline tests
+
     class Platform:
         """Minimal fallback used when Home Assistant is not installed."""
 
         SENSOR = "sensor"
         BINARY_SENSOR = "binary_sensor"
+
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
@@ -17,6 +19,10 @@ VERSION = "0.1.0-rc.1"
 DEFAULT_PORT = 7601
 DEFAULT_STATUS_INTERVAL = 5
 DEFAULT_INFO_INTERVAL = 60
+CONF_STATUS_INTERVAL = "status_interval"
+CONF_INFO_INTERVAL = "info_interval"
+CONF_CREATE_RAW_ENTITIES = "create_raw_entities"
+DEFAULT_CREATE_RAW_ENTITIES = False
 MIN_STATUS_INTERVAL = 5
 MAX_STATUS_INTERVAL = 60
 MIN_INFO_INTERVAL = 60

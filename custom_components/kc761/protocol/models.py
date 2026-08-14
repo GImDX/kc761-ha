@@ -54,7 +54,7 @@ class StatusData:
     sensor_status: int
     volume_status: int
     led_screen_status: int
-    auto_upload_status: int
+    auto_upload_status: int | None
     battery_percent: int | None
     air_pressure_hpa: int | None
     device_temperature_c: float | None
@@ -62,6 +62,7 @@ class StatusData:
     channels: tuple[ChannelReading, ChannelReading, ChannelReading]
     source_flag: int
     raw: bytes = field(repr=False)
+    validation_errors: tuple[str, ...] = ()
 
     @property
     def active_sensor(self) -> int:

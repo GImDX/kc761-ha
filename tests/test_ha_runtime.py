@@ -47,18 +47,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def make_info(sensor_types: tuple[int, int, int] = (2, 0, 0)):
-    frame = FrameParser().feed(
-        build_device_info_frame(1, sensor_types=sensor_types)
-    )[0]
+def make_info(sensor_types: tuple[int, int, int] = (2, 0, 0), **kwargs):
+    frame = FrameParser().feed(build_device_info_frame(1, sensor_types=sensor_types, **kwargs))[0]
     return decode_device_info(frame)
 
 
-def make_status(*, sentinel: bool = False, sensor_status: int = 0):
+def make_status(*, sentinel: bool = False, sensor_status: int = 0, **kwargs):
     channels = ((-1, -1, -1, -1, -1, -1),) * 3 if sentinel else None
-    frame = FrameParser().feed(
-        build_status_frame(1, channels=channels, sensor_status=sensor_status)
-    )[0]
+    frame = FrameParser().feed(build_status_frame(1, channels=channels, sensor_status=sensor_status, **kwargs))[0]
     return decode_status(frame)
 
 
@@ -86,6 +82,9 @@ def make_hass():
     hass.config_entries.async_forward_entry_setups = AsyncMock()
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     hass.config_entries.async_reload = AsyncMock()
+    hass.bus = MagicMock()
+    hass.bus.async_listen_once = MagicMock(return_value=lambda: None)
+    hass.async_create_task = lambda coroutine, *, name=None: asyncio.create_task(coroutine, name=name)
     return hass
 
 
@@ -106,6 +105,7 @@ class FakeClient:
         self.protocol_errors = 0
         self.last_frame = None
         self.closed = False
+        self.close_calls = 0
         self.connects = 0
         self.info_calls = 0
         self.status_calls = 0
@@ -117,6 +117,7 @@ class FakeClient:
         self.connected = True
 
     async def async_close(self):
+        self.close_calls += 1
         self.closed = True
         self.connected = False
 
@@ -146,6 +147,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
         assert run(async_setup_entry(hass, entry)) is True
     assert entry.runtime_data is fake
     hass.config_entries.async_forward_entry_setups.assert_awaited_once()
+    hass.bus.async_listen_once.assert_called_once()
     run(async_reload_entry(hass, entry))
     hass.config_entries.async_reload.assert_awaited_once_with(entry.entry_id)
     assert run(async_unload_entry(hass, entry)) is True
@@ -200,7 +202,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
         flow.async_set_unique_id = AsyncMock()
         flow._abort_if_unique_id_configured = MagicMock()
-        assert (await flow.async_step_user())['type'] == "form"
+        assert (await flow.async_step_user())["type"] == "form"
         with patch.object(config_flow_module, "KC761Client", Client):
             result = await flow.async_step_user({"host": "localhost", "port": 7601})
         assert result["type"] == "create_entry"
@@ -234,7 +236,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         reconfigure.context = {"entry_id": entry.entry_id}
         reconfigure.async_show_form = MagicMock(return_value={"type": "form"})
         reconfigure.async_update_reload_and_abort = MagicMock(return_value={"type": "abort"})
-        assert (await reconfigure.async_step_reconfigure())['type'] == "form"
+        assert (await reconfigure.async_step_reconfigure())["type"] == "form"
         with patch.object(config_flow_module, "KC761Client", Client):
             result = await reconfigure.async_step_reconfigure({"host": "new", "port": 7602})
         assert result["type"] == "abort"
@@ -244,7 +246,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         unknown.context = {"entry_id": "missing"}
         unknown.async_abort = MagicMock(return_value={"type": "abort", "reason": "unknown"})
         hass.config_entries.async_get_entry.return_value = None
-        assert (await unknown.async_step_reconfigure())['reason'] == "unknown"
+        assert (await unknown.async_step_reconfigure())["reason"] == "unknown"
         hass.config_entries.async_get_entry.return_value = entry
 
         class FailingReconfigureClient(Client):
@@ -289,9 +291,15 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         options.hass = hass
         options.handler = entry.entry_id
         options.async_show_form = MagicMock(return_value={"type": "form"})
-        assert (await options.async_step_init())['type'] == "form"
+        assert (await options.async_step_init())["type"] == "form"
         options.async_create_entry = MagicMock(return_value={"type": "create_entry"})
-        assert (await options.async_step_init({"status_interval": 5, "info_interval": 60}))["type"] == "create_entry"
+        option_values = {
+            "status_interval": 5,
+            "info_interval": 60,
+            "create_raw_entities": True,
+        }
+        assert (await options.async_step_init(option_values))["type"] == "create_entry"
+        options.async_create_entry.assert_called_once_with(title="", data=option_values)
 
     run(exercise())
 
@@ -318,13 +326,14 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         assert fake.info_calls == 2
         assert fake.status_calls == 2
         await coordinator._async_push(make_decoded_status())
-        await coordinator._async_push(
-            SimpleNamespace(frame=RawFrame(1, 0xA3, 81, b"", b""), data=None)
-        )
+        await coordinator._async_push(SimpleNamespace(frame=RawFrame(1, 0xA3, 81, b"", b""), data=None))
         coordinator._device_info = None
         await coordinator._async_push(make_decoded_status())
         await coordinator.async_shutdown()
+        await coordinator.async_shutdown()
         assert fake.closed is True
+        assert fake.close_calls == 1
+        coordinator.async_stop_update.assert_called_once()
         coordinator._device_info = make_info()
         assert coordinator.hardware_verified is False
         assert coordinator_module._bounded("bad", 5, 10) == 5
@@ -439,30 +448,48 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
     async def exercise() -> None:
         info = make_info((2, 8, 5))
         status = make_status(sentinel=True, sensor_status=0x1C)
-        snapshot = coordinator_module.KC761Snapshot(info, status, datetime.now(UTC))
+        received_at = datetime(2025, 1, 1, 0, 0, 10, tzinfo=UTC)
+        snapshot = coordinator_module.KC761Snapshot(info, status, received_at)
         coordinator = MagicMock()
         coordinator.device_info = info
         coordinator.snapshot = snapshot
         coordinator.hardware_verified = False
+        coordinator.create_raw_entities = False
         coordinator.async_add_listener = MagicMock()
         entry = make_entry()
         entry.runtime_data = coordinator
-        sensor_entities = []
         with patch.object(
             sensor_module.CoordinatorEntity,
             "__init__",
             lambda self, value: setattr(self, "coordinator", value),
         ):
-            await sensor_module.async_setup_entry(
-                MagicMock(), entry, lambda entities: sensor_entities.extend(entities)
-            )
-            assert len(sensor_entities) == 21
+            sensor_entities = []
+            await sensor_module.async_setup_entry(MagicMock(), entry, lambda entities: sensor_entities.extend(entities))
+            assert len(sensor_entities) == 15
+            by_key = {entity.entity_description.key: entity for entity in sensor_entities}
             assert all(entity.extra_state_attributes["hardware_verified"] is False for entity in sensor_entities)
-            assert sensor_entities[0].native_value == 87
-            assert sensor_entities[3].native_value is None
+            assert by_key["battery_percentage"].native_value == 87
+            assert by_key["device_time"].native_value == status.device_time
+            assert by_key["clock_offset"].native_value == -10
+            assert by_key["coprocessor_firmware"].native_value == "V1.80"
+            assert by_key["gamma_avg_cps"].native_value is None
+            assert by_key["gamma_avg_dose_rate"].entity_description.entity_registry_enabled_default
+            assert not any("_raw_" in key for key in by_key)
+
+            coordinator.create_raw_entities = True
+            raw_entities = []
+            await sensor_module.async_setup_entry(MagicMock(), entry, lambda entities: raw_entities.extend(entities))
+            assert len(raw_entities) == 24
+            raw_descriptions = [
+                entity.entity_description for entity in raw_entities if entity.entity_description.raw_reading
+            ]
+            assert len(raw_descriptions) == 9
+            assert all(description.entity_registry_enabled_default for description in raw_descriptions)
+
             coordinator.snapshot = None
-            assert sensor_entities[0].native_value is None
+            assert by_key["battery_percentage"].native_value is None
             coordinator.snapshot = snapshot
+            coordinator.create_raw_entities = False
         empty = MagicMock()
         empty.device_info = None
         entry.runtime_data = empty
@@ -486,6 +513,23 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
             assert binary_entities[2].is_on is True
             assert binary_entities[3].is_on is True
             assert all(entity.extra_state_attributes["hardware_verified"] is False for entity in binary_entities)
+
+            coordinator.device_info = make_info((2, 0, 0))
+            installed_binary_entities = []
+            await binary_sensor_module.async_setup_entry(
+                MagicMock(),
+                entry,
+                lambda values: installed_binary_entities.extend(values),
+            )
+            assert [entity.entity_description.key for entity in installed_binary_entities] == [
+                "auto_upload_enabled",
+                "gamma_spectrum_accumulating",
+            ]
+            coordinator.device_info = info
+
+            invalid_status = make_status(auto_upload_status=7)
+            coordinator.snapshot = coordinator_module.KC761Snapshot(info, invalid_status, received_at)
+            assert binary_entities[0].is_on is None
         broken_binary = MagicMock(device_info=None)
         with patch.object(
             binary_sensor_module.CoordinatorEntity,
@@ -500,34 +544,60 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.client = SimpleNamespace(
             connected=False,
             last_frame=RawFrame(1, 0xA2, 81, b"", b""),
+            data_errors=2,
+            consecutive_protocol_errors=1,
+            responses=11,
+            push_frames=4,
+            late_responses=2,
+            unhandled_frames=3,
+            parser=SimpleNamespace(
+                errors=3,
+                dropped_bytes=7,
+                buffered_bytes=0,
+                recent_errors=("length:0",),
+            ),
         )
         coordinator.status_interval = 5
         coordinator.info_interval = 60
+        coordinator.create_raw_entities = False
         coordinator.last_success = None
         coordinator.consecutive_failures = 2
         coordinator.reconnects = 1
         coordinator.protocol_errors = 3
+        coordinator.identity_mismatches = 1
+        coordinator.retry_delay = 2.5
         coordinator.last_error = "TimeoutError"
         entry.runtime_data = coordinator
         result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), entry)
         assert "host" not in str(result)
+        assert info.device_id not in str(result)
+        assert result["protocol_profile"] == "manual_v1_8_candidate"
+        assert result["hardware_verified"] is False
         assert result["device"]["device_id_suffix"] == "0001"
         assert result["connection"]["last_frame"]["flag"] == 0xA2
+        assert result["connection"]["data_errors"] == 2
+        assert result["connection"]["responses"] == 11
+        assert result["connection"]["identity_mismatches"] == 1
+        assert result["framing"]["dropped_bytes"] == 7
 
         coordinator.last_success = datetime.now(UTC)
         result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), entry)
         assert result["connection"]["last_success"] is not None
 
-        empty = MagicMock()
-        empty.device_info = None
-        empty.status_interval = 5
-        empty.info_interval = 60
-        empty.client = SimpleNamespace(connected=False, last_frame=None)
-        empty.last_success = None
-        empty.consecutive_failures = 0
-        empty.reconnects = 0
-        empty.protocol_errors = 0
-        empty.last_error = None
+        empty = SimpleNamespace(
+            device_info=None,
+            status_interval=5,
+            info_interval=60,
+            create_raw_entities=False,
+            client=SimpleNamespace(connected=False, last_frame=None),
+            last_success=None,
+            consecutive_failures=0,
+            reconnects=0,
+            protocol_errors=0,
+            identity_mismatches=0,
+            retry_delay=None,
+            last_error=None,
+        )
         empty_entry = make_entry()
         empty_entry.version = 1
         empty_entry.runtime_data = empty
@@ -535,5 +605,13 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         assert result["device"] is None
         assert result["connection"]["last_frame"] is None
         assert result["connection"]["last_success"] is None
+        assert result["framing"] is None
+
+        unknown = SimpleNamespace(**empty.__dict__)
+        unknown.device_info = make_info(model=0xFE)
+        unknown_entry = make_entry()
+        unknown_entry.runtime_data = unknown
+        result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), unknown_entry)
+        assert result["device"]["compatibility_warnings"] == ["unknown_model:254"]
 
     run(exercise())

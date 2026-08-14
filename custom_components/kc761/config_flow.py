@@ -12,6 +12,10 @@ from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
 
 from .const import (
+    CONF_CREATE_RAW_ENTITIES,
+    CONF_INFO_INTERVAL,
+    CONF_STATUS_INTERVAL,
+    DEFAULT_CREATE_RAW_ENTITIES,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_STATUS_INTERVAL,
@@ -51,9 +55,7 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         finally:
             await client.async_close()
         if info is None:
-            return self.async_show_form(
-                step_id="user", data_schema=_connection_schema(user_input), errors=errors
-            )
+            return self.async_show_form(step_id="user", data_schema=_connection_schema(user_input), errors=errors)
         await self.async_set_unique_id(info.device_id)
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
@@ -61,16 +63,12 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data={CONF_HOST: host, CONF_PORT: port, "device_id": info.device_id},
         )
 
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         if entry is None:
             return self.async_abort(reason="unknown")
         if user_input is None:
-            return self.async_show_form(
-                step_id="reconfigure", data_schema=_connection_schema(entry.data)
-            )
+            return self.async_show_form(step_id="reconfigure", data_schema=_connection_schema(entry.data))
         host = str(user_input[CONF_HOST]).strip()
         port = int(user_input[CONF_PORT])
         client = KC761Client(host, port)
@@ -119,19 +117,23 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
         schema = vol.Schema(
             {
                 vol.Required(
-                    "status_interval",
-                    default=options.get("status_interval", DEFAULT_STATUS_INTERVAL),
+                    CONF_STATUS_INTERVAL,
+                    default=options.get(CONF_STATUS_INTERVAL, DEFAULT_STATUS_INTERVAL),
                 ): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_STATUS_INTERVAL, max=MAX_STATUS_INTERVAL),
                 ),
                 vol.Required(
-                    "info_interval",
-                    default=options.get("info_interval", DEFAULT_INFO_INTERVAL),
+                    CONF_INFO_INTERVAL,
+                    default=options.get(CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
                 ): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_INFO_INTERVAL, max=MAX_INFO_INTERVAL),
                 ),
+                vol.Required(
+                    CONF_CREATE_RAW_ENTITIES,
+                    default=options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
+                ): bool,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
