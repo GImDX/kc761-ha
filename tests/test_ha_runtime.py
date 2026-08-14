@@ -668,4 +668,12 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), unknown_entry)
         assert result["device"]["compatibility_warnings"] == ["unknown_model:254"]
 
+        short_id = SimpleNamespace(**empty.__dict__)
+        short_id.device_info = make_info(device_id="AB")
+        short_entry = make_entry()
+        short_entry.runtime_data = short_id
+        result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), short_entry)
+        assert result["device"]["device_id_suffix"] == "<2 characters>"
+        assert "AB" not in str(result)
+
     run(exercise())

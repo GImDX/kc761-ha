@@ -15,6 +15,7 @@ from .const import (
 )
 from .coordinator import KC761Coordinator
 from .protocol.codec import CODEC_PROFILE, HARDWARE_VERIFIED
+from .protocol.models import redacted_device_id_suffix
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
@@ -52,7 +53,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "firmware_version": info.fw_version_text,
             "coprocessor_firmware_version": info.co_fw_version_text,
             "sensor_types": list(info.sensor_types),
-            "device_id_suffix": info.device_id[-4:],
+            "device_id_suffix": redacted_device_id_suffix(info.device_id),
             "hardware_verified": info.hardware_verified,
             "compatibility_warnings": compatibility_warnings,
         },

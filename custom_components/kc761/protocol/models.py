@@ -128,6 +128,13 @@ def format_fw_version(value: int) -> str:
     return f"V{value // 100}.{value % 100:02d}"
 
 
+def redacted_device_id_suffix(value: str) -> str:
+    """Return only a safe tail, without exposing an entire short DEVICE_ID."""
+    if len(value) <= 4:
+        return f"<{len(value)} characters>"
+    return value[-4:]
+
+
 @dataclass(frozen=True, slots=True)
 class PendingResponse:
     """Bookkeeping for one client request."""
@@ -166,7 +173,7 @@ def as_public_dict(value: Any) -> dict[str, Any]:
             "hardware_version": value.hw_version_text,
             "firmware_version": value.fw_version_text,
             "coprocessor_firmware_version": value.co_fw_version_text,
-            "device_id_suffix": value.device_id[-4:],
+            "device_id_suffix": redacted_device_id_suffix(value.device_id),
             "hardware_verified": value.hardware_verified,
         }
     return {"type": type(value).__name__}

@@ -29,6 +29,7 @@ from custom_components.kc761.protocol.models import (
     TransactionError,
     as_public_dict,
     format_fw_version,
+    redacted_device_id_suffix,
     utc_from_epoch,
 )
 from custom_components.kc761.protocol.transport import TcpTransport, TransportError
@@ -204,13 +205,9 @@ class CodecTests(unittest.TestCase):
             decode_device_info(RawFrame(0, 0xA2, 100, b"\x00" * 96, b"\x00" * 100))
 
     def test_device_id_and_public_helpers(self) -> None:
-        leading = decode_device_info(
-            FrameParser().feed(build_device_info_frame(1, device_id=" leading"))[0]
-        )
+        leading = decode_device_info(FrameParser().feed(build_device_info_frame(1, device_id=" leading"))[0])
         self.assertEqual(leading.device_id, " leading")
-        trailing = decode_device_info(
-            FrameParser().feed(build_device_info_frame(1, device_id="RAW-ID   "))[0]
-        )
+        trailing = decode_device_info(FrameParser().feed(build_device_info_frame(1, device_id="RAW-ID   "))[0])
         self.assertEqual(trailing.device_id, "RAW-ID")
         empty = bytearray(build_device_info_frame(1)[4:])
         empty[32:48] = b"\x00" * 16
@@ -223,9 +220,7 @@ class CodecTests(unittest.TestCase):
         embedded_nul = bytearray(build_device_info_frame(1)[4:])
         embedded_nul[32:48] = b"AB\x00CD" + b"\x00" * 11
         with self.assertRaises(DecodeError):
-            decode_device_info(
-                FrameParser().feed(frame_bytes(1, 0xA5, bytes(embedded_nul)))[0]
-            )
+            decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(embedded_nul)))[0])
         control = bytearray(build_device_info_frame(1)[4:])
         control[32] = 1
         with self.assertRaises(DecodeError):
@@ -236,6 +231,8 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(model_name(255), "Unknown (255)")
         self.assertEqual(sensor_name(255), "Unknown (0xff)")
         self.assertEqual(as_public_dict(info)["device_id_suffix"], "0001")
+        self.assertEqual(redacted_device_id_suffix("AB"), "<2 characters>")
+        self.assertEqual(redacted_device_id_suffix("ABCDE"), "BCDE")
         self.assertEqual(as_public_dict(status)["battery_percent"], 87)
         self.assertEqual(as_public_dict(RawFrame(1, 2, 4, b"", b"\x01\x02\x04\x00"))["flag"], 2)
         self.assertEqual(as_public_dict(object())["type"], "object")
