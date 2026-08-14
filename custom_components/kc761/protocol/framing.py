@@ -13,6 +13,7 @@ from ..const import (
     FLAG_STATUS_QUERY,
     FLAG_STATUS_UPLOAD,
     FLAG_STREAM_DATA,
+    KNOWN_FLAGS,
     MAX_BUFFER_LENGTH,
     MAX_FRAME_LENGTH,
 )
@@ -60,32 +61,23 @@ class FrameParser:
         if len(self._buffer) > self.max_buffer_length:
             overflow = len(self._buffer) - self.max_buffer_length
             del self._buffer[:overflow]
+            self.dropped_bytes += overflow
             self._record_error(f"buffer_limit:{overflow}")
+            self._discard_to_known_header(start=0)
 
         frames: list[RawFrame] = []
         while len(self._buffer) >= 4:
             sync = self._buffer[0]
             flag = self._buffer[1]
             bag_len = int.from_bytes(self._buffer[2:4], "little")
-            if bag_len < 4 or bag_len > self.max_frame_length:
-                self._resync(f"length:{bag_len}")
+            error = self._length_error(flag, bag_len)
+            if error is not None:
+                self._resync(error)
                 continue
             if len(self._buffer) < bag_len:
                 break
 
             raw = bytes(self._buffer[:bag_len])
-            expected = FIXED_LENGTHS.get(flag)
-            if expected is not None and bag_len != expected:
-                self._resync(f"fixed_length:{flag:#x}:{bag_len}!={expected}")
-                continue
-            if flag in (FLAG_MC_DATA_QUERY, FLAG_MC_DATA_UPLOAD):
-                if bag_len < 9 or (bag_len - 9) % 2:
-                    self._resync(f"mc_length:{bag_len}")
-                    continue
-            elif flag == FLAG_STREAM_DATA:
-                if bag_len < 4 or (bag_len - 4) % 2:
-                    self._resync(f"stream_length:{bag_len}")
-                    continue
 
             del self._buffer[:bag_len]
             frames.append(
@@ -95,15 +87,7 @@ class FrameParser:
                     bag_len=bag_len,
                     payload=raw[4:],
                     raw=raw,
-                    known=flag in FIXED_LENGTHS
-                    or flag
-                    in {
-                        FLAG_MC_DATA_QUERY,
-                        FLAG_MC_DATA_UPLOAD,
-                        FLAG_STATUS_QUERY,
-                        FLAG_STATUS_UPLOAD,
-                        FLAG_STREAM_DATA,
-                    },
+                    known=flag in KNOWN_FLAGS,
                 )
             )
         return frames
@@ -115,10 +99,38 @@ class FrameParser:
             self._buffer.clear()
 
     def _resync(self, reason: str) -> None:
-        if self._buffer:
-            del self._buffer[0]
-            self.dropped_bytes += 1
         self._record_error(reason)
+        self._discard_to_known_header(start=1)
+
+    def _discard_to_known_header(self, *, start: int) -> None:
+        candidate = self._find_known_header(start=start)
+        drop = candidate if candidate is not None else max(0, len(self._buffer) - 3)
+        if drop:
+            del self._buffer[:drop]
+            self.dropped_bytes += drop
+
+    def _find_known_header(self, *, start: int) -> int | None:
+        for offset in range(start, len(self._buffer) - 3):
+            flag = self._buffer[offset + 1]
+            if flag not in KNOWN_FLAGS:
+                continue
+            bag_len = int.from_bytes(self._buffer[offset + 2 : offset + 4], "little")
+            if self._length_error(flag, bag_len) is None:
+                return offset
+        return None
+
+    def _length_error(self, flag: int, bag_len: int) -> str | None:
+        if bag_len < 4 or bag_len > self.max_frame_length:
+            return f"length:{bag_len}"
+        expected = FIXED_LENGTHS.get(flag)
+        if expected is not None and bag_len != expected:
+            return f"fixed_length:{flag:#x}:{bag_len}!={expected}"
+        if flag in (FLAG_MC_DATA_QUERY, FLAG_MC_DATA_UPLOAD):
+            if bag_len < 9 or (bag_len - 9) % 2:
+                return f"mc_length:{bag_len}"
+        elif flag == FLAG_STREAM_DATA and (bag_len - 4) % 2:
+            return f"stream_length:{bag_len}"
+        return None
 
     def _record_error(self, reason: str) -> None:
         self.errors += 1

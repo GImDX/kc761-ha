@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ..const import CONNECT_TIMEOUT, READ_TIMEOUT
+from ..const import CONNECT_TIMEOUT, IO_TIMEOUT
 
 
 class TransportError(ConnectionError):
@@ -20,12 +20,12 @@ class TcpTransport:
         port: int,
         *,
         connect_timeout: float = CONNECT_TIMEOUT,
-        read_timeout: float = READ_TIMEOUT,
+        write_timeout: float = IO_TIMEOUT,
     ) -> None:
         self.host = host
         self.port = port
         self.connect_timeout = connect_timeout
-        self.read_timeout = read_timeout
+        self.write_timeout = write_timeout
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
 
@@ -49,8 +49,8 @@ class TcpTransport:
         if self.reader is None:
             raise TransportError("transport is not connected")
         try:
-            return await asyncio.wait_for(self.reader.read(size), self.read_timeout)
-        except (OSError, TimeoutError) as err:
+            return await self.reader.read(size)
+        except OSError as err:
             raise TransportError("KC761 read failed") from err
 
     async def async_write(self, data: bytes) -> None:
@@ -58,8 +58,9 @@ class TcpTransport:
             raise TransportError("transport is not connected")
         try:
             self.writer.write(data)
-            await asyncio.wait_for(self.writer.drain(), self.read_timeout)
+            await asyncio.wait_for(self.writer.drain(), self.write_timeout)
         except (OSError, TimeoutError) as err:
+            await self.async_close()
             raise TransportError("KC761 write failed") from err
 
     async def async_close(self) -> None:

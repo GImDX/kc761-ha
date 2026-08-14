@@ -98,9 +98,17 @@ class FramingTests(unittest.TestCase):
         self.assertTrue(valid_stream[0].known)
         parser.feed(b"\x01\x02")
         parser.flush()
-        self.assertGreaterEqual(parser.errors, 3)
+        self.assertGreaterEqual(parser.errors, 2)
         parser.feed(b"")
         parser._resync("empty")
+
+    def test_malformed_fixed_length_recovers_following_frame(self) -> None:
+        parser = FrameParser()
+        malformed = frame_bytes(1, FLAG_STATUS_QUERY, b"x")
+        frames = parser.feed(malformed + build_status_frame(3))
+        self.assertEqual([frame.sync for frame in frames], [3])
+        self.assertEqual(parser.buffered_bytes, 0)
+        self.assertGreaterEqual(parser.errors, 1)
 
     def test_frame_builder_rejects_out_of_range_values(self) -> None:
         with self.assertRaises(ValueError):
@@ -217,7 +225,7 @@ class CodecTests(unittest.TestCase):
 
     def test_transport_without_connection_errors(self) -> None:
         async def run() -> None:
-            transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, read_timeout=0.01)
+            transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, write_timeout=0.01)
             with self.assertRaises(TransportError):
                 await transport.async_read()
             with self.assertRaises(TransportError):
@@ -228,7 +236,7 @@ class CodecTests(unittest.TestCase):
 
     def test_transport_error_paths(self) -> None:
         async def run() -> None:
-            transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, read_timeout=0.01)
+            transport = TcpTransport("127.0.0.1", 1, connect_timeout=0.01, write_timeout=0.01)
             with self.assertRaises(TransportError):
                 await transport.async_connect()
 
@@ -240,9 +248,11 @@ class CodecTests(unittest.TestCase):
             transport.writer = MagicMock()
             transport.writer.is_closing.return_value = False
             transport.writer.drain = AsyncMock(side_effect=OSError("write"))
+            transport.writer.wait_closed = AsyncMock(side_effect=OSError("close"))
             with self.assertRaises(TransportError):
                 await transport.async_write(b"x")
 
+            transport.writer = MagicMock()
             transport.writer.wait_closed = AsyncMock(side_effect=OSError("close"))
             await transport.async_close()
 
@@ -323,7 +333,25 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
             client = KC761Client(*simulator.address, request_timeout=0.5)
             with self.assertRaises((ConnectionError, TimeoutError)):
                 await client.async_get_status()
+            await asyncio.sleep(0)
+            self.assertFalse(client.connected)
             await client.async_close()
+
+    async def test_graceful_eof_reconnects_on_next_request(self) -> None:
+        scenario = SimulatorScenario(close_after_response=True)
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(*simulator.address, request_timeout=0.5)
+            try:
+                info = await client.async_get_device_info()
+                await asyncio.sleep(0.05)
+                self.assertFalse(client.connected)
+                status = await client.async_get_status()
+            finally:
+                await client.async_close()
+        self.assertEqual(info.device_id, "7601-0000-000001")
+        self.assertEqual(status.battery_percent, 87)
+        self.assertEqual(simulator.connections, 2)
+        self.assertEqual(simulator.received_commands, [0x54, 0x53])
 
     async def test_response_timeout_and_close_pending(self) -> None:
         scenario = SimulatorScenario(response_delay=0.3)
@@ -341,6 +369,49 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ConnectionError):
                 await task
 
+    async def test_timed_out_request_closes_connection(self) -> None:
+        received: list[str] = []
+        scenario = SimulatorScenario(response_delay=0.1)
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(
+                *simulator.address,
+                request_timeout=0.03,
+                on_push=lambda decoded: received.append(decoded.kind),
+            )
+            try:
+                with self.assertRaises(TimeoutError):
+                    await client.async_get_status()
+                self.assertFalse(client.connected)
+                self.assertEqual(client.push_frames, 0)
+                self.assertEqual(received, [])
+            finally:
+                await client.async_close()
+
+    async def test_unmatched_query_response_is_not_routed_as_push(self) -> None:
+        received: list[str] = []
+        client = KC761Client(
+            "127.0.0.1",
+            1,
+            on_push=lambda decoded: received.append(decoded.kind),
+        )
+        frame = FrameParser().feed(build_status_frame(7))[0]
+        await client._route_frame(frame)
+        self.assertEqual(client.late_responses, 1)
+        self.assertEqual(client.push_frames, 0)
+        self.assertEqual(received, [])
+
+    async def test_parser_errors_are_exposed_by_client(self) -> None:
+        scenario = SimulatorScenario(malformed_length=1)
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(*simulator.address, request_timeout=0.05)
+            try:
+                with self.assertRaises((ConnectionError, TimeoutError)):
+                    await client.async_get_device_info()
+                self.assertGreater(client.parser.errors, 0)
+                self.assertEqual(client.protocol_errors, client.parser.errors)
+            finally:
+                await client.async_close()
+
     async def test_push_callback_and_bad_frame_counter(self) -> None:
         received: list[str] = []
 
@@ -350,8 +421,12 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         client = KC761Client("127.0.0.1", 1, on_push=callback)
         await client._route_frame(RawFrame(1, 0xA2, 81, b"bad", b"bad"))
         self.assertEqual(client.protocol_errors, 1)
+        upload = FrameParser().feed(build_status_frame(2, upload=True))[0]
+        await client._route_frame(upload)
+        self.assertEqual(received, ["DecodedFrame"])
         await client._route_frame(RawFrame(2, 0xFE, 4, b"", b"\x02\xfe\x04\x00", known=False))
         self.assertEqual(received, ["DecodedFrame"])
+        self.assertEqual(client.unhandled_frames, 1)
 
     def test_sync_allocator_exhaustion(self) -> None:
         client = KC761Client("127.0.0.1", 1)
