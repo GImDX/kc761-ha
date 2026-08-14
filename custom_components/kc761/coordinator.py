@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -16,16 +17,25 @@ from .const import (
     DEFAULT_INFO_INTERVAL,
     DEFAULT_STATUS_INTERVAL,
     DOMAIN,
+    FLAG_STATUS_UPLOAD,
     MAX_INFO_INTERVAL,
+    MAX_RECONNECT_BACKOFF,
     MAX_STATUS_INTERVAL,
     MIN_INFO_INTERVAL,
+    MIN_RECONNECT_BACKOFF,
     MIN_STATUS_INTERVAL,
+    RECONNECT_JITTER_MAX,
+    RECONNECT_JITTER_MIN,
 )
 from .protocol.client import KC761Client
 from .protocol.codec import DecodedFrame, HARDWARE_VERIFIED
 from .protocol.models import DeviceInfo, StatusData
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class DeviceIdentityError(ValueError):
+    """A reachable endpoint returned a different physical DEVICE_ID."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +55,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self.entry = entry
         self.host = str(entry.data["host"])
         self.port = int(entry.data["port"])
+        self.expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
         self.status_interval = _bounded(
             entry.options.get("status_interval", DEFAULT_STATUS_INTERVAL),
             MIN_STATUS_INTERVAL,
@@ -65,6 +76,9 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self.consecutive_failures = 0
         self.last_success: datetime | None = None
         self.last_error: str | None = None
+        self.identity_mismatches = 0
+        self.retry_delay: float | None = None
+        self._backoff_base = 0.0
         super().__init__(
             hass,
             _LOGGER,
@@ -87,18 +101,21 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
 
     async def _async_update_data(self) -> KC761Snapshot:
         try:
-            was_connected = self.client.connected
-            if not was_connected:
+            new_connection = not self.client.connected
+            if new_connection:
                 await self.client.async_connect()
                 if self._device_info is not None:
                     self.reconnects += 1
             now = datetime.now(UTC)
             if (
-                self._device_info is None
+                new_connection
+                or self._device_info is None
                 or self._last_info_at is None
                 or (now - self._last_info_at).total_seconds() >= self.info_interval
             ):
-                self._device_info = await self.client.async_get_device_info()
+                device_info = await self.client.async_get_device_info()
+                self._validate_device_info(device_info)
+                self._device_info = device_info
                 self._last_info_at = now
             status = await self.client.async_get_status()
             if self._device_info is None:
@@ -107,6 +124,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             self.last_success = datetime.now(UTC)
             self.consecutive_failures = 0
             self.last_error = None
+            self._reset_backoff()
             self._snapshot = KC761Snapshot(
                 device_info=self._device_info,
                 status=status,
@@ -114,14 +132,21 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             )
             return self._snapshot
         except Exception as err:
+            if isinstance(err, DeviceIdentityError):
+                await self.client.async_close()
             self.consecutive_failures += 1
             self.last_error = type(err).__name__
             self.protocol_errors = self.client.protocol_errors
+            self._increase_backoff()
             raise UpdateFailed(f"KC761 update failed: {type(err).__name__}") from err
 
     async def _async_push(self, decoded: DecodedFrame) -> None:
         """Accept status pushes without changing device settings."""
-        if not isinstance(decoded.data, StatusData) or self._device_info is None:
+        if (
+            decoded.frame.flag != FLAG_STATUS_UPLOAD
+            or not isinstance(decoded.data, StatusData)
+            or self._device_info is None
+        ):
             return
         now = datetime.now(UTC)
         self._snapshot = KC761Snapshot(
@@ -131,6 +156,8 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         )
         self.last_success = now
         self.consecutive_failures = 0
+        self.last_error = None
+        self._reset_backoff()
         if self.last_update_success:
             self.async_set_updated_data(self._snapshot)
 
@@ -146,7 +173,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             try:
                 await candidate.async_connect()
                 info = await candidate.async_get_device_info()
-                if self._device_info and info.device_id != self._device_info.device_id:
+                if info.device_id != self.expected_device_id:
                     raise ValueError("DEVICE_ID does not match this config entry")
             finally:
                 await candidate.async_close()
@@ -154,6 +181,32 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self.host, self.port = host, port
         self.client = KC761Client(host, port, on_push=self._async_push)
         self._last_info_at = None
+
+    def _validate_device_info(self, info: DeviceInfo) -> None:
+        if not self.expected_device_id or info.device_id != self.expected_device_id:
+            self.identity_mismatches += 1
+            raise DeviceIdentityError("KC761 DEVICE_ID changed")
+
+    def _increase_backoff(self) -> None:
+        self._backoff_base = (
+            MIN_RECONNECT_BACKOFF
+            if self._backoff_base == 0
+            else min(MAX_RECONNECT_BACKOFF, self._backoff_base * 2)
+        )
+        delay = self._backoff_base * random.uniform(
+            RECONNECT_JITTER_MIN,
+            RECONNECT_JITTER_MAX,
+        )
+        self.retry_delay = max(
+            MIN_RECONNECT_BACKOFF,
+            min(MAX_RECONNECT_BACKOFF, delay),
+        )
+        self.update_interval = timedelta(seconds=self.retry_delay)
+
+    def _reset_backoff(self) -> None:
+        self._backoff_base = 0.0
+        self.retry_delay = None
+        self.update_interval = timedelta(seconds=self.status_interval)
 
 
 def _bounded(value: Any, minimum: int, maximum: int) -> int:

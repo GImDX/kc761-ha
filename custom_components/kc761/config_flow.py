@@ -29,7 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is None:
@@ -54,8 +54,7 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="user", data_schema=_connection_schema(user_input), errors=errors
             )
-        unique_id = normalize_device_id(info.device_id)
-        await self.async_set_unique_id(unique_id)
+        await self.async_set_unique_id(info.device_id)
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
             title=f"{info.model_name} {info.device_id[-4:]}",
@@ -78,7 +77,8 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             await client.async_connect()
             info = await client.async_get_device_info()
-            if normalize_device_id(info.device_id) != entry.unique_id:
+            expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
+            if info.device_id != expected_device_id:
                 raise ValueError("DEVICE_ID mismatch")
         except ValueError:
             await client.async_close()
@@ -147,10 +147,3 @@ def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ),
         }
     )
-
-
-def normalize_device_id(device_id: str) -> str:
-    """Normalize only separators needed for a stable unique ID."""
-    return "".join(
-        character if character.isalnum() else "_" for character in device_id
-    ).strip("_").lower()

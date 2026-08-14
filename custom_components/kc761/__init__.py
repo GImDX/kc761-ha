@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
     cv = None  # type: ignore[assignment]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
+CONFIG_ENTRY_VERSION = 2
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -42,6 +43,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate normalized v1 identity to the original DEVICE_ID text."""
+    if entry.version > CONFIG_ENTRY_VERSION:
+        return False
+    if entry.version == CONFIG_ENTRY_VERSION:
+        return True
+    device_id = str(entry.data.get("device_id", ""))
+    if not device_id:
+        return False
+    hass.config_entries.async_update_entry(
+        entry,
+        unique_id=device_id,
+        version=CONFIG_ENTRY_VERSION,
+    )
     return True
 
 

@@ -19,6 +19,7 @@ pytest.importorskip("homeassistant")
 from homeassistant.exceptions import ConfigEntryNotReady  # noqa: E402
 from custom_components.kc761 import (  # noqa: E402
     CONFIG_SCHEMA,
+    async_migrate_entry,
     async_reload_entry,
     async_setup,
     async_setup_entry,
@@ -34,6 +35,7 @@ from custom_components.kc761.protocol.codec import (  # noqa: E402
     build_device_info_frame,
     build_status_frame,
     decode_device_info,
+    decode_frame,
     decode_status,
 )
 from custom_components.kc761.protocol.framing import FrameParser  # noqa: E402
@@ -60,7 +62,7 @@ def make_status(*, sentinel: bool = False, sensor_status: int = 0):
     return decode_status(frame)
 
 
-def make_entry(*, options: dict | None = None, unique_id: str = "7601_0000_000001"):
+def make_entry(*, options: dict | None = None, unique_id: str = "7601-0000-000001"):
     entry = MagicMock()
     entry.entry_id = "entry-1"
     entry.version = 1
@@ -85,6 +87,11 @@ def make_hass():
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     hass.config_entries.async_reload = AsyncMock()
     return hass
+
+
+def make_decoded_status(*, upload: bool = True):
+    frame = FrameParser().feed(build_status_frame(1, upload=upload))[0]
+    return decode_frame(frame)
 
 
 class FakeClient:
@@ -154,6 +161,18 @@ def test_entry_setup_unload_reload_and_failure() -> None:
             run(async_setup_entry(hass, make_entry()))
     broken.async_shutdown.assert_awaited_once()
 
+    migration_entry = make_entry(unique_id="7601_0000_000001")
+    migration_entry.version = 1
+    hass.config_entries.async_update_entry = MagicMock()
+    assert run(async_migrate_entry(hass, migration_entry)) is True
+    hass.config_entries.async_update_entry.assert_called_once_with(
+        migration_entry,
+        unique_id="7601-0000-000001",
+        version=2,
+    )
+    migration_entry.version = 3
+    assert run(async_migrate_entry(hass, migration_entry)) is False
+
 
 def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
     async def exercise() -> None:
@@ -185,7 +204,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         with patch.object(config_flow_module, "KC761Client", Client):
             result = await flow.async_step_user({"host": "localhost", "port": 7601})
         assert result["type"] == "create_entry"
-        flow.async_set_unique_id.assert_awaited_once_with("7601_0000_000001")
+        flow.async_set_unique_id.assert_awaited_once_with("7601-0000-000001")
 
         class FailingClient(Client):
             async def async_connect(self):
@@ -206,7 +225,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
                 await duplicate.async_step_user({"host": "localhost", "port": 7601})
 
         entry = make_entry()
-        entry.unique_id = "7601_0000_000001"
+        entry.unique_id = "7601-0000-000001"
         hass = make_hass()
         hass.config_entries.async_get_entry.return_value = entry
         hass.config_entries.async_get_known_entry.return_value = entry
@@ -296,12 +315,14 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         fake.connected = False
         await coordinator._async_update_data()
         assert coordinator.reconnects == 1
-        assert fake.info_calls == 1
+        assert fake.info_calls == 2
         assert fake.status_calls == 2
-        await coordinator._async_push(SimpleNamespace(data=make_status()))
-        await coordinator._async_push(SimpleNamespace(data=None))
+        await coordinator._async_push(make_decoded_status())
+        await coordinator._async_push(
+            SimpleNamespace(frame=RawFrame(1, 0xA3, 81, b"", b""), data=None)
+        )
         coordinator._device_info = None
-        await coordinator._async_push(SimpleNamespace(data=make_status()))
+        await coordinator._async_push(make_decoded_status())
         await coordinator.async_shutdown()
         assert fake.closed is True
         coordinator._device_info = make_info()
@@ -327,6 +348,7 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
             await failing_coordinator._async_update_data()
         assert failing_coordinator.consecutive_failures == 1
         assert failing_coordinator.last_error == "OSError"
+        assert 1 <= failing_coordinator.retry_delay <= 30
 
         class NoInfoClient(FakeClient):
             async def async_get_device_info(self):
@@ -379,8 +401,36 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         coordinator._device_info = make_info()
         coordinator.last_update_success = False
         coordinator.async_set_updated_data.reset_mock()
-        await coordinator._async_push(SimpleNamespace(data=make_status()))
+        await coordinator._async_push(make_decoded_status())
         coordinator.async_set_updated_data.assert_not_called()
+
+        coordinator.last_update_success = True
+        coordinator.async_set_updated_data.reset_mock()
+        await coordinator._async_push(make_decoded_status(upload=False))
+        coordinator.async_set_updated_data.assert_not_called()
+
+        mismatch_client = FakeClient(info=make_info())
+        mismatch_client.info = mismatch_client.info.__class__(
+            device_model=mismatch_client.info.device_model,
+            hardware_version=mismatch_client.info.hardware_version,
+            firmware_version=mismatch_client.info.firmware_version,
+            coprocessor_firmware_version=mismatch_client.info.coprocessor_firmware_version,
+            sensor_types=mismatch_client.info.sensor_types,
+            device_id="different-device",
+            cumulative=mismatch_client.info.cumulative,
+            source_flag=mismatch_client.info.source_flag,
+            raw=mismatch_client.info.raw,
+            hardware_verified=False,
+        )
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=mismatch_client):
+                mismatch_coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        mismatch_coordinator.update_interval = None
+        with pytest.raises(coordinator_module.UpdateFailed):
+            await mismatch_coordinator._async_update_data()
+        assert mismatch_coordinator.identity_mismatches == 1
+        assert mismatch_client.closed is True
+        assert mismatch_client.status_calls == 0
 
     run(exercise())
 
