@@ -125,6 +125,8 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 or (now - self._last_info_at).total_seconds() >= self.info_interval
             ):
                 device_info = await self.client.async_get_device_info()
+                if not isinstance(device_info, DeviceInfo):
+                    raise UpdateFailed("KC761 returned no device information")
                 self._validate_device_info(device_info)
                 previous_info = self._device_info
                 self._device_info = device_info
