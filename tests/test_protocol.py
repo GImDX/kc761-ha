@@ -338,6 +338,30 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(simulator.forbidden_commands, [])
         self.assertEqual(simulator.invalid_requests, [])
 
+    async def test_client_serializes_concurrent_reads(self) -> None:
+        scenario = SimulatorScenario(response_delay=0.02)
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(*simulator.address)
+            maximum_pending = 0
+            original_write = client.transport.async_write
+
+            async def tracked_write(data: bytes) -> None:
+                nonlocal maximum_pending
+                maximum_pending = max(maximum_pending, len(client._pending))
+                await original_write(data)
+
+            client.transport.async_write = tracked_write
+            try:
+                status, info = await asyncio.gather(
+                    client.async_get_status(),
+                    client.async_get_device_info(),
+                )
+            finally:
+                await client.async_close()
+        self.assertEqual(status.battery_percent, 87)
+        self.assertEqual(info.device_id, "7601-0000-000001")
+        self.assertEqual(maximum_pending, 1)
+
     async def test_fragmented_response_and_push(self) -> None:
         scenario = SimulatorScenario(fragment_size=1, push_upload=True, coalesce_push=True)
         async with Kc761Simulator(scenario) as simulator:

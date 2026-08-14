@@ -57,6 +57,7 @@ class KC761Client:
         self.parser = FrameParser(max_frame_length=MAX_FRAME_LENGTH)
         self._reader_task: asyncio.Task[None] | None = None
         self._connection_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
         self._pending: dict[int, tuple[frozenset[int], asyncio.Future[DecodedFrame]]] = {}
         self._retired: dict[int, float] = {}
         self._next_sync = 0
@@ -111,6 +112,11 @@ class KC761Client:
             raise ValueError(f"write command blocked by read-only RC: {command:#x}")
         if command not in READ_COMMANDS:
             raise ValueError(f"unsupported command: {command:#x}")
+        async with self._request_lock:
+            return await self._async_request_locked(command)
+
+    async def _async_request_locked(self, command: int) -> DecodedFrame:
+        """Execute one read while holding the per-connection request lock."""
         if not self.connected:
             await self.async_connect()
         sync = self._allocate_sync()
