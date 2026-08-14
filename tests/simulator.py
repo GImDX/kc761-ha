@@ -50,6 +50,7 @@ class Kc761Simulator:
         self.received_commands: list[int] = []
         self.received_syncs: list[int] = []
         self.forbidden_commands: list[int] = []
+        self.invalid_requests: list[bytes] = []
         self.connections = 0
 
     @property
@@ -79,9 +80,14 @@ class Kc761Simulator:
         try:
             while True:
                 request = await reader.readexactly(4)
-                sync, command = request[0], request[1]
+                command, sync = request[1], request[2]
                 self.received_syncs.append(sync)
                 self.received_commands.append(command)
+                if request[0] != 0 or request[3] != 0:
+                    self.invalid_requests.append(request)
+                    writer.close()
+                    await writer.wait_closed()
+                    return
                 if command in FORBIDDEN_WRITE_COMMANDS or command not in {
                     CMD_GET_STA,
                     CMD_GET_DEVICE_INFO,

@@ -53,7 +53,7 @@ def encode_read_request(sync: int, command: int) -> bytes:
     """Encode one of the two RC read commands."""
     if command not in (CMD_GET_STA, CMD_GET_DEVICE_INFO):
         raise ValueError(f"command is not a supported read: {command:#x}")
-    return bytes((sync & 0xFF, command, 0x00, 0x00))
+    return bytes((0x00, command, sync & 0xFF, 0x00))
 
 
 def decode_frame(frame: RawFrame) -> DecodedFrame:
@@ -134,12 +134,12 @@ def decode_device_info(frame: RawFrame) -> DeviceInfo:
     body = frame.payload
     model = body[0]
     hw_version = body[1]
-    firmware_version = struct.unpack_from("<H", body, 2)[0]
-    co_firmware_version = struct.unpack_from("<H", body, 4)[0]
-    sensor_types = (body[6], body[7], body[8])
-    device_id = _decode_device_id(body[9:25])
+    firmware_version = body[2]
+    co_firmware_version = body[3]
+    sensor_types = (body[4], body[5], body[6])
+    device_id = _decode_device_id(body[32:48])
     cumulative: list[CumulativeChannel] = []
-    offset = 25
+    offset = 48
     for _ in range(3):
         spectrum_runtime = struct.unpack_from("<I", body, offset)[0]
         dose_runtime = struct.unpack_from("<I", body, offset + 4)[0]
@@ -247,14 +247,14 @@ def build_device_info_frame(
     body = bytearray(96)
     body[0] = model
     body[1] = hardware_version
-    struct.pack_into("<H", body, 2, firmware_version)
-    struct.pack_into("<H", body, 4, coprocessor_firmware_version)
-    body[6:9] = bytes(sensor_types)
+    body[2] = firmware_version
+    body[3] = coprocessor_firmware_version
+    body[4:7] = bytes(sensor_types)
     encoded_id = device_id.encode("ascii")
     if len(encoded_id) > 16:
         raise ValueError("device_id must fit in 16 bytes")
-    body[9 : 9 + len(encoded_id)] = encoded_id
-    offset = 25
+    body[32 : 32 + len(encoded_id)] = encoded_id
+    offset = 48
     for index in range(3):
         struct.pack_into("<I", body, offset, 3600 * (index + 1))
         struct.pack_into("<I", body, offset + 4, 7200 * (index + 1))

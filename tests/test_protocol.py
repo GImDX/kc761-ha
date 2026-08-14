@@ -8,7 +8,7 @@ import struct
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from custom_components.kc761.const import CMD_GET_STA, FLAG_STATUS_QUERY
+from custom_components.kc761.const import CMD_GET_DEVICE_INFO, CMD_GET_STA, FLAG_STATUS_QUERY
 from custom_components.kc761.protocol.client import KC761Client
 from custom_components.kc761.protocol.codec import (
     HARDWARE_VERIFIED,
@@ -33,6 +33,19 @@ from custom_components.kc761.protocol.models import (
 )
 from custom_components.kc761.protocol.transport import TcpTransport, TransportError
 from tests.simulator import Kc761Simulator, SimulatorScenario, unknown_frame
+
+
+MANUAL_DEVICE_INFO_FRAME = (
+    b"\x05\xa5\x64\x00"
+    b"\x0c\x0c\xb4\xb4\x02\x00\x00"
+    + b"\x00" * 25
+    + b"7601-0000-000001"
+    + bytes.fromhex(
+        "10 0e 00 00 20 1c 00 00 00 00 80 3f 00 00 00 40 "
+        "20 1c 00 00 40 38 00 00 00 00 00 40 00 00 80 40 "
+        "30 2a 00 00 60 54 00 00 00 00 40 40 00 00 c0 40"
+    )
+)
 
 
 class FramingTests(unittest.TestCase):
@@ -132,29 +145,30 @@ class CodecTests(unittest.TestCase):
         with self.assertRaises(DecodeError):
             decode_status(FrameParser().feed(raw)[0])
 
-    def test_device_info_candidate_and_id(self) -> None:
-        frame = FrameParser().feed(
-            build_device_info_frame(
-                5,
-                model=14,
-                hardware_version=21,
-                firmware_version=181,
-                device_id="KC761-TEST",
-            )
-        )[0]
+    def test_device_info_manual_vector_and_builder(self) -> None:
+        self.assertEqual(len(MANUAL_DEVICE_INFO_FRAME), 100)
+        frame = FrameParser().feed(MANUAL_DEVICE_INFO_FRAME)[0]
         info = decode_device_info(frame)
-        self.assertEqual(info.device_id, "KC761-TEST")
-        self.assertEqual(info.model_name, "KC761CN")
-        self.assertEqual(info.hw_version_text, "V2.1")
-        self.assertEqual(info.fw_version_text, "V1.81")
+        self.assertEqual(info.device_id, "7601-0000-000001")
+        self.assertEqual(info.model_name, "KC761A/B")
+        self.assertEqual(info.hw_version_text, "V1.2")
+        self.assertEqual(info.fw_version_text, "V1.80")
+        self.assertEqual(info.co_fw_version_text, "V1.80")
+        self.assertEqual(info.sensor_types, (2, 0, 0))
+        self.assertEqual(info.cumulative[0].spectrum_runtime, 3600)
+        self.assertEqual(info.cumulative[2].cumulative_dose_equivalent, 6.0)
         self.assertFalse(info.hardware_verified)
+        self.assertEqual(build_device_info_frame(5), MANUAL_DEVICE_INFO_FRAME)
 
     def test_decode_classifies_nonsemantic_known_flags(self) -> None:
         frame = FrameParser().feed(frame_bytes(1, 0xA6, b"\x00" * 146))[0]
         self.assertEqual(decode_frame(frame).kind, "calibration")
 
     def test_request_rejects_write_and_unknown_commands(self) -> None:
-        self.assertEqual(len(encode_read_request(1, CMD_GET_STA)), 4)
+        self.assertEqual(encode_read_request(1, CMD_GET_STA), b"\x00\x53\x01\x00")
+        self.assertEqual(
+            encode_read_request(0xFF, CMD_GET_DEVICE_INFO), b"\x00\x54\xff\x00"
+        )
         with self.assertRaises(ValueError):
             encode_read_request(1, 0x66)
 
@@ -173,15 +187,15 @@ class CodecTests(unittest.TestCase):
 
     def test_device_id_and_public_helpers(self) -> None:
         empty = bytearray(build_device_info_frame(1)[4:])
-        empty[9:25] = b"\x00" * 16
+        empty[32:48] = b"\x00" * 16
         with self.assertRaises(DecodeError):
             decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(empty)))[0])
         non_ascii = bytearray(build_device_info_frame(1)[4:])
-        non_ascii[9] = 0xFF
+        non_ascii[32] = 0xFF
         with self.assertRaises(DecodeError):
             decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(non_ascii)))[0])
         control = bytearray(build_device_info_frame(1)[4:])
-        control[9] = 1
+        control[32] = 1
         with self.assertRaises(DecodeError):
             decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(control)))[0])
         info = decode_device_info(FrameParser().feed(build_device_info_frame(1))[0])
@@ -288,7 +302,9 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(info.device_id, "7601-0000-000001")
         self.assertEqual(status.battery_percent, 87)
         self.assertTrue(set(simulator.received_commands) <= {0x53, 0x54})
+        self.assertEqual(simulator.received_syncs, [0, 1])
         self.assertEqual(simulator.forbidden_commands, [])
+        self.assertEqual(simulator.invalid_requests, [])
 
     async def test_fragmented_response_and_push(self) -> None:
         scenario = SimulatorScenario(fragment_size=1, push_upload=True, coalesce_push=True)
