@@ -178,7 +178,7 @@ def decode_device_info(frame: RawFrame) -> DeviceInfo:
 
 
 def _decode_device_id(value: bytes) -> str:
-    value = value.split(b"\x00", 1)[0].strip()
+    value = value.rstrip(b"\x00 ")
     if not value:
         raise DecodeError("empty DEVICE_ID")
     try:

@@ -204,6 +204,14 @@ class CodecTests(unittest.TestCase):
             decode_device_info(RawFrame(0, 0xA2, 100, b"\x00" * 96, b"\x00" * 100))
 
     def test_device_id_and_public_helpers(self) -> None:
+        leading = decode_device_info(
+            FrameParser().feed(build_device_info_frame(1, device_id=" leading"))[0]
+        )
+        self.assertEqual(leading.device_id, " leading")
+        trailing = decode_device_info(
+            FrameParser().feed(build_device_info_frame(1, device_id="RAW-ID   "))[0]
+        )
+        self.assertEqual(trailing.device_id, "RAW-ID")
         empty = bytearray(build_device_info_frame(1)[4:])
         empty[32:48] = b"\x00" * 16
         with self.assertRaises(DecodeError):
@@ -212,6 +220,12 @@ class CodecTests(unittest.TestCase):
         non_ascii[32] = 0xFF
         with self.assertRaises(DecodeError):
             decode_device_info(FrameParser().feed(frame_bytes(1, 0xA5, bytes(non_ascii)))[0])
+        embedded_nul = bytearray(build_device_info_frame(1)[4:])
+        embedded_nul[32:48] = b"AB\x00CD" + b"\x00" * 11
+        with self.assertRaises(DecodeError):
+            decode_device_info(
+                FrameParser().feed(frame_bytes(1, 0xA5, bytes(embedded_nul)))[0]
+            )
         control = bytearray(build_device_info_frame(1)[4:])
         control[32] = 1
         with self.assertRaises(DecodeError):
