@@ -11,7 +11,7 @@
 - 通道已安装但当前关闭并返回 `-1` 时，实体值为 `unknown`，不伪装为 0。
 - 设备/实体唯一标识来自 `DEVICE_ID` 和稳定字段 key，不使用 IP、端口或用户名称。
 - 测量实体只读取 Coordinator 内存快照，属性访问不得触发网络 I/O。
-- 平滑测量默认开启；上一秒原始测量默认不创建，降低 Recorder 压力。
+- 当前代码候选默认开启设备端 AVG 字段；实机证据表明本设备的三个 AVG 字段恒为 0，而官方上位机在本地计算 30 秒平均值。该差异登记为已知问题 `KI-AVG-001`，按限制接受，本设备本轮实机验收通过。
 - 单位不确定的累计量仅保留解析结果，不创建实体，也不声明长期统计。
 - 完整谱图和脉冲数组不作为实体属性。
 
@@ -49,16 +49,16 @@
 
 | 稳定 key | 显示名称 | 来源 | 原生单位 | state class | 默认 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `<channel>_avg_cps` | 平滑计数率 | `RADn_AVG_CPS` | `cps` | measurement | 开启 | 官方主界面核心指标 |
-| `<channel>_avg_dose_rate` | 平滑剂量率 | `RADn_AVG_DOSE_RATE` | `mGy/h` | measurement | 开启 | 可在展示层转换为更易读单位，但原生值固定 |
-| `<channel>_avg_dose_equivalent_rate` | 平滑剂量当量率 | `RADn_AVG_DOSE_EQ_RATE` | `mSv/h` | measurement | 开启 | UI 可转换为 `µSv/h`，不能改变存储语义 |
-| `<channel>_raw_cps` | 上一秒计数率 | `RADn_RAW_CPS` | `cps` | measurement | 默认不创建 | 高频、噪声更大 |
-| `<channel>_raw_dose_rate` | 上一秒剂量率 | `RADn_RAW_DOSE_RATE` | `mGy/h` | measurement | 默认不创建 | FP16 待确认 |
-| `<channel>_raw_dose_equivalent_rate` | 上一秒剂量当量率 | `RADn_RAW_DOSE_EQ_RATE` | `mSv/h` | measurement | 默认不创建 | FP16 待确认 |
+| `<channel>_avg_cps` | 平滑计数率 | `RADn_AVG_CPS` | `cps` | measurement | 开启（已知问题） | 本设备恒为 0；忠实反映线协议字段，不代替上位机本地 30 秒平均 |
+| `<channel>_avg_dose_rate` | 平滑剂量率 | `RADn_AVG_DOSE_RATE` | `mGy/h` | measurement | 开启（已知问题） | 本设备恒为 0；需要实时值时启用 raw 实体 |
+| `<channel>_avg_dose_equivalent_rate` | 平滑剂量当量率 | `RADn_AVG_DOSE_EQ_RATE` | `mSv/h` | measurement | 开启（已知问题） | 本设备恒为 0；需要实时值时启用 raw 实体 |
+| `<channel>_raw_cps` | 上一秒计数率 | `RADn_RAW_CPS` | `cps` | measurement | 默认不创建 | 本设备已与上位机 CSV 逐帧确认；高频、随机波动较大 |
+| `<channel>_raw_dose_rate` | 上一秒剂量率 | `RADn_RAW_DOSE_RATE` | `mGy/h` | measurement | 默认不创建 | binary16 已解码；尚无独立上位机导出列确认其物理量 |
+| `<channel>_raw_dose_equivalent_rate` | 上一秒剂量当量率 | `RADn_RAW_DOSE_EQ_RATE` | `mSv/h` | measurement | 默认不创建 | 本设备已与上位机 µSv/h CSV 逐帧确认 |
 
 Home Assistant 当前没有针对核辐射剂量率的专用 device class，因此这些量使用明确的原生单位、`measurement` state class 和放射性图标，不错误套用功率、频率或其它不相干设备类。
 
-默认 Options 不创建上一秒原始读数实体。用户显式开启“创建高频原始读数实体”后，才为已安装通道创建并启用三类 raw 实体；它们仍归类为 diagnostic。这样 Options 的选择能实际生效，同时默认安装不会把高频读数送入 Recorder。
+当前 Options 默认不创建上一秒原始读数实体。用户显式开启“创建高频原始读数实体”后，才为已安装通道创建并启用三类 raw 实体；它们仍归类为 diagnostic。实机已证明这些 raw 字段携带本设备的实时测量，而设备端 AVG 字段恒为 0。该行为作为 `KI-AVG-001` 接受，不阻塞本设备实机验收；用户需要实时测量时启用 raw 实体，后续是否调整默认值或新增 HA 侧派生平均另行评审。
 
 单位显示策略：
 
@@ -176,11 +176,11 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 
 ## 11. 默认启用摘要
 
-当前模拟 RC 在对应通道存在时默认启用以下实体，但所有实体固定公开 `hardware_verified=false`；在取得 L 级实机证据前，这一默认集合不能被解释为测量语义已获硬件确认：
+当前代码候选在对应通道存在时默认启用以下实体，但所有实体固定公开 `hardware_verified=false`。实机逐帧证据已经证明其中三个设备端 AVG 实体在本设备上恒为 0；该限制已作为 `KI-AVG-001` 接受，以下清单同时描述当前实现和本轮验收口径：
 
 - 电池、气压、设备温度；
 - 各已安装通道的平滑计数率；
 - 各已安装通道的平滑剂量率；
 - 各已安装通道的平滑剂量当量率。
 
-原始读数仅在 Options 显式开启后创建；时钟、固件附加信息和谱图累积状态默认禁用/diagnostic；累计时间、累计剂量和传感器型号不创建实体，只保留在内存模型或脱敏 diagnostics。这样保留核心测量体验，同时控制实体数量和历史数据体积。
+原始读数目前仅在 Options 显式开启后创建；时钟、固件附加信息和谱图累积状态默认禁用/diagnostic；累计时间、累计剂量和传感器型号不创建实体，只保留在内存模型或脱敏 diagnostics。上位机的 30 秒平滑设置不能解释为设备协议参数；如果以后改变平均/原始实体策略，届时再执行 Recorder、迁移和实机回归，不影响当前按已知问题限制通过的验收结论。
