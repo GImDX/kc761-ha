@@ -85,7 +85,10 @@ def decode_status(frame: RawFrame) -> StatusData:
         validation_errors.append("auto_upload_status")
     else:
         auto_upload_value = auto_upload_status
-    battery = body[4]
+    # Real KC761 traffic uses bit 7 as a status flag.  The official client
+    # displays the remaining seven bits as the battery percentage (for
+    # example, 0x80 is displayed as 0%).
+    battery = body[4] & 0x7F
     if battery > 100:
         battery_value: int | None = None
         validation_errors.append("battery_percent")

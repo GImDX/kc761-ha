@@ -28,6 +28,7 @@ from custom_components.kc761.protocol.models import (
     RawFrame,
     TransactionError,
     as_public_dict,
+    format_co_fw_version,
     format_fw_version,
     redacted_device_id_suffix,
     utc_from_epoch,
@@ -159,6 +160,31 @@ class CodecTests(unittest.TestCase):
 
         asyncio.run(route())
 
+    def test_battery_percentage_uses_low_seven_bits(self) -> None:
+        empty = ((-1, -1, -1, -1, -1, -1),) * 3
+
+        flagged_empty = decode_status(
+            FrameParser().feed(
+                build_status_frame(1, battery_percent=0x80, channels=empty)
+            )[0]
+        )
+        flagged_full = decode_status(
+            FrameParser().feed(
+                build_status_frame(2, battery_percent=0xE4, channels=empty)
+            )[0]
+        )
+        flagged_invalid = decode_status(
+            FrameParser().feed(
+                build_status_frame(3, battery_percent=0xE5, channels=empty)
+            )[0]
+        )
+
+        self.assertEqual(flagged_empty.battery_percent, 0)
+        self.assertNotIn("battery_percent", flagged_empty.validation_errors)
+        self.assertEqual(flagged_full.battery_percent, 100)
+        self.assertIsNone(flagged_invalid.battery_percent)
+        self.assertIn("battery_percent", flagged_invalid.validation_errors)
+
     def test_nan_is_rejected(self) -> None:
         body = bytearray(build_status_frame(1)[4:])
         struct.pack_into("<f", body, 37, math.nan)
@@ -228,6 +254,12 @@ class CodecTests(unittest.TestCase):
         info = decode_device_info(FrameParser().feed(build_device_info_frame(1))[0])
         status = decode_status(FrameParser().feed(build_status_frame(1))[0])
         self.assertEqual(format_fw_version(180), "V1.80")
+        self.assertEqual(format_co_fw_version(11), "V1.1")
+        observed_info = decode_device_info(
+            FrameParser().feed(build_device_info_frame(2, coprocessor_firmware_version=11))[0]
+        )
+        self.assertEqual(observed_info.co_fw_version_text, "V1.1")
+        self.assertEqual(model_name(10), "KC761")
         self.assertEqual(model_name(255), "Unknown (255)")
         self.assertEqual(sensor_name(255), "Unknown (0xff)")
         self.assertEqual(as_public_dict(info)["device_id_suffix"], "0001")

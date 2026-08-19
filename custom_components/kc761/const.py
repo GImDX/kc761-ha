@@ -78,7 +78,7 @@ FORBIDDEN_WRITE_COMMANDS = {
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 MODEL_NAMES = {
-    10: "KC761 prototype",
+    10: "KC761",
     11: "KC761",
     12: "KC761A/B",
     13: "KC761C",

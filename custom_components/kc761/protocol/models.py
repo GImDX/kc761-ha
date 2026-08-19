@@ -120,12 +120,27 @@ class DeviceInfo:
 
     @property
     def co_fw_version_text(self) -> str:
-        return format_fw_version(self.coprocessor_firmware_version)
+        return format_co_fw_version(self.coprocessor_firmware_version)
 
 
 def format_fw_version(value: int) -> str:
     """Format a V1.80-style integer without dropping trailing zeroes."""
     return f"V{value // 100}.{value % 100:02d}"
+
+
+def format_co_fw_version(value: int) -> str:
+    """Format the observed coprocessor version encoding.
+
+    The real KC761 capture reported ``CO_FW_VER=11`` while the official
+    upper-computer screen displayed ``v1.1``.  This differs from the manual's
+    shared FW/CO ``/100`` example.  Preserve the manual format for the
+    three-digit values used by the fixture and only apply the observed
+    shortened form to two-digit values until another firmware family confirms
+    the general rule.
+    """
+    if 10 <= value < 100:
+        return f"V{value // 10}.{value % 10}"
+    return format_fw_version(value)
 
 
 def redacted_device_id_suffix(value: str) -> str:
