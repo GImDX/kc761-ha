@@ -185,7 +185,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             if self._shutdown:
                 return
             self._shutdown = True
-            self.async_stop_update()
+            await super().async_shutdown()
             await self.client.async_close()
 
     async def async_reconfigure(self, host: str, port: int) -> None:
@@ -213,7 +213,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         )
 
     def _create_hass_task(self, coroutine: Any, name: str) -> asyncio.Task[None]:
-        return self._hass.async_create_task(coroutine, name=name)
+        return self.entry.async_create_background_task(self._hass, coroutine, name)
 
     def _validate_device_info(self, info: DeviceInfo) -> None:
         if not self.expected_device_id or info.device_id != self.expected_device_id:

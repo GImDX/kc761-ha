@@ -72,6 +72,9 @@ def make_entry(*, options: dict | None = None, unique_id: str = "7601-0000-00000
     entry.runtime_data = None
     entry.add_update_listener = MagicMock(return_value=lambda: None)
     entry.async_on_unload = MagicMock()
+    entry.async_create_background_task.side_effect = (
+        lambda hass, coroutine, name: asyncio.create_task(coroutine, name=name)
+    )
     return entry
 
 
@@ -368,7 +371,17 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
                 coordinator = coordinator_module.KC761Coordinator(hass, entry)
         coordinator.last_update_success = True
         coordinator.async_set_updated_data = MagicMock()
-        coordinator.async_stop_update = MagicMock()
+        background_coroutine = asyncio.sleep(0)
+        background_task = coordinator._create_hass_task(
+            background_coroutine,
+            "kc761-reader-test",
+        )
+        await background_task
+        entry.async_create_background_task.assert_called_once_with(
+            hass,
+            background_coroutine,
+            "kc761-reader-test",
+        )
         result = await coordinator._async_update_data()
         assert result.status.battery_percent == 87
         assert fake.info_calls == 1
@@ -383,11 +396,17 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         await coordinator._async_push(SimpleNamespace(frame=RawFrame(1, 0xA3, 81, b"", b""), data=None))
         coordinator._device_info = None
         await coordinator._async_push(make_decoded_status())
-        await coordinator.async_shutdown()
-        await coordinator.async_shutdown()
+        base_shutdown = AsyncMock()
+        with patch.object(
+            coordinator_module.DataUpdateCoordinator,
+            "async_shutdown",
+            base_shutdown,
+        ):
+            await coordinator.async_shutdown()
+            await coordinator.async_shutdown()
         assert fake.closed is True
         assert fake.close_calls == 1
-        coordinator.async_stop_update.assert_called_once()
+        base_shutdown.assert_awaited_once()
         coordinator._device_info = make_info()
         assert coordinator.hardware_verified is False
         assert coordinator_module._bounded("bad", 5, 10) == 5
