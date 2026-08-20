@@ -123,6 +123,85 @@ class DeviceInfo:
         return format_co_fw_version(self.coprocessor_firmware_version)
 
 
+@dataclass(frozen=True, slots=True)
+class SpectrumSegment:
+    """One A0/A1 spectrum fragment."""
+
+    source: int
+    offset: int
+    ratio: int
+    counts: tuple[int, ...]
+    source_flag: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpectrumData:
+    """One complete spectrum reconstructed from bounded A0/A1 fragments."""
+
+    source: int
+    counts: tuple[int, ...]
+    segment_count: int
+    source_flag: int
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationData:
+    """Read-only A6 energy calibration data required to label spectra."""
+
+    factory_version: int
+    energy_calibration_select: int
+    energy_zoom: tuple[float, float, float]
+    energy_offset: tuple[float, float, float]
+    custom_energy_calibration: tuple[float, float, float, float]
+    channel1_factory_calibration: tuple[float, float, float, float]
+    channel2_factory_calibration: tuple[float, float, float, float]
+    channel0_factory_low: tuple[float, float, float, float]
+    channel0_factory_middle: tuple[float, float, float, float]
+    channel0_factory_high: tuple[float, float, float, float]
+    channel0_factory_node1: int
+    channel0_factory_node2: int
+    source_flag: int
+
+    def energy_kev(self, source: int, channel: int) -> float:
+        """Return the calibrated energy for one channel address."""
+        if not 0 <= source <= 2:
+            raise ValueError("spectrum source outside 0..2")
+        if channel < 0:
+            raise ValueError("channel address must be non-negative")
+        if source == 0:
+            if self.energy_calibration_select == 1:
+                coefficients = self.custom_energy_calibration
+            elif self.factory_version == 2:
+                if channel < self.channel0_factory_node1:
+                    coefficients = self.channel0_factory_low
+                elif channel <= self.channel0_factory_node2:
+                    coefficients = self.channel0_factory_middle
+                else:
+                    coefficients = self.channel0_factory_high
+            else:
+                coefficients = self.channel0_factory_middle
+        elif source == 1:
+            coefficients = self.channel1_factory_calibration
+        else:
+            coefficients = self.channel2_factory_calibration
+        a, b, c, d = coefficients
+        unscaled = ((a * channel + b) * channel + c) * channel + d
+        return unscaled * self.energy_zoom[source] + self.energy_offset[source]
+
+
+@dataclass(frozen=True, slots=True)
+class CommandAck:
+    """One AA response to a state, time, calibration, or clear command."""
+
+    status: int
+    command: int
+    source_flag: int
+
+    @property
+    def successful(self) -> bool:
+        return self.status == 0
+
+
 def format_fw_version(value: int) -> str:
     """Format a V1.80-style integer without dropping trailing zeroes."""
     return f"V{value // 100}.{value % 100:02d}"

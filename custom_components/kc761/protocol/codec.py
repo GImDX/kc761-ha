@@ -13,8 +13,11 @@ import struct
 from dataclasses import dataclass
 
 from ..const import (
-    CMD_GET_DEVICE_INFO,
-    CMD_GET_STA,
+    CMD_GET_MC_DATA,
+    CMD_SET_CLEAR,
+    CMD_SET_DEVICE_TIME,
+    CMD_SET_STA,
+    FLAG_ACK,
     FLAG_CAL_DATA,
     FLAG_DEVICE_INFO,
     FLAG_MC_DATA_QUERY,
@@ -23,15 +26,20 @@ from ..const import (
     FLAG_STATUS_UPLOAD,
     FLAG_STREAM_DATA,
     MODEL_NAMES,
+    READ_COMMANDS,
     SENSOR_NAMES,
+    WRITE_COMMANDS,
 )
 from .framing import frame_bytes
 from .models import (
+    CalibrationData,
     ChannelReading,
+    CommandAck,
     CumulativeChannel,
     DecodeError,
     DeviceInfo,
     RawFrame,
+    SpectrumSegment,
     StatusData,
     utc_from_epoch,
 )
@@ -46,29 +54,156 @@ class DecodedFrame:
 
     frame: RawFrame
     kind: str
-    data: StatusData | DeviceInfo | None = None
+    data: StatusData | DeviceInfo | SpectrumSegment | CalibrationData | CommandAck | None = None
 
 
-def encode_read_request(sync: int, command: int) -> bytes:
-    """Encode one of the two RC read commands."""
-    if command not in (CMD_GET_STA, CMD_GET_DEVICE_INFO):
+def encode_read_request(sync: int, command: int, *, source: int | None = None) -> bytes:
+    """Encode one supported read command."""
+    if command not in READ_COMMANDS:
         raise ValueError(f"command is not a supported read: {command:#x}")
+    if command == CMD_GET_MC_DATA:
+        if source is None or not 0 <= source <= 2:
+            raise ValueError("spectrum source must be in 0..2")
+        return bytes((0x00, command, sync & 0xFF, source, 0x00))
+    if source is not None:
+        raise ValueError("source is only valid for spectrum reads")
     return bytes((0x00, command, sync & 0xFF, 0x00))
 
 
+def encode_set_state_request(
+    sync: int,
+    *,
+    sensor_status: int = 0xFF,
+    volume_status: int = 0xFF,
+    led_screen_status: int = 0xFF,
+    auto_upload_status: int = 0xFF,
+) -> bytes:
+    """Encode a masked 0x62 state update; 0xFF preserves a field."""
+    values = (sensor_status, volume_status, led_screen_status, auto_upload_status)
+    if any(not 0 <= value <= 0xFF for value in values):
+        raise ValueError("state byte outside uint8")
+    if auto_upload_status not in (0, 1, 0xFF):
+        raise ValueError("automatic upload must be 0, 1, or 0xff")
+    return bytes((0x00, CMD_SET_STA, sync & 0xFF, *values, 0x00))
+
+
+def encode_set_device_time_request(sync: int, epoch: int) -> bytes:
+    """Encode a 0x63 UNIX time update."""
+    if not 0 <= epoch <= 0xFFFFFFFF:
+        raise ValueError("device time outside uint32")
+    return bytes((0x00, CMD_SET_DEVICE_TIME, sync & 0xFF)) + struct.pack("<I", epoch) + b"\x00"
+
+
+def encode_clear_request(
+    sync: int,
+    *,
+    spectrum_mask: int = 0,
+    dose_curve_mask: int = 0,
+    cumulative_dose_mask: int = 0,
+) -> bytes:
+    """Encode a 0x66 per-channel clear request."""
+    masks = (spectrum_mask, dose_curve_mask, cumulative_dose_mask)
+    if not any(masks):
+        raise ValueError("at least one clear mask is required")
+    if any(mask < 0 or mask > 0x07 for mask in masks):
+        raise ValueError("clear masks must use only channel bits 0..2")
+    return bytes((0x00, CMD_SET_CLEAR, sync & 0xFF, *masks, 0x00))
+
+
+def validate_write_request(request: bytes) -> int:
+    """Return the command after validating a complete supported write frame."""
+    if len(request) < 3 or request[0] != 0:
+        raise ValueError("invalid KC761 request envelope")
+    command = request[1]
+    if command not in WRITE_COMMANDS:
+        raise ValueError(f"command is not a supported write: {command:#x}")
+    expected_length = {CMD_SET_STA: 8, CMD_SET_DEVICE_TIME: 8, CMD_SET_CLEAR: 7}[command]
+    if len(request) != expected_length or request[-1] != 0:
+        raise ValueError(f"invalid request length for {command:#x}")
+    return command
+
+
 def decode_frame(frame: RawFrame) -> DecodedFrame:
-    """Decode A2/A3/A5 semantically and classify every other bounded flag."""
+    """Decode all supported read responses and command acknowledgements."""
+    if frame.flag in (FLAG_MC_DATA_QUERY, FLAG_MC_DATA_UPLOAD):
+        return DecodedFrame(frame, "spectrum", decode_spectrum_segment(frame))
     if frame.flag in (FLAG_STATUS_QUERY, FLAG_STATUS_UPLOAD):
         return DecodedFrame(frame, "status", decode_status(frame))
     if frame.flag == FLAG_DEVICE_INFO:
         return DecodedFrame(frame, "device_info", decode_device_info(frame))
+    if frame.flag == FLAG_CAL_DATA:
+        return DecodedFrame(frame, "calibration", decode_calibration(frame))
+    if frame.flag == FLAG_ACK:
+        return DecodedFrame(frame, "ack", decode_ack(frame))
     kind = {
-        FLAG_MC_DATA_QUERY: "spectrum_query",
-        FLAG_MC_DATA_UPLOAD: "spectrum_upload",
         FLAG_STREAM_DATA: "stream_upload",
-        FLAG_CAL_DATA: "calibration",
     }.get(frame.flag, "known" if frame.known else "unknown")
     return DecodedFrame(frame, kind)
+
+
+def decode_spectrum_segment(frame: RawFrame) -> SpectrumSegment:
+    """Decode one variable-length A0/A1 spectrum fragment."""
+    if frame.flag not in (FLAG_MC_DATA_QUERY, FLAG_MC_DATA_UPLOAD):
+        raise DecodeError(f"not a spectrum flag: {frame.flag:#x}")
+    if frame.bag_len < 9 or len(frame.payload) != frame.bag_len - 4:
+        raise DecodeError("invalid spectrum frame length")
+    body = frame.payload
+    source = body[0]
+    offset = struct.unpack_from("<H", body, 1)[0]
+    ratio = struct.unpack_from("<H", body, 3)[0]
+    if source > 2:
+        raise DecodeError(f"invalid spectrum source: {source}")
+    if ratio < 1:
+        raise DecodeError("spectrum ratio must be at least one")
+    relative = struct.unpack_from(f"<{(len(body) - 5) // 2}H", body, 5)
+    counts = tuple(value * ratio for value in relative)
+    return SpectrumSegment(source, offset, ratio, counts, frame.flag)
+
+
+def decode_calibration(frame: RawFrame) -> CalibrationData:
+    """Decode the 150-byte A6 calibration frame used for spectrum energy labels."""
+    if frame.flag != FLAG_CAL_DATA:
+        raise DecodeError(f"not a calibration flag: {frame.flag:#x}")
+    if frame.bag_len != 150 or len(frame.payload) != 146:
+        raise DecodeError(f"calibration length {frame.bag_len}, expected 150")
+    body = frame.payload
+    calibration_select = body[1]
+    if calibration_select not in (0, 1):
+        raise DecodeError(f"invalid energy calibration selection: {calibration_select}")
+    def floats(offset: int, count: int = 1) -> tuple[float, ...]:
+        return tuple(_decode_float(body, offset + index * 4) for index in range(count))
+
+    zoom = (floats(2)[0], floats(10)[0], floats(18)[0])
+    offset = (floats(6)[0], floats(14)[0], floats(22)[0])
+    return CalibrationData(
+        factory_version=body[0],
+        energy_calibration_select=calibration_select,
+        energy_zoom=zoom,
+        energy_offset=offset,
+        custom_energy_calibration=floats(46, 4),
+        channel1_factory_calibration=floats(62, 4),
+        channel2_factory_calibration=floats(78, 4),
+        channel0_factory_low=floats(94, 4),
+        channel0_factory_middle=floats(110, 4),
+        channel0_factory_high=floats(126, 4),
+        channel0_factory_node1=struct.unpack_from("<H", body, 142)[0],
+        channel0_factory_node2=struct.unpack_from("<H", body, 144)[0],
+        source_flag=frame.flag,
+    )
+
+
+def decode_ack(frame: RawFrame) -> CommandAck:
+    """Decode and validate one six-byte AA acknowledgement."""
+    if frame.flag != FLAG_ACK:
+        raise DecodeError(f"not an ACK flag: {frame.flag:#x}")
+    if frame.bag_len != 6 or len(frame.payload) != 2:
+        raise DecodeError(f"ACK length {frame.bag_len}, expected 6")
+    status, command = frame.payload
+    if status not in (0, 1):
+        raise DecodeError(f"invalid ACK status: {status}")
+    if command not in WRITE_COMMANDS and command != 0x64:
+        raise DecodeError(f"invalid ACK command: {command:#x}")
+    return CommandAck(status, command, frame.flag)
 
 
 def decode_status(frame: RawFrame) -> StatusData:
@@ -274,3 +409,43 @@ def build_device_info_frame(
         struct.pack_into("<f", body, offset + 12, 2.0 * (index + 1))
         offset += 16
     return frame_bytes(sync, FLAG_DEVICE_INFO, bytes(body))
+
+
+def build_spectrum_frame(
+    sync: int,
+    *,
+    source: int,
+    offset: int,
+    counts: tuple[int, ...],
+    ratio: int = 1,
+    upload: bool = False,
+) -> bytes:
+    """Build one deterministic A0/A1 fixture fragment."""
+    if not 0 <= source <= 2 or not 0 <= offset <= 0xFFFF or not 1 <= ratio <= 0xFFFF:
+        raise ValueError("invalid spectrum fixture metadata")
+    if any(count < 0 or count % ratio or count // ratio > 0xFFFF for count in counts):
+        raise ValueError("spectrum counts cannot be represented by ratio")
+    body = bytes((source,)) + struct.pack("<HH", offset, ratio)
+    body += struct.pack(f"<{len(counts)}H", *(count // ratio for count in counts))
+    return frame_bytes(sync, FLAG_MC_DATA_UPLOAD if upload else FLAG_MC_DATA_QUERY, body)
+
+
+def build_calibration_frame(sync: int) -> bytes:
+    """Build a deterministic A6 fixture with identity energy calibration."""
+    body = bytearray(146)
+    body[0] = 2
+    body[1] = 0
+    for offset in (2, 10, 18):
+        struct.pack_into("<f", body, offset, 1.0)
+    identity = (0.0, 0.0, 1.0, 0.0)
+    for offset in (46, 62, 78, 94, 110, 126):
+        struct.pack_into("<4f", body, offset, *identity)
+    struct.pack_into("<HH", body, 142, 512, 1536)
+    return frame_bytes(sync, FLAG_CAL_DATA, bytes(body))
+
+
+def build_ack_frame(sync: int, command: int, *, status: int = 0) -> bytes:
+    """Build a deterministic six-byte AA fixture."""
+    if status not in (0, 1) or command not in WRITE_COMMANDS | {0x64}:
+        raise ValueError("invalid ACK fixture")
+    return frame_bytes(sync, FLAG_ACK, bytes((status, command)))

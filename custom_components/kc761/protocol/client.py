@@ -1,35 +1,98 @@
-"""Serialized read-only KC761 client and response router."""
+"""Serialized KC761 client, multi-frame spectrum collector, and response router."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..const import (
+    CMD_GET_CAL_DATA,
     CMD_GET_DEVICE_INFO,
+    CMD_GET_MC_DATA,
     CMD_GET_STA,
+    FLAG_ACK,
+    FLAG_CAL_DATA,
     FLAG_DEVICE_INFO,
+    FLAG_MC_DATA_QUERY,
     FLAG_MC_DATA_UPLOAD,
     FLAG_STATUS_QUERY,
     FLAG_STATUS_UPLOAD,
     FLAG_STREAM_DATA,
-    FORBIDDEN_WRITE_COMMANDS,
     MAX_CONSECUTIVE_PROTOCOL_ERRORS,
     MAX_FRAME_LENGTH,
     READ_COMMANDS,
     REQUEST_TIMEOUT,
+    SPECTRUM_CHANNEL_COUNT,
 )
-from .codec import DecodedFrame, decode_frame, encode_read_request
+from .codec import (
+    DecodedFrame,
+    decode_frame,
+    encode_clear_request,
+    encode_read_request,
+    encode_set_device_time_request,
+    encode_set_state_request,
+    validate_write_request,
+)
 from .framing import FrameParser
-from .models import DeviceInfo, RawFrame, StatusData, TransactionError
+from .models import (
+    CalibrationData,
+    CommandAck,
+    DeviceInfo,
+    RawFrame,
+    SpectrumData,
+    SpectrumSegment,
+    StatusData,
+    TransactionError,
+)
 from .transport import TcpTransport, TransportError
 
 PushCallback = Callable[[DecodedFrame], Awaitable[None] | None]
 TaskCreator = Callable[[Coroutine[Any, Any, None], str], asyncio.Task[None]]
-QUERY_RESPONSE_FLAGS = frozenset({FLAG_STATUS_QUERY, FLAG_DEVICE_INFO})
+QUERY_RESPONSE_FLAGS = frozenset(
+    {FLAG_MC_DATA_QUERY, FLAG_STATUS_QUERY, FLAG_DEVICE_INFO, FLAG_CAL_DATA, FLAG_ACK}
+)
 PUSH_FLAGS = frozenset({FLAG_MC_DATA_UPLOAD, FLAG_STATUS_UPLOAD, FLAG_STREAM_DATA})
+
+
+@dataclass(slots=True)
+class PendingTransaction:
+    """One serialized transaction, optionally collecting spectrum fragments."""
+
+    command: int
+    expected_flags: frozenset[int]
+    future: asyncio.Future[DecodedFrame | SpectrumData]
+    spectrum_source: int | None = None
+    spectrum_counts: list[int | None] = field(
+        default_factory=lambda: [None] * SPECTRUM_CHANNEL_COUNT
+    )
+    spectrum_segments: int = 0
+
+    def add_spectrum_segment(self, segment: SpectrumSegment) -> SpectrumData | None:
+        """Add a fragment and return a complete fixed-size KC761x spectrum."""
+        if self.spectrum_source is None or segment.source != self.spectrum_source:
+            raise TransactionError("spectrum source does not match request")
+        if segment.offset >= SPECTRUM_CHANNEL_COUNT:
+            raise TransactionError("spectrum segment starts outside supported range")
+        self.spectrum_segments += 1
+        for relative_index, count in enumerate(segment.counts):
+            channel = segment.offset + relative_index
+            if channel >= SPECTRUM_CHANNEL_COUNT:
+                break
+            existing = self.spectrum_counts[channel]
+            if existing is not None and existing != count:
+                raise TransactionError("overlapping spectrum fragments disagree")
+            self.spectrum_counts[channel] = count
+        if any(count is None for count in self.spectrum_counts):
+            return None
+        return SpectrumData(
+            source=self.spectrum_source,
+            counts=tuple(int(count) for count in self.spectrum_counts),
+            segment_count=self.spectrum_segments,
+            source_flag=FLAG_MC_DATA_QUERY,
+        )
 
 
 def _asyncio_task_creator(coroutine: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
@@ -58,7 +121,7 @@ class KC761Client:
         self._reader_task: asyncio.Task[None] | None = None
         self._connection_lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
-        self._pending: dict[int, tuple[frozenset[int], asyncio.Future[DecodedFrame]]] = {}
+        self._pending: dict[int, PendingTransaction] = {}
         self._retired: dict[int, float] = {}
         self._next_sync = 0
         self._closed = False
@@ -106,26 +169,35 @@ class KC761Client:
                     pass
             await self.transport.async_close()
 
-    async def async_request(self, command: int) -> DecodedFrame:
+    async def async_request(self, command: int, *, source: int | None = None) -> DecodedFrame | SpectrumData:
         """Send one supported read command and await its matching response."""
-        if command in FORBIDDEN_WRITE_COMMANDS:
-            raise ValueError(f"write command blocked by read-only RC: {command:#x}")
         if command not in READ_COMMANDS:
             raise ValueError(f"unsupported command: {command:#x}")
+        if command == CMD_GET_MC_DATA and (source is None or not 0 <= source <= 2):
+            raise ValueError("spectrum source must be in 0..2")
+        if command != CMD_GET_MC_DATA and source is not None:
+            raise ValueError("source is only valid for spectrum reads")
         async with self._request_lock:
-            return await self._async_request_locked(command)
+            return await self._async_request_locked(command, source=source)
 
-    async def _async_request_locked(self, command: int) -> DecodedFrame:
+    async def _async_request_locked(
+        self, command: int, *, source: int | None = None
+    ) -> DecodedFrame | SpectrumData:
         """Execute one read while holding the per-connection request lock."""
         if not self.connected:
             await self.async_connect()
         sync = self._allocate_sync()
-        expected = frozenset({FLAG_STATUS_QUERY}) if command == CMD_GET_STA else frozenset({FLAG_DEVICE_INFO})
+        expected = {
+            CMD_GET_MC_DATA: frozenset({FLAG_MC_DATA_QUERY}),
+            CMD_GET_STA: frozenset({FLAG_STATUS_QUERY}),
+            CMD_GET_DEVICE_INFO: frozenset({FLAG_DEVICE_INFO}),
+            CMD_GET_CAL_DATA: frozenset({FLAG_CAL_DATA}),
+        }[command]
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[DecodedFrame] = loop.create_future()
-        self._pending[sync] = (expected, future)
+        future: asyncio.Future[DecodedFrame | SpectrumData] = loop.create_future()
+        self._pending[sync] = PendingTransaction(command, expected, future, source)
         try:
-            await self.transport.async_write(encode_read_request(sync, command))
+            await self.transport.async_write(encode_read_request(sync, command, source=source))
             return await asyncio.wait_for(future, self.request_timeout)
         except TimeoutError as err:
             await self.async_close()
@@ -136,15 +208,90 @@ class KC761Client:
 
     async def async_get_status(self) -> StatusData:
         result = await self.async_request(CMD_GET_STA)
-        if not isinstance(result.data, StatusData):
+        if not isinstance(result, DecodedFrame) or not isinstance(result.data, StatusData):
             raise TransactionError("status response did not decode")
         return result.data
 
     async def async_get_device_info(self) -> DeviceInfo:
         result = await self.async_request(CMD_GET_DEVICE_INFO)
-        if not isinstance(result.data, DeviceInfo):
+        if not isinstance(result, DecodedFrame) or not isinstance(result.data, DeviceInfo):
             raise TransactionError("device info response did not decode")
         return result.data
+
+    async def async_get_calibration(self) -> CalibrationData:
+        result = await self.async_request(CMD_GET_CAL_DATA)
+        if not isinstance(result, DecodedFrame) or not isinstance(result.data, CalibrationData):
+            raise TransactionError("calibration response did not decode")
+        return result.data
+
+    async def async_get_spectrum(self, source: int) -> SpectrumData:
+        result = await self.async_request(CMD_GET_MC_DATA, source=source)
+        if not isinstance(result, SpectrumData):
+            raise TransactionError("spectrum response did not complete")
+        return result
+
+    async def async_set_state(
+        self,
+        *,
+        sensor_status: int = 0xFF,
+        volume_status: int = 0xFF,
+        led_screen_status: int = 0xFF,
+        auto_upload_status: int = 0xFF,
+    ) -> CommandAck:
+        return await self._async_write(
+            lambda sync: encode_set_state_request(
+                sync,
+                sensor_status=sensor_status,
+                volume_status=volume_status,
+                led_screen_status=led_screen_status,
+                auto_upload_status=auto_upload_status,
+            )
+        )
+
+    async def async_set_device_time(self, epoch: int) -> CommandAck:
+        return await self._async_write(lambda sync: encode_set_device_time_request(sync, epoch))
+
+    async def async_clear_statistics(
+        self,
+        *,
+        spectrum_mask: int = 0,
+        dose_curve_mask: int = 0,
+        cumulative_dose_mask: int = 0,
+    ) -> CommandAck:
+        return await self._async_write(
+            lambda sync: encode_clear_request(
+                sync,
+                spectrum_mask=spectrum_mask,
+                dose_curve_mask=dose_curve_mask,
+                cumulative_dose_mask=cumulative_dose_mask,
+            )
+        )
+
+    async def _async_write(self, request_builder: Callable[[int], bytes]) -> CommandAck:
+        """Serialize one supported write, validate its AA response, and return it."""
+        async with self._request_lock:
+            if not self.connected:
+                await self.async_connect()
+            sync = self._allocate_sync()
+            request = request_builder(sync)
+            command = validate_write_request(request)
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[DecodedFrame | SpectrumData] = loop.create_future()
+            self._pending[sync] = PendingTransaction(command, frozenset({FLAG_ACK}), future)
+            try:
+                await self.transport.async_write(request)
+                result = await asyncio.wait_for(future, self.request_timeout)
+            except TimeoutError as err:
+                await self.async_close()
+                raise TimeoutError(f"KC761 command {command:#x} timed out") from err
+            finally:
+                self._pending.pop(sync, None)
+                self._retired[sync] = time.monotonic() + self.request_timeout
+            if not isinstance(result, DecodedFrame) or not isinstance(result.data, CommandAck):
+                raise TransactionError("write response did not decode as ACK")
+            if not result.data.successful:
+                raise TransactionError(f"KC761 command {command:#x} failed")
+            return result.data
 
     def _allocate_sync(self) -> int:
         now = time.monotonic()
@@ -195,10 +342,25 @@ class KC761Client:
         if isinstance(decoded.data, StatusData):
             self.data_errors += len(decoded.data.validation_errors)
         pending = self._pending.get(frame.sync)
-        if pending is not None and frame.flag in pending[0]:
+        if pending is not None and frame.flag in pending.expected_flags:
+            try:
+                if isinstance(decoded.data, SpectrumSegment):
+                    completed = pending.add_spectrum_segment(decoded.data)
+                    if completed is None:
+                        return
+                    result: DecodedFrame | SpectrumData = completed
+                else:
+                    if isinstance(decoded.data, CommandAck) and decoded.data.command != pending.command:
+                        raise TransactionError("ACK command does not match request")
+                    result = decoded
+            except TransactionError as err:
+                self._record_protocol_errors()
+                if not pending.future.done():
+                    pending.future.set_exception(err)
+                return
             self.responses += 1
-            if not pending[1].done():
-                pending[1].set_result(decoded)
+            if not pending.future.done():
+                pending.future.set_result(result)
             return
         if frame.flag in QUERY_RESPONSE_FLAGS:
             self.late_responses += 1
@@ -223,7 +385,7 @@ class KC761Client:
         self.consecutive_protocol_errors += count
 
     def _fail_pending(self, error: Exception) -> None:
-        for _, future in self._pending.values():
-            if not future.done():
-                future.set_exception(error)
+        for pending in self._pending.values():
+            if not pending.future.done():
+                pending.future.set_exception(error)
         self._pending.clear()
