@@ -7,9 +7,13 @@ import unittest
 from pathlib import Path
 
 from custom_components.kc761.const import (
+    CMD_GET_CAL_DATA,
     CMD_GET_DEVICE_INFO,
+    CMD_GET_MC_DATA,
     CMD_GET_STA,
     FORBIDDEN_WRITE_COMMANDS,
+    READ_COMMANDS,
+    WRITE_COMMANDS,
 )
 
 
@@ -22,6 +26,7 @@ PUBLIC_DOCS = (
     ROOT / "docs" / "PROTOCOL_EVIDENCE.md",
     ROOT / "docs" / "RC_TEST_RESULTS.md",
     ROOT / "docs" / "TEST_RELEASE_PLAN.md",
+    ROOT / "docs" / "V0_2_EXPANSION.md",
 )
 
 
@@ -35,9 +40,9 @@ def json_shape(value):
 
 
 class IntegrationStaticTests(unittest.TestCase):
-    def test_manifest_is_rc_and_local_polling(self) -> None:
+    def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.1.0-rc.1")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.1")
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
         self.assertEqual(manifest["iot_class"], "local_polling")
@@ -46,14 +51,35 @@ class IntegrationStaticTests(unittest.TestCase):
         brand_dir = ROOT / "custom_components" / "kc761" / "brand"
         self.assertTrue((brand_dir / "icon.png").is_file())
 
-    def test_only_two_read_commands_are_client_api(self) -> None:
+    def test_public_protocol_commands_match_the_expansion_scope(self) -> None:
         self.assertEqual({CMD_GET_STA, CMD_GET_DEVICE_INFO}, {0x53, 0x54})
-        self.assertEqual(FORBIDDEN_WRITE_COMMANDS, {0x62, 0x63, 0x64, 0x66})
+        self.assertEqual({CMD_GET_MC_DATA, CMD_GET_CAL_DATA}, {0x52, 0x55})
+        self.assertEqual(READ_COMMANDS, {0x52, 0x53, 0x54, 0x55})
+        self.assertEqual(WRITE_COMMANDS, {0x62, 0x63, 0x66})
+        self.assertEqual(FORBIDDEN_WRITE_COMMANDS, {0x64})
 
-    def test_no_service_or_spectrum_entity_files(self) -> None:
+    def test_control_and_spectrum_files_are_present_without_services(self) -> None:
         integration = ROOT / "custom_components" / "kc761"
         self.assertFalse((integration / "services.yaml").exists())
-        self.assertFalse(any(path.name == "spectrum.py" for path in integration.iterdir()))
+        for relative in (
+            "button.py",
+            "select.py",
+            "spectrum.py",
+            "switch.py",
+            "websocket_api.py",
+            "frontend/kc761-spectrum-card.js",
+        ):
+            self.assertTrue((integration / relative).is_file(), relative)
+        frontend = (integration / "frontend" / "kc761-spectrum-card.js").read_text(encoding="utf-8")
+        for feature in (
+            "window.confirm",
+            "Export CSV",
+            "Saved spectrum",
+            "Logarithmic",
+            "ROI start channel",
+            "Peak CH",
+        ):
+            self.assertIn(feature, frontend)
 
     def test_translation_keys_match_canonical_strings(self) -> None:
         integration = ROOT / "custom_components" / "kc761"
@@ -62,6 +88,10 @@ class IntegrationStaticTests(unittest.TestCase):
             "create_raw_entities",
             canonical["options"]["step"]["init"]["data"],
         )
+        self.assertIn("time_sync_enabled", canonical["options"]["step"]["init"]["data"])
+        self.assertIn("time_sync_interval", canonical["options"]["step"]["init"]["data"])
+        self.assertIn("spectrum_save_enabled", canonical["options"]["step"]["init"]["data"])
+        self.assertIn("spectrum_save_interval", canonical["options"]["step"]["init"]["data"])
         for language in ("en", "zh-Hans"):
             translated = json.loads((integration / "translations" / f"{language}.json").read_text(encoding="utf-8"))
             self.assertEqual(json_shape(translated), json_shape(canonical))

@@ -8,9 +8,11 @@ with ordinary pytest; every coroutine is driven with ``asyncio.run``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -25,26 +27,40 @@ from custom_components.kc761 import (  # noqa: E402
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.kc761 import binary_sensor as binary_sensor_module  # noqa: E402
+from custom_components.kc761 import button as button_module  # noqa: E402
 from custom_components.kc761 import config_flow as config_flow_module  # noqa: E402
 from custom_components.kc761 import coordinator as coordinator_module  # noqa: E402
 from custom_components.kc761 import diagnostics as diagnostics_module  # noqa: E402
+from custom_components.kc761 import select as select_module  # noqa: E402
 from custom_components.kc761 import sensor as sensor_module  # noqa: E402
+from custom_components.kc761 import switch as switch_module  # noqa: E402
+from custom_components.kc761 import websocket_api as websocket_module  # noqa: E402
 from custom_components.kc761.const import DOMAIN  # noqa: E402
 from custom_components.kc761.protocol.codec import (  # noqa: E402
+    build_calibration_frame,
     build_device_info_frame,
     build_status_frame,
+    decode_calibration,
     decode_device_info,
     decode_frame,
     decode_status,
 )
 from custom_components.kc761.protocol.framing import FrameParser  # noqa: E402
-from custom_components.kc761.protocol.models import RawFrame  # noqa: E402
+from custom_components.kc761.protocol.models import RawFrame, SpectrumData  # noqa: E402
+from custom_components.kc761.spectrum import SpectrumSnapshot  # noqa: E402
 
 
 def run(coro):
     """Run a coroutine without pytest-asyncio."""
     return asyncio.run(coro)
+
+
+async def invoke_websocket_handler(handler, hass, connection, message):
+    """Call the undecorated async handler; HA decorator behavior is tested upstream."""
+    function = inspect.unwrap(handler)
+    result = function(hass, connection, message)
+    if inspect.isawaitable(result):
+        await result
 
 
 def make_info(sensor_types: tuple[int, int, int] = (2, 0, 0), **kwargs):
@@ -56,6 +72,11 @@ def make_status(*, sentinel: bool = False, sensor_status: int = 0, **kwargs):
     channels = ((-1, -1, -1, -1, -1, -1),) * 3 if sentinel else None
     frame = FrameParser().feed(build_status_frame(1, channels=channels, sensor_status=sensor_status, **kwargs))[0]
     return decode_status(frame)
+
+
+def make_calibration():
+    frame = FrameParser().feed(build_calibration_frame(1))[0]
+    return decode_calibration(frame)
 
 
 def make_entry(*, options: dict | None = None, unique_id: str = "7601-0000-000001"):
@@ -87,6 +108,9 @@ def make_hass():
     hass.config_entries.async_reload = AsyncMock()
     hass.bus = MagicMock()
     hass.bus.async_listen_once = MagicMock(return_value=lambda: None)
+    hass.http.async_register_static_paths = AsyncMock()
+    hass.config.path.side_effect = lambda *parts: str(Path(".test-storage").joinpath(*parts))
+    hass.async_add_executor_job.side_effect = lambda target, *args: asyncio.to_thread(target, *args)
     hass.async_create_task = lambda coroutine, *, name=None: asyncio.create_task(coroutine, name=name)
     return hass
 
@@ -112,6 +136,11 @@ class FakeClient:
         self.connects = 0
         self.info_calls = 0
         self.status_calls = 0
+        self.calibration_calls = 0
+        self.spectrum_calls: list[int] = []
+        self.state_writes: list[dict] = []
+        self.time_writes: list[int] = []
+        self.clear_writes: list[dict] = []
 
     async def async_connect(self):
         self.connects += 1
@@ -136,19 +165,42 @@ class FakeClient:
             raise self.error
         return self.status
 
+    async def async_get_calibration(self):
+        self.calibration_calls += 1
+        return make_calibration()
+
+    async def async_get_spectrum(self, source: int):
+        self.spectrum_calls.append(source)
+        return SpectrumData(source, tuple(range(2048)), 4, 0xA0)
+
+    async def async_set_state(self, **values):
+        self.state_writes.append(values)
+
+    async def async_set_device_time(self, epoch: int):
+        self.time_writes.append(epoch)
+
+    async def async_clear_statistics(self, **masks):
+        self.clear_writes.append(masks)
+
 
 def test_entry_setup_unload_reload_and_failure() -> None:
     hass = make_hass()
     assert callable(CONFIG_SCHEMA)
-    assert run(async_setup(hass, {})) is True
+    with patch("custom_components.kc761.websocket_api.async_register") as register:
+        assert run(async_setup(hass, {})) is True
+        assert run(async_setup(hass, {})) is True
+    register.assert_called_once_with(hass)
+    hass.http.async_register_static_paths.assert_awaited_once()
     assert hass.data[DOMAIN] == {}
     entry = make_entry()
     fake = MagicMock()
     fake.async_config_entry_first_refresh = AsyncMock()
+    fake.async_start = AsyncMock()
     fake.async_shutdown = AsyncMock()
     with patch("custom_components.kc761.coordinator.KC761Coordinator", return_value=fake):
         assert run(async_setup_entry(hass, entry)) is True
     assert entry.runtime_data is fake
+    fake.async_start.assert_awaited_once()
     hass.config_entries.async_forward_entry_setups.assert_awaited_once()
     hass.bus.async_listen_once.assert_called_once()
     run(async_reload_entry(hass, entry))
@@ -160,6 +212,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     assert run(async_unload_entry(hass, entry)) is False
     broken = MagicMock()
     broken.async_config_entry_first_refresh = AsyncMock(side_effect=RuntimeError("broken"))
+    broken.async_start = AsyncMock()
     broken.async_shutdown = AsyncMock()
     with patch("custom_components.kc761.coordinator.KC761Coordinator", return_value=broken):
         with pytest.raises(ConfigEntryNotReady):
@@ -168,6 +221,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
 
     cancelled = MagicMock()
     cancelled.async_config_entry_first_refresh = AsyncMock(side_effect=asyncio.CancelledError)
+    cancelled.async_start = AsyncMock()
     cancelled.async_shutdown = AsyncMock()
     with patch(
         "custom_components.kc761.coordinator.KC761Coordinator",
@@ -182,6 +236,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     forward_entry = make_entry()
     forward_failure = MagicMock()
     forward_failure.async_config_entry_first_refresh = AsyncMock()
+    forward_failure.async_start = AsyncMock()
     forward_failure.async_shutdown = AsyncMock()
     with patch(
         "custom_components.kc761.coordinator.KC761Coordinator",
@@ -197,6 +252,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     forward_cancel_entry = make_entry()
     forward_cancelled = MagicMock()
     forward_cancelled.async_config_entry_first_refresh = AsyncMock()
+    forward_cancelled.async_start = AsyncMock()
     forward_cancelled.async_shutdown = AsyncMock()
     with patch(
         "custom_components.kc761.coordinator.KC761Coordinator",
@@ -210,13 +266,17 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     migration_entry = make_entry(unique_id="7601_0000_000001")
     migration_entry.version = 1
     hass.config_entries.async_update_entry = MagicMock()
-    assert run(async_migrate_entry(hass, migration_entry)) is True
+    registry = MagicMock()
+    registry.async_get_entity_id.side_effect = ["binary_sensor.old", None, None, None]
+    with patch("custom_components.kc761.er.async_get", return_value=registry):
+        assert run(async_migrate_entry(hass, migration_entry)) is True
+    registry.async_remove.assert_called_once_with("binary_sensor.old")
     hass.config_entries.async_update_entry.assert_called_once_with(
         migration_entry,
         unique_id="7601-0000-000001",
-        version=2,
+        version=3,
     )
-    migration_entry.version = 3
+    migration_entry.version = 4
     assert run(async_migrate_entry(hass, migration_entry)) is False
 
 
@@ -354,6 +414,10 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
             "status_interval": 5,
             "info_interval": 60,
             "create_raw_entities": True,
+            "time_sync_enabled": True,
+            "time_sync_interval": 24,
+            "spectrum_save_enabled": True,
+            "spectrum_save_interval": 60,
         }
         assert (await options.async_step_init(option_values))["type"] == "create_entry"
         options.async_create_entry.assert_called_once_with(title="", data=option_values)
@@ -517,6 +581,370 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
     run(exercise())
 
 
+def test_coordinator_spectrum_controls_archive_and_schedules(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry(
+            options={
+                "time_sync_enabled": True,
+                "time_sync_interval": 12,
+                "spectrum_save_enabled": True,
+                "spectrum_save_interval": 30,
+            }
+        )
+        fake = FakeClient(info=make_info((2, 8, 5)), status=make_status(sensor_status=0x1C))
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=fake):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        coordinator._device_info = fake.info
+        coordinator._snapshot = coordinator_module.KC761Snapshot(
+            fake.info,
+            fake.status,
+            datetime.now(UTC),
+        )
+        coordinator.async_request_refresh = AsyncMock()
+        coordinator.async_set_updated_data = MagicMock()
+        names = []
+
+        def capture_background(coroutine, name):
+            names.append(name)
+            coroutine.close()
+
+        coordinator._start_background = capture_background
+        await coordinator.async_start()
+        assert names == ["kc761-initial-spectrum", "kc761-time-sync", "kc761-spectrum-save"]
+        assert coordinator.time_sync_interval == 12
+        assert coordinator.spectrum_save_interval == 30
+
+        current = await coordinator.async_capture_spectrum(0)
+        assert current.source == 0
+        assert current.counts[2047] == 2047
+        assert current.energy_kev[2047] == 2047
+        assert fake.calibration_calls == 1
+        assert fake.spectrum_calls == [0]
+        assert coordinator.latest_spectrum is current
+
+        saved = await coordinator.async_save_spectrum(1)
+        assert saved.source == 1
+        listed = await coordinator.async_list_saved_spectra()
+        assert listed[0]["snapshot_id"] == saved.snapshot_id
+        assert await coordinator.async_get_saved_spectrum(saved.snapshot_id) == saved
+        filename, csv_text = await coordinator.async_export_spectrum_csv(saved.snapshot_id)
+        assert filename.endswith(".csv")
+        assert "channel_address,energy_kev,counts" in csv_text
+
+        await coordinator.async_set_active_sensor(2)
+        assert fake.state_writes[-1]["sensor_status"] == (
+            fake.status.sensor_status & ~0x03
+        ) | 2
+        await coordinator.async_set_spectrum_accumulating(1, False)
+        assert fake.state_writes[-1]["sensor_status"] == fake.status.sensor_status & ~(1 << 3)
+        await coordinator.async_set_volume(2)
+        assert fake.state_writes[-1]["volume_status"] & 0x03 == 2
+        await coordinator.async_set_volume_flag(4, True)
+        assert fake.state_writes[-1]["volume_status"] & 0x10
+        await coordinator.async_set_led_flag(1, False)
+        assert not fake.state_writes[-1]["led_screen_status"] & 0x02
+        await coordinator.async_set_auto_upload(True)
+        assert fake.state_writes[-1]["auto_upload_status"] == 1
+        await coordinator.async_sync_device_time()
+        assert len(fake.time_writes) == 1
+        assert coordinator.last_time_sync is not None
+        await coordinator.async_clear_statistics(2, "cumulative_dose")
+        assert fake.clear_writes[-1] == {"cumulative_dose_mask": 4}
+        assert coordinator.control_commands == 8
+        assert coordinator.async_request_refresh.await_count == 8
+
+        with pytest.raises(ValueError):
+            await coordinator.async_set_volume(3)
+        with pytest.raises(ValueError):
+            await coordinator.async_set_active_sensor(3)
+        with pytest.raises(ValueError):
+            await coordinator.async_clear_statistics(0, "unknown")
+
+    run(exercise())
+
+
+def test_websocket_spectrum_and_confirmation_api() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        entry = make_entry()
+        fake = FakeClient(info=make_info((2, 0, 5)))
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=fake):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        coordinator._device_info = fake.info
+        spectrum = SpectrumSnapshot.create(
+            source=0,
+            acquired_at=datetime.now(UTC),
+            accumulation_seconds=12,
+            counts=tuple(range(2048)),
+            energy_kev=tuple(float(value) for value in range(2048)),
+            segment_count=4,
+            calibration_profile="factory:2",
+        )
+        coordinator._latest_spectrum = spectrum
+        coordinator.async_list_saved_spectra = AsyncMock(return_value=[spectrum.metadata()])
+        coordinator.async_get_saved_spectrum = AsyncMock(return_value=spectrum)
+        coordinator.async_capture_spectrum = AsyncMock(return_value=spectrum)
+        coordinator.async_save_spectrum = AsyncMock(return_value=spectrum)
+        coordinator.async_export_spectrum_csv = AsyncMock(return_value=("spectrum.csv", "a,b\r\n"))
+        coordinator.async_clear_statistics = AsyncMock()
+        hass.data[DOMAIN] = {entry.entry_id: coordinator}
+        connection = MagicMock()
+        connection.user.is_admin = True
+
+        with patch.object(websocket_module.websocket_api, "async_register_command") as register:
+            websocket_module.async_register(hass)
+        assert register.call_count == 7
+
+        await invoke_websocket_handler(
+            websocket_module.websocket_info,
+            hass, connection, {"id": 1, "type": "kc761/info", "entry_id": entry.entry_id}
+        )
+        assert connection.send_result.call_args.args[1]["serial_number"] == fake.info.device_id
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_list,
+            hass,
+            connection,
+            {"id": 2, "type": "kc761/spectrum/list", "entry_id": entry.entry_id},
+        )
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_get,
+            hass,
+            connection,
+            {"id": 3, "type": "kc761/spectrum/get", "entry_id": entry.entry_id},
+        )
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_capture,
+            hass,
+            connection,
+            {"id": 4, "type": "kc761/spectrum/capture", "entry_id": entry.entry_id, "source": 0},
+        )
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_save,
+            hass,
+            connection,
+            {"id": 5, "type": "kc761/spectrum/save", "entry_id": entry.entry_id, "source": 0},
+        )
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_csv,
+            hass,
+            connection,
+            {"id": 6, "type": "kc761/spectrum/csv", "entry_id": entry.entry_id},
+        )
+        await invoke_websocket_handler(
+            websocket_module.websocket_clear,
+            hass,
+            connection,
+            {
+                "id": 7,
+                "type": "kc761/clear",
+                "entry_id": entry.entry_id,
+                "source": 0,
+                "kind": "spectrum",
+            },
+        )
+        coordinator.async_clear_statistics.assert_awaited_once_with(0, "spectrum")
+
+        await invoke_websocket_handler(
+            websocket_module.websocket_info,
+            make_hass(), connection, {"id": 8, "type": "kc761/info", "entry_id": "missing"}
+        )
+        assert connection.send_error.call_args.args[1] == "kc761_error"
+        assert "ValueError" in connection.send_error.call_args.args[2]
+
+        hass.data[DOMAIN] = {entry.entry_id: coordinator}
+        coordinator._device_info = None
+        await invoke_websocket_handler(
+            websocket_module.websocket_info,
+            hass,
+            connection,
+            {"id": 9, "type": "kc761/info", "entry_id": entry.entry_id},
+        )
+        coordinator._device_info = fake.info
+        error_handlers = (
+            (
+                websocket_module.websocket_spectrum_list,
+                "async_list_saved_spectra",
+                {"id": 10, "type": "kc761/spectrum/list", "entry_id": entry.entry_id},
+            ),
+            (
+                websocket_module.websocket_spectrum_capture,
+                "async_capture_spectrum",
+                {"id": 11, "type": "kc761/spectrum/capture", "entry_id": entry.entry_id},
+            ),
+            (
+                websocket_module.websocket_spectrum_save,
+                "async_save_spectrum",
+                {"id": 12, "type": "kc761/spectrum/save", "entry_id": entry.entry_id},
+            ),
+            (
+                websocket_module.websocket_spectrum_csv,
+                "async_export_spectrum_csv",
+                {"id": 13, "type": "kc761/spectrum/csv", "entry_id": entry.entry_id},
+            ),
+            (
+                websocket_module.websocket_clear,
+                "async_clear_statistics",
+                {
+                    "id": 14,
+                    "type": "kc761/clear",
+                    "entry_id": entry.entry_id,
+                    "source": 0,
+                    "kind": "spectrum",
+                },
+            ),
+        )
+        for handler, method_name, message in error_handlers:
+            setattr(coordinator, method_name, AsyncMock(side_effect=RuntimeError("expected")))
+            await invoke_websocket_handler(handler, hass, connection, message)
+
+        coordinator._latest_spectrum = None
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_get,
+            hass,
+            connection,
+            {"id": 15, "type": "kc761/spectrum/get", "entry_id": entry.entry_id},
+        )
+        coordinator.async_get_saved_spectrum = AsyncMock(side_effect=RuntimeError("expected"))
+        await invoke_websocket_handler(
+            websocket_module.websocket_spectrum_get,
+            hass,
+            connection,
+            {
+                "id": 16,
+                "type": "kc761/spectrum/get",
+                "entry_id": entry.entry_id,
+                "snapshot_id": spectrum.snapshot_id,
+            },
+        )
+
+    run(exercise())
+
+
+def test_coordinator_background_and_validation_edges() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        entry = make_entry()
+        fake = FakeClient(info=make_info((2, 0, 5)), status=make_status())
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=fake):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        coordinator._device_info = fake.info
+        coordinator._snapshot = coordinator_module.KC761Snapshot(
+            fake.info,
+            fake.status,
+            datetime.now(UTC),
+        )
+        coordinator.async_request_refresh = AsyncMock()
+        coordinator.async_set_updated_data = MagicMock()
+
+        await coordinator.async_capture_spectrum()
+        assert fake.spectrum_calls == [0]
+        coordinator._latest_spectrum = None
+        with pytest.raises(RuntimeError, match="no spectrum"):
+            await coordinator.async_export_spectrum_csv()
+        coordinator._snapshot = None
+        with pytest.raises(RuntimeError, match="current status"):
+            await coordinator.async_capture_spectrum()
+        with pytest.raises(RuntimeError, match="current status"):
+            coordinator._require_status()
+        coordinator._archive = None
+        with pytest.raises(RuntimeError, match="not initialized"):
+            coordinator._require_archive()
+        coordinator._notify_entities()
+
+        coordinator._device_info = fake.info
+        with pytest.raises(ValueError, match="not installed"):
+            coordinator._validate_source(1)
+        with pytest.raises(ValueError, match="volume flag"):
+            await coordinator.async_set_volume_flag(1, True)
+        with pytest.raises(ValueError, match="LED"):
+            await coordinator.async_set_led_flag(3, True)
+
+        coordinator.async_capture_spectrum = AsyncMock()
+        await coordinator._async_initial_spectrum()
+        coordinator.async_capture_spectrum = AsyncMock(side_effect=RuntimeError("expected"))
+        await coordinator._async_initial_spectrum()
+        coordinator.async_capture_spectrum = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator._async_initial_spectrum()
+
+        coordinator._shutdown = False
+        coordinator.async_sync_device_time = AsyncMock()
+        with patch.object(
+            coordinator_module.asyncio,
+            "sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await coordinator._async_time_sync_loop()
+        coordinator.async_sync_device_time = AsyncMock(side_effect=RuntimeError("expected"))
+        with patch.object(
+            coordinator_module.asyncio,
+            "sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await coordinator._async_time_sync_loop()
+        coordinator.async_sync_device_time = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator._async_time_sync_loop()
+
+        coordinator._device_info = fake.info
+        coordinator.async_save_spectrum = AsyncMock()
+        with patch.object(
+            coordinator_module.asyncio,
+            "sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await coordinator._async_spectrum_save_loop()
+        assert coordinator.async_save_spectrum.await_args_list == [call(0), call(2)]
+        coordinator.async_save_spectrum = AsyncMock(side_effect=RuntimeError("expected"))
+        with patch.object(
+            coordinator_module.asyncio,
+            "sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await coordinator._async_spectrum_save_loop()
+        coordinator.async_save_spectrum = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator._async_spectrum_save_loop()
+
+        coordinator._profile_logged = False
+        coordinator._log_protocol_profile(make_info(model=0xFE))
+        coordinator._log_protocol_profile(fake.info)
+        coordinator._reload_scheduled = False
+        coordinator._shutdown = False
+        coordinator._schedule_hardware_reload()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        hass.config_entries.async_reload.assert_awaited_with(entry.entry_id)
+        coordinator._schedule_hardware_reload()
+        coordinator._shutdown = True
+        coordinator._reload_scheduled = False
+        coordinator._schedule_hardware_reload()
+
+        coordinator._backoff_base = 1
+        coordinator._increase_backoff()
+        assert coordinator._backoff_base == 2
+
+        coordinator._shutdown = False
+        sleeper = asyncio.Event()
+        task = asyncio.create_task(sleeper.wait())
+        coordinator._background_tasks.add(task)
+        base_shutdown = AsyncMock()
+        with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", base_shutdown):
+            await coordinator.async_shutdown()
+        assert task.cancelled()
+
+    run(exercise())
+
+
 def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
     async def exercise() -> None:
         info = make_info((2, 8, 5))
@@ -528,6 +956,7 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.snapshot = snapshot
         coordinator.hardware_verified = False
         coordinator.create_raw_entities = False
+        coordinator.latest_spectrum = None
         coordinator.async_add_listener = MagicMock()
         entry = make_entry()
         entry.runtime_data = coordinator
@@ -538,23 +967,45 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         ):
             sensor_entities = []
             await sensor_module.async_setup_entry(MagicMock(), entry, lambda entities: sensor_entities.extend(entities))
-            assert len(sensor_entities) == 15
-            by_key = {entity.entity_description.key: entity for entity in sensor_entities}
-            assert all(entity.extra_state_attributes["hardware_verified"] is False for entity in sensor_entities)
+            assert len(sensor_entities) == 20
+            by_key = {
+                entity.entity_description.key: entity
+                for entity in sensor_entities
+                if hasattr(entity, "entity_description")
+            }
+            assert all(
+                entity.extra_state_attributes["hardware_verified"] is False
+                for entity in sensor_entities
+            )
             assert by_key["battery_percentage"].native_value == 87
             assert by_key["device_time"].native_value == status.device_time
             assert by_key["clock_offset"].native_value == -10
             assert by_key["coprocessor_firmware"].native_value == "V1.80"
+            assert by_key["device_id"].native_value == info.device_id
+            assert by_key["gamma_sensor_model"].native_value == "KC7601.24 CsI"
+            assert by_key["neutron_sensor_model"].native_value == "KC7601.31 6Li"
+            assert by_key["pin_sensor_model"].native_value == "PIN"
             assert by_key["gamma_avg_cps"].native_value is None
             assert by_key["gamma_avg_dose_rate"].entity_description.entity_registry_enabled_default
             assert not any("_raw_" in key for key in by_key)
+            device_info = by_key["device_id"].device_info
+            assert device_info["serial_number"] == info.device_id
+            assert device_info["model_id"] == str(info.device_model)
+            spectrum_entity = next(
+                entity for entity in sensor_entities if isinstance(entity, sensor_module.KC761SpectrumSensor)
+            )
+            assert spectrum_entity.native_value is None
+            assert spectrum_entity.extra_state_attributes["points"] == []
 
             coordinator.create_raw_entities = True
             raw_entities = []
             await sensor_module.async_setup_entry(MagicMock(), entry, lambda entities: raw_entities.extend(entities))
-            assert len(raw_entities) == 24
+            assert len(raw_entities) == 29
             raw_descriptions = [
-                entity.entity_description for entity in raw_entities if entity.entity_description.raw_reading
+                entity.entity_description
+                for entity in raw_entities
+                if hasattr(entity, "entity_description")
+                and entity.entity_description.raw_reading
             ]
             assert len(raw_descriptions) == 9
             assert all(description.entity_registry_enabled_default for description in raw_descriptions)
@@ -570,49 +1021,82 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         await sensor_module.async_setup_entry(MagicMock(), entry, lambda values: entities.extend(values))
         assert entities == []
 
-        binary_entities = []
+        coordinator.device_info = info
+        coordinator.snapshot = snapshot
         entry.runtime_data = coordinator
+        coordinator.async_set_auto_upload = AsyncMock()
+        coordinator.async_set_spectrum_accumulating = AsyncMock()
+        coordinator.async_set_volume_flag = AsyncMock()
+        coordinator.async_set_led_flag = AsyncMock()
+        coordinator.async_set_active_sensor = AsyncMock()
+        coordinator.async_set_volume = AsyncMock()
+        coordinator.async_sync_device_time = AsyncMock()
+        coordinator.async_capture_spectrum = AsyncMock()
+        coordinator.async_save_spectrum = AsyncMock()
+        coordinator.async_clear_statistics = AsyncMock()
+
         with patch.object(
-            binary_sensor_module.CoordinatorEntity,
+            switch_module.CoordinatorEntity,
             "__init__",
             lambda self, value: setattr(self, "coordinator", value),
         ):
-            await binary_sensor_module.async_setup_entry(
-                MagicMock(), entry, lambda values: binary_entities.extend(values)
+            switches = []
+            await switch_module.async_setup_entry(
+                MagicMock(), entry, lambda values: switches.extend(values)
             )
-            assert len(binary_entities) == 4
-            assert binary_entities[0].is_on is False
-            assert binary_entities[1].is_on is True
-            assert binary_entities[2].is_on is True
-            assert binary_entities[3].is_on is True
-            assert all(entity.extra_state_attributes["hardware_verified"] is False for entity in binary_entities)
+            assert len(switches) == 9
+            switch_by_key = {entity.entity_description.key: entity for entity in switches}
+            assert switch_by_key["auto_upload"].is_on is False
+            assert switch_by_key["gamma_spectrum_accumulating"].is_on is True
+            assert switch_by_key["neutron_spectrum_accumulating"].is_on is True
+            assert switch_by_key["pin_spectrum_accumulating"].is_on is True
+            await switch_by_key["auto_upload"].async_turn_on()
+            coordinator.async_set_auto_upload.assert_awaited_once_with(True)
+            await switch_by_key["count_tone"].async_turn_off()
+            coordinator.async_set_volume_flag.assert_awaited_once_with(2, False)
+            await switch_by_key["backlight"].async_turn_on()
+            coordinator.async_set_led_flag.assert_awaited_once_with(1, True)
 
-            coordinator.device_info = make_info((2, 0, 0))
-            installed_binary_entities = []
-            await binary_sensor_module.async_setup_entry(
-                MagicMock(),
-                entry,
-                lambda values: installed_binary_entities.extend(values),
-            )
-            assert [entity.entity_description.key for entity in installed_binary_entities] == [
-                "auto_upload_enabled",
-                "gamma_spectrum_accumulating",
-            ]
-            coordinator.device_info = info
-
-            invalid_status = make_status(auto_upload_status=7)
-            coordinator.snapshot = coordinator_module.KC761Snapshot(info, invalid_status, received_at)
-            assert binary_entities[0].is_on is None
-        broken_binary = MagicMock(device_info=None)
         with patch.object(
-            binary_sensor_module.CoordinatorEntity,
+            select_module.CoordinatorEntity,
             "__init__",
             lambda self, value: setattr(self, "coordinator", value),
         ):
-            with pytest.raises(AssertionError):
-                binary_sensor_module.KC761BinarySensor(broken_binary, binary_sensor_module.DESCRIPTIONS[0])
-        coordinator.snapshot = None
-        assert binary_entities[0].is_on is None
+            selects = []
+            await select_module.async_setup_entry(
+                MagicMock(), entry, lambda values: selects.extend(values)
+            )
+            select_by_key = {entity.entity_description.key: entity for entity in selects}
+            assert select_by_key["active_sensor"].options == ["gamma", "neutron", "pin"]
+            assert select_by_key["active_sensor"].current_option == "gamma"
+            assert select_by_key["global_volume"].current_option == "mute"
+            assert select_by_key["backlight_brightness"].current_option == "dim"
+            await select_by_key["active_sensor"].async_select_option("pin")
+            coordinator.async_set_active_sensor.assert_awaited_once_with(2)
+            await select_by_key["global_volume"].async_select_option("high")
+            coordinator.async_set_volume.assert_awaited_once_with(2)
+            with pytest.raises(ValueError):
+                await select_by_key["global_volume"].async_select_option("invalid")
+
+        with patch.object(
+            button_module.CoordinatorEntity,
+            "__init__",
+            lambda self, value: setattr(self, "coordinator", value),
+        ):
+            buttons = []
+            await button_module.async_setup_entry(
+                MagicMock(), entry, lambda values: buttons.extend(values)
+            )
+            assert len(buttons) == 12
+            button_by_key = {entity.entity_description.key: entity for entity in buttons}
+            sync_button = button_by_key["sync_device_time"]
+            assert sync_button.extra_state_attributes["device_id"] == info.device_id
+            await sync_button.async_press()
+            coordinator.async_sync_device_time.assert_awaited_once()
+            await button_by_key["save_spectrum"].async_press()
+            coordinator.async_save_spectrum.assert_awaited_once()
+            await button_by_key["clear_gamma_spectrum"].async_press()
+            coordinator.async_clear_statistics.assert_awaited_once_with(0, "spectrum")
 
         coordinator.client = SimpleNamespace(
             connected=False,
@@ -633,6 +1117,14 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.status_interval = 5
         coordinator.info_interval = 60
         coordinator.create_raw_entities = False
+        coordinator.time_sync_enabled = False
+        coordinator.time_sync_interval = 24
+        coordinator.spectrum_save_enabled = False
+        coordinator.spectrum_save_interval = 60
+        coordinator.control_commands = 0
+        coordinator.last_time_sync = None
+        coordinator.latest_spectrum = None
+        coordinator.last_spectrum_save = None
         coordinator.last_success = None
         coordinator.consecutive_failures = 2
         coordinator.reconnects = 1
@@ -662,6 +1154,10 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
             status_interval=5,
             info_interval=60,
             create_raw_entities=False,
+            time_sync_enabled=False,
+            time_sync_interval=24,
+            spectrum_save_enabled=False,
+            spectrum_save_interval=60,
             client=SimpleNamespace(connected=False, last_frame=None),
             last_success=None,
             consecutive_failures=0,
@@ -670,6 +1166,10 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
             identity_mismatches=0,
             retry_delay=None,
             last_error=None,
+            control_commands=0,
+            last_time_sync=None,
+            latest_spectrum=None,
+            last_spectrum_save=None,
         )
         empty_entry = make_entry()
         empty_entry.version = 1

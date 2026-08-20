@@ -8,24 +8,48 @@ import struct
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from custom_components.kc761.const import CMD_GET_DEVICE_INFO, CMD_GET_STA, FLAG_STATUS_QUERY
-from custom_components.kc761.protocol.client import KC761Client
+from custom_components.kc761.const import (
+    CMD_GET_CAL_DATA,
+    CMD_GET_DEVICE_INFO,
+    CMD_GET_MC_DATA,
+    CMD_GET_STA,
+    CMD_SET_CLEAR,
+    CMD_SET_DEVICE_TIME,
+    CMD_SET_STA,
+    FLAG_ACK,
+    FLAG_CAL_DATA,
+    FLAG_MC_DATA_QUERY,
+    FLAG_STATUS_QUERY,
+)
+from custom_components.kc761.protocol.client import KC761Client, PendingTransaction
 from custom_components.kc761.protocol.codec import (
+    DecodedFrame,
     HARDWARE_VERIFIED,
+    build_ack_frame,
+    build_calibration_frame,
     build_device_info_frame,
+    build_spectrum_frame,
     build_status_frame,
+    decode_ack,
+    decode_calibration,
     decode_device_info,
     decode_frame,
+    decode_spectrum_segment,
     decode_status,
+    encode_clear_request,
     encode_read_request,
+    encode_set_device_time_request,
+    encode_set_state_request,
     model_name,
     sensor_name,
-    DecodedFrame,
+    validate_write_request,
 )
 from custom_components.kc761.protocol.framing import FrameParser, frame_bytes
 from custom_components.kc761.protocol.models import (
     DecodeError,
     RawFrame,
+    SpectrumData,
+    SpectrumSegment,
     TransactionError,
     as_public_dict,
     format_co_fw_version,
@@ -208,14 +232,67 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(build_device_info_frame(5), MANUAL_DEVICE_INFO_FRAME)
 
     def test_decode_classifies_nonsemantic_known_flags(self) -> None:
-        frame = FrameParser().feed(frame_bytes(1, 0xA6, b"\x00" * 146))[0]
+        frame = FrameParser().feed(build_calibration_frame(1))[0]
         self.assertEqual(decode_frame(frame).kind, "calibration")
 
     def test_request_rejects_write_and_unknown_commands(self) -> None:
         self.assertEqual(encode_read_request(1, CMD_GET_STA), b"\x00\x53\x01\x00")
         self.assertEqual(encode_read_request(0xFF, CMD_GET_DEVICE_INFO), b"\x00\x54\xff\x00")
+        self.assertEqual(encode_read_request(2, CMD_GET_MC_DATA, source=1), b"\x00\x52\x02\x01\x00")
+        self.assertEqual(encode_read_request(3, CMD_GET_CAL_DATA), b"\x00\x55\x03\x00")
         with self.assertRaises(ValueError):
             encode_read_request(1, 0x66)
+        with self.assertRaises(ValueError):
+            encode_read_request(1, CMD_GET_MC_DATA)
+        with self.assertRaises(ValueError):
+            encode_read_request(1, CMD_GET_STA, source=0)
+
+    def test_spectrum_calibration_ack_and_write_codecs(self) -> None:
+        spectrum_frame = FrameParser().feed(
+            build_spectrum_frame(7, source=0, offset=10, counts=(20, 22, 24), ratio=2)
+        )[0]
+        segment = decode_spectrum_segment(spectrum_frame)
+        self.assertEqual((segment.source, segment.offset, segment.ratio), (0, 10, 2))
+        self.assertEqual(segment.counts, (20, 22, 24))
+        self.assertEqual(decode_frame(spectrum_frame).kind, "spectrum")
+
+        calibration_frame = FrameParser().feed(build_calibration_frame(8))[0]
+        calibration = decode_calibration(calibration_frame)
+        self.assertEqual(calibration.energy_kev(0, 123), 123)
+        self.assertEqual(calibration.energy_kev(1, 456), 456)
+        self.assertEqual(calibration.energy_kev(2, 789), 789)
+        with self.assertRaises(ValueError):
+            calibration.energy_kev(3, 0)
+        with self.assertRaises(ValueError):
+            calibration.energy_kev(0, -1)
+
+        ack_frame = FrameParser().feed(build_ack_frame(9, CMD_SET_STA))[0]
+        ack = decode_ack(ack_frame)
+        self.assertTrue(ack.successful)
+        self.assertEqual(ack.command, CMD_SET_STA)
+        failed = decode_ack(FrameParser().feed(build_ack_frame(9, CMD_SET_CLEAR, status=1))[0])
+        self.assertFalse(failed.successful)
+
+        state = encode_set_state_request(1, sensor_status=4, auto_upload_status=1)
+        self.assertEqual(state, b"\x00\x62\x01\x04\xff\xff\x01\x00")
+        self.assertEqual(validate_write_request(state), CMD_SET_STA)
+        time_request = encode_set_device_time_request(2, 0x67748580)
+        self.assertEqual(time_request, b"\x00\x63\x02\x80\x85\x74\x67\x00")
+        self.assertEqual(validate_write_request(time_request), CMD_SET_DEVICE_TIME)
+        clear = encode_clear_request(3, spectrum_mask=1, dose_curve_mask=2, cumulative_dose_mask=4)
+        self.assertEqual(clear, b"\x00\x66\x03\x01\x02\x04\x00")
+        self.assertEqual(validate_write_request(clear), CMD_SET_CLEAR)
+
+        with self.assertRaises(ValueError):
+            encode_set_state_request(1, auto_upload_status=2)
+        with self.assertRaises(ValueError):
+            encode_set_device_time_request(1, -1)
+        with self.assertRaises(ValueError):
+            encode_clear_request(1)
+        with self.assertRaises(ValueError):
+            encode_clear_request(1, spectrum_mask=8)
+        with self.assertRaises(ValueError):
+            validate_write_request(b"\x00\x64\x01\x00")
 
     def test_decode_rejects_wrong_flags_and_lengths(self) -> None:
         frame = RawFrame(0, 0xA1, 9, b"\x00" * 5, b"\x00" * 9)
@@ -229,6 +306,52 @@ class CodecTests(unittest.TestCase):
             decode_device_info(bad_info)
         with self.assertRaises(DecodeError):
             decode_device_info(RawFrame(0, 0xA2, 100, b"\x00" * 96, b"\x00" * 100))
+
+    def test_spectrum_calibration_ack_and_fixture_validation_edges(self) -> None:
+        with self.assertRaises(ValueError, msg="state bytes must be uint8"):
+            encode_set_state_request(1, sensor_status=-1)
+        with self.assertRaises(ValueError, msg="request envelope must start with zero"):
+            validate_write_request(b"\x01\x62\x00")
+        with self.assertRaises(ValueError, msg="write request length is command-specific"):
+            validate_write_request(b"\x00\x62\x00\x00")
+
+        with self.assertRaises(DecodeError):
+            decode_spectrum_segment(RawFrame(1, FLAG_STATUS_QUERY, 9, b"\x00" * 5, b""))
+        with self.assertRaises(DecodeError):
+            decode_spectrum_segment(RawFrame(1, FLAG_MC_DATA_QUERY, 8, b"\x00" * 4, b""))
+        with self.assertRaises(DecodeError):
+            decode_spectrum_segment(
+                RawFrame(1, FLAG_MC_DATA_QUERY, 9, bytes((3,)) + struct.pack("<HH", 0, 1), b"")
+            )
+        with self.assertRaises(DecodeError):
+            decode_spectrum_segment(
+                RawFrame(1, FLAG_MC_DATA_QUERY, 9, bytes((0,)) + struct.pack("<HH", 0, 0), b"")
+            )
+
+        with self.assertRaises(DecodeError):
+            decode_calibration(RawFrame(1, FLAG_STATUS_QUERY, 150, b"\x00" * 146, b""))
+        with self.assertRaises(DecodeError):
+            decode_calibration(RawFrame(1, FLAG_CAL_DATA, 149, b"\x00" * 145, b""))
+        invalid_calibration = bytearray(146)
+        invalid_calibration[1] = 2
+        with self.assertRaises(DecodeError):
+            decode_calibration(RawFrame(1, FLAG_CAL_DATA, 150, bytes(invalid_calibration), b""))
+
+        with self.assertRaises(DecodeError):
+            decode_ack(RawFrame(1, FLAG_STATUS_QUERY, 6, b"\x00\x62", b""))
+        with self.assertRaises(DecodeError):
+            decode_ack(RawFrame(1, FLAG_ACK, 5, b"\x00", b""))
+        with self.assertRaises(DecodeError):
+            decode_ack(RawFrame(1, FLAG_ACK, 6, b"\x02\x62", b""))
+        with self.assertRaises(DecodeError):
+            decode_ack(RawFrame(1, FLAG_ACK, 6, b"\x00\x65", b""))
+
+        with self.assertRaises(ValueError):
+            build_spectrum_frame(1, source=3, offset=0, counts=(1,))
+        with self.assertRaises(ValueError):
+            build_spectrum_frame(1, source=0, offset=0, counts=(3,), ratio=2)
+        with self.assertRaises(ValueError):
+            build_ack_frame(1, CMD_SET_STA, status=2)
 
     def test_device_id_and_public_helpers(self) -> None:
         leading = decode_device_info(FrameParser().feed(build_device_info_frame(1, device_id=" leading"))[0])
@@ -329,7 +452,7 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         client = KC761Client("127.0.0.1", 1)
         loop = asyncio.get_running_loop()
         pending = loop.create_future()
-        client._pending[1] = (frozenset({0xA2}), pending)
+        client._pending[1] = PendingTransaction(0x53, frozenset({0xA2}), pending)
         await client._route_frame(RawFrame(1, 0xA2, 81, b"bad", b"bad"))
         self.assertEqual(client.protocol_errors, 1)
         pending.set_result(None)
@@ -337,7 +460,7 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         client.on_push = lambda decoded: None
         await client._route_frame(RawFrame(2, 0xFE, 4, b"", b"\x02\xfe\x04\x00", known=False))
         client._pending.clear()
-        client._pending[3] = (frozenset({0xA2}), loop.create_future())
+        client._pending[3] = PendingTransaction(0x53, frozenset({0xA2}), loop.create_future())
         await client._route_frame(RawFrame(3, 0xA2, 81, b"bad", b"bad"))
         await client.async_close()
 
@@ -351,6 +474,45 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(TransactionError):
             await bad_info.async_get_device_info()
+        bad_calibration = KC761Client("127.0.0.1", 1)
+        bad_calibration.async_request = AsyncMock(return_value=object())
+        with self.assertRaises(TransactionError):
+            await bad_calibration.async_get_calibration()
+        bad_spectrum = KC761Client("127.0.0.1", 1)
+        bad_spectrum.async_request = AsyncMock(return_value=object())
+        with self.assertRaises(TransactionError):
+            await bad_spectrum.async_get_spectrum(0)
+
+    async def test_pending_spectrum_fragment_validation_edges(self) -> None:
+        loop = asyncio.get_running_loop()
+        no_source = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+        )
+        with self.assertRaises(TransactionError):
+            no_source.add_spectrum_segment(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_QUERY))
+
+        pending = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+        )
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(SpectrumSegment(1, 0, 1, (1,), FLAG_MC_DATA_QUERY))
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(SpectrumSegment(0, 2048, 1, (1,), FLAG_MC_DATA_QUERY))
+
+        self.assertIsNone(
+            pending.add_spectrum_segment(
+                SpectrumSegment(0, 2047, 1, (7, 8), FLAG_MC_DATA_QUERY)
+            )
+        )
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(SpectrumSegment(0, 2047, 1, (9,), FLAG_MC_DATA_QUERY))
+        no_source.future.cancel()
+        pending.future.cancel()
 
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:
@@ -366,6 +528,45 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(simulator.received_syncs, [0, 1])
         self.assertEqual(simulator.forbidden_commands, [])
         self.assertEqual(simulator.invalid_requests, [])
+
+    async def test_client_spectrum_calibration_and_writes(self) -> None:
+        scenario = SimulatorScenario(sensor_types=(2, 8, 5), status_kwargs={"sensor_status": 0x04})
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(*simulator.address, request_timeout=2)
+            try:
+                spectrum = await client.async_get_spectrum(0)
+                calibration = await client.async_get_calibration()
+                await client.async_set_state(sensor_status=0x14, auto_upload_status=1)
+                await client.async_set_device_time(1_735_689_601)
+                await client.async_clear_statistics(spectrum_mask=1)
+                status = await client.async_get_status()
+            finally:
+                await client.async_close()
+        self.assertIsInstance(spectrum, SpectrumData)
+        self.assertEqual(len(spectrum.counts), 2048)
+        self.assertEqual(spectrum.counts[1024], 1024)
+        self.assertEqual(spectrum.segment_count, 4)
+        self.assertEqual(calibration.energy_kev(0, 2047), 2047)
+        self.assertEqual(status.sensor_status, 0x14)
+        self.assertEqual(status.auto_upload_status, 1)
+        self.assertEqual(simulator.clear_requests, [(1, 0, 0)])
+        self.assertEqual(
+            simulator.received_commands,
+            [CMD_GET_MC_DATA, CMD_GET_CAL_DATA, CMD_SET_STA, CMD_SET_DEVICE_TIME, CMD_SET_CLEAR, CMD_GET_STA],
+        )
+        self.assertEqual(simulator.forbidden_commands, [])
+
+    async def test_client_rejects_failed_or_mismatched_ack(self) -> None:
+        async with Kc761Simulator(SimulatorScenario(ack_status=1)) as simulator:
+            client = KC761Client(*simulator.address)
+            with self.assertRaises(TransactionError):
+                await client.async_set_device_time(1)
+            await client.async_close()
+        async with Kc761Simulator(SimulatorScenario(ack_command_override=CMD_SET_CLEAR)) as simulator:
+            client = KC761Client(*simulator.address)
+            with self.assertRaises(TransactionError):
+                await client.async_set_device_time(1)
+            await client.async_close()
 
     async def test_client_serializes_concurrent_reads(self) -> None:
         scenario = SimulatorScenario(response_delay=0.02)
@@ -507,11 +708,14 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         client = KC761Client("127.0.0.1", 1)
         loop = asyncio.new_event_loop()
         try:
-            futures = {index: (frozenset({0xA2}), loop.create_future()) for index in range(256)}
+            futures = {
+                index: PendingTransaction(0x53, frozenset({0xA2}), loop.create_future())
+                for index in range(256)
+            }
             client._pending.update(futures)
             with self.assertRaises(TransactionError):
                 client._allocate_sync()
-            for _, future in futures.values():
-                future.cancel()
+            for pending in futures.values():
+                pending.future.cancel()
         finally:
             loop.close()
