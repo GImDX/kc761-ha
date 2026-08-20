@@ -14,16 +14,28 @@ from homeassistant.core import callback
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
     CONF_INFO_INTERVAL,
+    CONF_SPECTRUM_SAVE_ENABLED,
+    CONF_SPECTRUM_SAVE_INTERVAL,
     CONF_STATUS_INTERVAL,
+    CONF_TIME_SYNC_ENABLED,
+    CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_STATUS_INTERVAL,
+    DEFAULT_SPECTRUM_SAVE_ENABLED,
+    DEFAULT_SPECTRUM_SAVE_INTERVAL,
+    DEFAULT_TIME_SYNC_ENABLED,
+    DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
     MAX_INFO_INTERVAL,
+    MAX_SPECTRUM_SAVE_INTERVAL,
     MAX_STATUS_INTERVAL,
+    MAX_TIME_SYNC_INTERVAL,
     MIN_INFO_INTERVAL,
+    MIN_SPECTRUM_SAVE_INTERVAL,
     MIN_STATUS_INTERVAL,
+    MIN_TIME_SYNC_INTERVAL,
 )
 from .protocol.client import KC761Client
 
@@ -33,7 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
-    VERSION = 2
+    VERSION = 3
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is None:
@@ -109,7 +121,7 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class KC761OptionsFlow(config_entries.OptionsFlow):
-    """Configure polling only; no transport or control settings."""
+    """Configure polling, scheduled time sync, and spectrum archiving."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
@@ -135,6 +147,28 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                     CONF_CREATE_RAW_ENTITIES,
                     default=options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 ): bool,
+                vol.Required(
+                    CONF_TIME_SYNC_ENABLED,
+                    default=options.get(CONF_TIME_SYNC_ENABLED, DEFAULT_TIME_SYNC_ENABLED),
+                ): bool,
+                vol.Required(
+                    CONF_TIME_SYNC_INTERVAL,
+                    default=options.get(CONF_TIME_SYNC_INTERVAL, DEFAULT_TIME_SYNC_INTERVAL),
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_TIME_SYNC_INTERVAL, max=MAX_TIME_SYNC_INTERVAL),
+                ),
+                vol.Required(
+                    CONF_SPECTRUM_SAVE_ENABLED,
+                    default=options.get(CONF_SPECTRUM_SAVE_ENABLED, DEFAULT_SPECTRUM_SAVE_ENABLED),
+                ): bool,
+                vol.Required(
+                    CONF_SPECTRUM_SAVE_INTERVAL,
+                    default=options.get(CONF_SPECTRUM_SAVE_INTERVAL, DEFAULT_SPECTRUM_SAVE_INTERVAL),
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=MIN_SPECTRUM_SAVE_INTERVAL, max=MAX_SPECTRUM_SAVE_INTERVAL),
+                ),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

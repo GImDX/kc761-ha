@@ -9,6 +9,10 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_SPECTRUM_SAVE_ENABLED,
+    CONF_SPECTRUM_SAVE_INTERVAL,
+    CONF_TIME_SYNC_ENABLED,
+    CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
     MODEL_NAMES,
     VERSION,
@@ -44,6 +48,10 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                     entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 )
             ),
+            CONF_TIME_SYNC_ENABLED: bool(getattr(coordinator, "time_sync_enabled", False)),
+            CONF_TIME_SYNC_INTERVAL: getattr(coordinator, "time_sync_interval", None),
+            CONF_SPECTRUM_SAVE_ENABLED: bool(getattr(coordinator, "spectrum_save_enabled", False)),
+            CONF_SPECTRUM_SAVE_INTERVAL: getattr(coordinator, "spectrum_save_interval", None),
         },
         "device": None
         if info is None
@@ -78,6 +86,26 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                 "flag": last_frame.flag,
                 "bag_len": last_frame.bag_len,
             },
+        },
+        "controls": {
+            "commands": getattr(coordinator, "control_commands", 0),
+            "last_time_sync": (
+                coordinator.last_time_sync.isoformat()
+                if getattr(coordinator, "last_time_sync", None)
+                else None
+            ),
+        },
+        "spectrum": {
+            "latest": (
+                coordinator.latest_spectrum.metadata()
+                if getattr(coordinator, "latest_spectrum", None)
+                else None
+            ),
+            "last_saved": (
+                coordinator.last_spectrum_save.isoformat()
+                if getattr(coordinator, "last_spectrum_save", None)
+                else None
+            ),
         },
         "framing": None
         if parser is None

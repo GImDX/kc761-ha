@@ -10,12 +10,14 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
         """Minimal fallback used when Home Assistant is not installed."""
 
         SENSOR = "sensor"
-        BINARY_SENSOR = "binary_sensor"
+        BUTTON = "button"
+        SELECT = "select"
+        SWITCH = "switch"
 
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.1.0-rc.1"
+VERSION = "0.2.0-alpha.1"
 DEFAULT_PORT = 7601
 DEFAULT_STATUS_INTERVAL = 5
 DEFAULT_INFO_INTERVAL = 60
@@ -23,6 +25,19 @@ CONF_STATUS_INTERVAL = "status_interval"
 CONF_INFO_INTERVAL = "info_interval"
 CONF_CREATE_RAW_ENTITIES = "create_raw_entities"
 DEFAULT_CREATE_RAW_ENTITIES = False
+CONF_TIME_SYNC_ENABLED = "time_sync_enabled"
+CONF_TIME_SYNC_INTERVAL = "time_sync_interval"
+DEFAULT_TIME_SYNC_ENABLED = False
+DEFAULT_TIME_SYNC_INTERVAL = 24
+MIN_TIME_SYNC_INTERVAL = 1
+MAX_TIME_SYNC_INTERVAL = 168
+CONF_SPECTRUM_SAVE_ENABLED = "spectrum_save_enabled"
+CONF_SPECTRUM_SAVE_INTERVAL = "spectrum_save_interval"
+DEFAULT_SPECTRUM_SAVE_ENABLED = False
+DEFAULT_SPECTRUM_SAVE_INTERVAL = 60
+MIN_SPECTRUM_SAVE_INTERVAL = 5
+MAX_SPECTRUM_SAVE_INTERVAL = 1440
+MAX_SAVED_SPECTRA = 256
 SPECTRUM_CHANNEL_COUNT = 2048
 MIN_STATUS_INTERVAL = 5
 MAX_STATUS_INTERVAL = 60
@@ -72,7 +87,14 @@ READ_COMMANDS = {CMD_GET_MC_DATA, CMD_GET_STA, CMD_GET_DEVICE_INFO, CMD_GET_CAL_
 WRITE_COMMANDS = {CMD_SET_STA, CMD_SET_DEVICE_TIME, CMD_SET_CLEAR}
 FORBIDDEN_WRITE_COMMANDS = {CMD_SET_REVISED_DATA}
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.SELECT,
+    Platform.BUTTON,
+]
+
+CHANNEL_KEYS = ("gamma", "neutron", "pin")
 
 MODEL_NAMES = {
     10: "KC761",
@@ -83,7 +105,7 @@ MODEL_NAMES = {
 }
 
 SENSOR_NAMES = {
-    0x00: "None",
+    0x00: "Not installed",
     0x01: "KC7601.21 CsI",
     0x02: "KC7601.24 CsI",
     0x03: "KC7601.25 CsI",
