@@ -45,7 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
-    VERSION = 3
+    VERSION = 5
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is None:

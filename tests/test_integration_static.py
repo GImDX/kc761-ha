@@ -42,7 +42,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.1")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.3")
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
         self.assertEqual(manifest["iot_class"], "local_polling")

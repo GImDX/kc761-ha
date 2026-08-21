@@ -19,6 +19,7 @@ import pytest
 pytest.importorskip("homeassistant")
 
 from homeassistant.exceptions import ConfigEntryNotReady  # noqa: E402
+from homeassistant.helpers import entity_registry as entity_registry_module  # noqa: E402
 from custom_components.kc761 import (  # noqa: E402
     CONFIG_SCHEMA,
     async_migrate_entry,
@@ -267,17 +268,83 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     migration_entry.version = 1
     hass.config_entries.async_update_entry = MagicMock()
     registry = MagicMock()
-    registry.async_get_entity_id.side_effect = ["binary_sensor.old", None, None, None]
+    entity_ids = {
+        ("binary_sensor", "7601-0000-000001_auto_upload_enabled"): "binary_sensor.old",
+        ("sensor", "7601-0000-000001_device_time"): "sensor.device_time",
+        ("sensor", "7601-0000-000001_clock_offset"): "sensor.clock_offset",
+        ("sensor", "7601-0000-000001_coprocessor_firmware"): "sensor.coprocessor",
+        ("sensor", "7601-0000-000001_gamma_avg_dose_rate"): "sensor.gamma_avg_dose_rate",
+        ("sensor", "7601-0000-000001_gamma_raw_cps"): "sensor.gamma_raw_cps",
+    }
+    registry.async_get_entity_id.side_effect = (
+        lambda domain, platform, unique_id: entity_ids.get((domain, unique_id))
+    )
+    registry.async_get.side_effect = lambda entity_id: {
+        "sensor.device_time": SimpleNamespace(
+            disabled_by=entity_registry_module.RegistryEntryDisabler.INTEGRATION
+        ),
+        "sensor.clock_offset": SimpleNamespace(
+            disabled_by=entity_registry_module.RegistryEntryDisabler.USER
+        ),
+        "sensor.coprocessor": SimpleNamespace(
+            disabled_by=entity_registry_module.RegistryEntryDisabler.INTEGRATION
+        ),
+        "sensor.gamma_avg_dose_rate": SimpleNamespace(
+            disabled_by=entity_registry_module.RegistryEntryDisabler.INTEGRATION
+        ),
+    }.get(entity_id)
     with patch("custom_components.kc761.er.async_get", return_value=registry):
         assert run(async_migrate_entry(hass, migration_entry)) is True
-    registry.async_remove.assert_called_once_with("binary_sensor.old")
+    assert registry.async_remove.call_args_list == [
+        call("binary_sensor.old"),
+        call("sensor.gamma_raw_cps"),
+    ]
+    assert registry.async_update_entity.call_args_list == [
+        call(
+            "sensor.device_time",
+            entity_category=None,
+            disabled_by=None,
+        ),
+        call("sensor.clock_offset", entity_category=None),
+        call(
+            "sensor.coprocessor",
+            entity_category=None,
+            disabled_by=None,
+        ),
+        call(
+            "sensor.gamma_avg_dose_rate",
+            entity_category=None,
+            disabled_by=None,
+        ),
+    ]
     hass.config_entries.async_update_entry.assert_called_once_with(
         migration_entry,
         unique_id="7601-0000-000001",
-        version=3,
+        version=5,
     )
-    migration_entry.version = 4
+    migration_entry.version = 6
     assert run(async_migrate_entry(hass, migration_entry)) is False
+
+    raw_entry = make_entry(options={"create_raw_entities": True})
+    raw_entry.version = 3
+    raw_registry = MagicMock()
+    raw_registry.async_get_entity_id.side_effect = (
+        lambda domain, platform, unique_id: (
+            "sensor.gamma_raw_cps"
+            if unique_id == "7601-0000-000001_gamma_raw_cps"
+            else None
+        )
+    )
+    raw_registry.async_get.return_value = SimpleNamespace(
+        disabled_by=entity_registry_module.RegistryEntryDisabler.INTEGRATION
+    )
+    with patch("custom_components.kc761.er.async_get", return_value=raw_registry):
+        assert run(async_migrate_entry(hass, raw_entry)) is True
+    raw_registry.async_update_entity.assert_called_once_with(
+        "sensor.gamma_raw_cps",
+        entity_category=None,
+        disabled_by=None,
+    )
 
 
 def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:

@@ -6,7 +6,12 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from .const import DOMAIN, PLATFORMS
+from .const import (
+    CONF_CREATE_RAW_ENTITIES,
+    DEFAULT_CREATE_RAW_ENTITIES,
+    DOMAIN,
+    PLATFORMS,
+)
 
 try:
     from homeassistant.config_entries import ConfigEntry
@@ -24,13 +29,34 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
     er = None  # type: ignore[assignment]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
-CONFIG_ENTRY_VERSION = 3
+CONFIG_ENTRY_VERSION = 5
 
 _REMOVED_BINARY_SENSOR_KEYS = (
     "auto_upload_enabled",
     "gamma_spectrum_accumulating",
     "neutron_spectrum_accumulating",
     "pin_spectrum_accumulating",
+)
+
+_VISIBLE_SENSOR_KEYS = (
+    "device_time",
+    "clock_offset",
+    "coprocessor_firmware",
+    *(
+        f"{channel}_{measurement}"
+        for channel in ("gamma", "neutron", "pin")
+        for measurement in (
+            "avg_cps",
+            "avg_dose_rate",
+            "avg_dose_equivalent_rate",
+        )
+    ),
+)
+
+_RAW_SENSOR_KEYS = tuple(
+    f"{channel}_{measurement}"
+    for channel in ("gamma", "neutron", "pin")
+    for measurement in ("raw_cps", "raw_dose_rate", "raw_dose_equivalent_rate")
 )
 
 
@@ -90,7 +116,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate identity and remove superseded read-only binary entities."""
+    """Migrate identity and normalize superseded registry entries."""
     if entry.version > CONFIG_ENTRY_VERSION:
         return False
     if entry.version == CONFIG_ENTRY_VERSION:
@@ -98,22 +124,58 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_id = str(entry.data.get("device_id", ""))
     if not device_id:
         return False
-    if entry.version < 3 and er is not None:
+    if er is not None:
         registry = er.async_get(hass)
-        for key in _REMOVED_BINARY_SENSOR_KEYS:
-            entity_id = registry.async_get_entity_id(
-                "binary_sensor",
-                DOMAIN,
-                f"{device_id}_{key}",
-            )
-            if entity_id is not None:
-                registry.async_remove(entity_id)
+        if entry.version < 3:
+            for key in _REMOVED_BINARY_SENSOR_KEYS:
+                entity_id = registry.async_get_entity_id(
+                    "binary_sensor",
+                    DOMAIN,
+                    f"{device_id}_{key}",
+                )
+                if entity_id is not None:
+                    registry.async_remove(entity_id)
+        if entry.version < 5:
+            _migrate_sensor_registry(registry, entry, device_id)
     hass.config_entries.async_update_entry(
         entry,
         unique_id=device_id,
         version=CONFIG_ENTRY_VERSION,
     )
     return True
+
+
+def _migrate_sensor_registry(registry: Any, entry: ConfigEntry, device_id: str) -> None:
+    """Restore new ordinary sensors without overriding user disable choices."""
+    for key in _VISIBLE_SENSOR_KEYS:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{device_id}_{key}")
+        if entity_id is None:
+            continue
+        registry_entry = registry.async_get(entity_id)
+        if registry_entry is None:
+            continue
+        changes: dict[str, Any] = {"entity_category": None}
+        if registry_entry.disabled_by == er.RegistryEntryDisabler.INTEGRATION:
+            changes["disabled_by"] = None
+        registry.async_update_entity(entity_id, **changes)
+
+    create_raw = bool(
+        entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES)
+    )
+    for key in _RAW_SENSOR_KEYS:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{device_id}_{key}")
+        if entity_id is None:
+            continue
+        if not create_raw:
+            registry.async_remove(entity_id)
+            continue
+        registry_entry = registry.async_get(entity_id)
+        if registry_entry is None:
+            continue
+        changes = {"entity_category": None}
+        if registry_entry.disabled_by == er.RegistryEntryDisabler.INTEGRATION:
+            changes["disabled_by"] = None
+        registry.async_update_entity(entity_id, **changes)
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
