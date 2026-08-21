@@ -1,8 +1,12 @@
 # 测试、发布与部署计划
 
-状态：初始执行计划
+> 本文主体是 0.1 RC 的历史门禁。0.2 控制与谱图扩展的新增测试矩阵见 [V0_2_EXPANSION.md](V0_2_EXPANSION.md#8-验收门禁)。0.1 的 24 小时运行不能替代 0.2 的控制、谱图、存档、前端和实机写入验收。
 
-日期：2026-08-10
+状态：当前候选的本地/固定镜像/测试栈及本设备实机门禁已完成；当前 HEAD 官方 CI、24 小时稳定性与发布门禁待完成
+
+日期：2026-08-20
+
+当前 RC 的验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。当前代码/测试候选已完成隔离 Home Assistant 与一台真实设备的 Config Flow、实体、重载和重启复验；GitHub runner 的官方 Hassfest/HACS 成功记录属于较早提交，当前 HEAD 必须在推送后重跑。其它型号/固件、自动上传开启态、24 小时稳定性、正式 Release 和正式环境部署仍未完成。
 
 ## 1. 环境边界
 
@@ -12,7 +16,7 @@
 | 测试 Home Assistant | 测试环境 | 只读联调、故障注入、受控写验证、升级/回滚 | 未备份的破坏性测试、生产数据假设 |
 | 正式 Home Assistant | 正式环境 | 安装固定发布版本、只读验收、监控 | 协议探索、开发目录直拷、未测试升级 |
 
-本阶段没有连接、修改或重启两个远端环境。
+2026-08-14 至 2026-08-20 经用户明确授权，只在测试环境部署并重启隔离 simulator/HA 容器；变更前建立可恢复备份，真实设备条目通过正常 Config Flow/API 创建，未直接编辑 `.storage`，正式环境未连接、修改或重启。本设备实机联调已在 `KI-AVG-001` 限制下通过，其它兼容性门禁仍保留。
 
 ## 2. 里程碑
 
@@ -116,11 +120,13 @@
 - 仓库只有一个 `custom_components/kc761` 集成；
 - 运行文件全部位于集成目录；
 - `hacs.json`、`manifest.json`、README、翻译和 diagnostics 完整；
-- 当前 Home Assistant Hassfest 与 HACS validation 通过；
+- 门禁要求：Home Assistant Hassfest 与 HACS validation 必须通过；
 - Ruff、pytest、JSON/翻译检查和 Python 编译通过；
 - 干净 HA 实例安装、升级、降级和删除验证通过；
 - release tag 与 manifest version 一致；
 - 发布说明列出兼容型号、固件证据、已知限制和回滚方法。
+
+历史软件验证：GitHub Actions run `31448849047` attempt 2 在验证分支较早提交上完成，Ruff、JSON、编译、32 项 pytest、98.81% branch coverage、Hassfest 和 HACS 9/9 checks 全部通过。当前代码/测试候选另在固定镜像通过 41 项 pytest、95.99% branch coverage、持久栈和本设备正常 Config Flow/生命周期复验，但当前未推送 HEAD 的官方 Hassfest/HACS 尚未重跑。M5 整体仍未完成：不创建 tag/Release，尚未执行固定 Release 包的安装、升级、降级和删除闭环，兼容性声明仍受其它型号/固件、自动上传开启态及 24 小时稳定性限制。
 
 ### M6 - 正式环境部署
 

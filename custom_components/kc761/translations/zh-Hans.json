@@ -1,0 +1,103 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "添加 KC761x 辐射计",
+        "description": "连接局域网中的 KC761x TCP 服务。",
+        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+      },
+      "reconfigure": {
+        "title": "重新配置 KC761x 连接",
+        "description": "新地址返回的设备 ID 必须与此配置条目一致。",
+        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接或解析 KC761x 设备。",
+      "device_mismatch": "新地址返回了不同的设备 ID。"
+    },
+    "abort": {
+      "already_configured": "此 KC761x 设备已经配置。",
+      "unknown": "找不到配置条目。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KC761x 选项",
+        "data": {
+          "status_interval": "状态轮询间隔（秒）",
+          "info_interval": "设备信息轮询间隔（秒）",
+          "create_raw_entities": "创建高频原始读数实体",
+          "time_sync_enabled": "启用定时同步设备时间",
+          "time_sync_interval": "设备时间同步间隔（小时）",
+          "spectrum_save_enabled": "启用定时保存谱图",
+          "spectrum_save_interval": "谱图保存周期（分钟）"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_percentage": {"name": "电池电量"},
+      "air_pressure": {"name": "气压"},
+      "device_temperature": {"name": "设备温度"},
+      "device_time": {"name": "设备时间"},
+      "clock_offset": {"name": "设备时钟偏差"},
+      "coprocessor_firmware": {"name": "协处理器固件"},
+      "device_id": {"name": "设备唯一 ID"},
+      "gamma_sensor_model": {"name": "Gamma 传感器型号"},
+      "neutron_sensor_model": {"name": "中子传感器型号"},
+      "pin_sensor_model": {"name": "PIN 传感器型号"},
+      "spectrum": {"name": "谱图"},
+      "gamma_avg_cps": {"name": "Gamma 平滑计数率"},
+      "gamma_avg_dose_rate": {"name": "Gamma 平滑剂量率"},
+      "gamma_avg_dose_equivalent_rate": {"name": "Gamma 平滑剂量当量率"},
+      "gamma_raw_cps": {"name": "Gamma 原始计数率"},
+      "gamma_raw_dose_rate": {"name": "Gamma 原始剂量率"},
+      "gamma_raw_dose_equivalent_rate": {"name": "Gamma 原始剂量当量率"},
+      "neutron_avg_cps": {"name": "中子平滑计数率"},
+      "neutron_avg_dose_rate": {"name": "中子平滑剂量率"},
+      "neutron_avg_dose_equivalent_rate": {"name": "中子平滑剂量当量率"},
+      "neutron_raw_cps": {"name": "中子原始计数率"},
+      "neutron_raw_dose_rate": {"name": "中子原始剂量率"},
+      "neutron_raw_dose_equivalent_rate": {"name": "中子原始剂量当量率"},
+      "pin_avg_cps": {"name": "PIN 平滑计数率"},
+      "pin_avg_dose_rate": {"name": "PIN 平滑剂量率"},
+      "pin_avg_dose_equivalent_rate": {"name": "PIN 平滑剂量当量率"},
+      "pin_raw_cps": {"name": "PIN 原始计数率"},
+      "pin_raw_dose_rate": {"name": "PIN 原始剂量率"},
+      "pin_raw_dose_equivalent_rate": {"name": "PIN 原始剂量当量率"}
+    },
+    "switch": {
+      "auto_upload": {"name": "自动上传"},
+      "key_tone": {"name": "按键音"},
+      "count_tone": {"name": "计数音"},
+      "dense_count_effect": {"name": "密集计数效果"},
+      "count_flash": {"name": "计数闪光"},
+      "backlight": {"name": "背光"},
+      "gamma_spectrum_accumulating": {"name": "Gamma 谱图累积"},
+      "neutron_spectrum_accumulating": {"name": "中子谱图累积"},
+      "pin_spectrum_accumulating": {"name": "PIN 谱图累积"}
+    },
+    "select": {
+      "active_sensor": {"name": "当前传感器", "state": {"gamma": "Gamma", "neutron": "中子", "pin": "PIN"}},
+      "global_volume": {"name": "全局音量", "state": {"mute": "静音", "low": "小", "high": "大"}},
+      "backlight_brightness": {"name": "背光亮度", "state": {"dim": "微亮", "bright": "最亮"}}
+    },
+    "button": {
+      "sync_device_time": {"name": "同步设备时间"},
+      "refresh_spectrum": {"name": "刷新谱图"},
+      "save_spectrum": {"name": "保存谱图"},
+      "clear_gamma_spectrum": {"name": "清空 Gamma 谱图"},
+      "clear_gamma_dose_curve": {"name": "清空 Gamma 剂量-时间曲线"},
+      "clear_gamma_cumulative_dose": {"name": "清空 Gamma 累积剂量"},
+      "clear_neutron_spectrum": {"name": "清空中子谱图"},
+      "clear_neutron_dose_curve": {"name": "清空中子剂量-时间曲线"},
+      "clear_neutron_cumulative_dose": {"name": "清空中子累积剂量"},
+      "clear_pin_spectrum": {"name": "清空 PIN 谱图"},
+      "clear_pin_dose_curve": {"name": "清空 PIN 剂量-时间曲线"},
+      "clear_pin_cumulative_dose": {"name": "清空 PIN 累积剂量"}
+    }
+  }
+}

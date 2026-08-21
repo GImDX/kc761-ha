@@ -1,0 +1,36 @@
+name: KC761 validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements_test.txt
+      - name: Ruff
+        run: ruff check custom_components tests
+      - name: JSON validation
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for path in Path("custom_components/kc761").rglob("*.json"):
+              json.loads(path.read_text(encoding="utf-8"))
+          PY
+      - name: Compile
+        run: python -m compileall -q custom_components tests
+      - name: Protocol and integration tests
+        run: python -m pytest -q --cov=custom_components/kc761 --cov-branch --cov-report=term-missing --cov-fail-under=95
+      - name: Hassfest
+        uses: home-assistant/actions/hassfest@master
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration

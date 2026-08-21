@@ -1,8 +1,10 @@
 # Home Assistant 实体模型
 
-状态：首版候选，受协议实机验证门禁约束
+> 本文主体记录 0.1 RC 的只读实体基线。0.2 分支新增的统一设备信息实体、控制平台、单一结构化谱图实体、独立历史存档和谱图卡，以 [V0_2_EXPANSION.md](V0_2_EXPANSION.md) 为当前规范；冲突处以该文档为准。
 
-日期：2026-08-10
+状态：`0.1.0-rc.1` 模拟候选已实现，受协议实机验证门禁约束
+
+日期：2026-08-14
 
 ## 1. 建模原则
 
@@ -11,15 +13,15 @@
 - 通道已安装但当前关闭并返回 `-1` 时，实体值为 `unknown`，不伪装为 0。
 - 设备/实体唯一标识来自 `DEVICE_ID` 和稳定字段 key，不使用 IP、端口或用户名称。
 - 测量实体只读取 Coordinator 内存快照，属性访问不得触发网络 I/O。
-- 平滑测量默认开启；上一秒原始测量默认关闭，降低 Recorder 压力。
-- 单位不确定的累计量在完成实机校准前默认关闭，且不得声明长期统计。
+- 当前代码候选默认开启设备端 AVG 字段；实机证据表明本设备的三个 AVG 字段恒为 0，而官方上位机在本地计算 30 秒平均值。该差异登记为已知问题 `KI-AVG-001`，按限制接受，本设备本轮实机验收通过。
+- 单位不确定的累计量仅保留解析结果，不创建实体，也不声明长期统计。
 - 完整谱图和脉冲数组不作为实体属性。
 
 ## 2. Device Registry
 
 | 属性 | 来源 | 处理 |
 | --- | --- | --- |
-| identifiers | `DEVICE_ID` | `(kc761, normalized_device_id)` |
+| identifiers | `DEVICE_ID` | `(kc761, DEVICE_ID)`；不以地址代替、不做大小写或符号归一化 |
 | name | 型号 + ID 尾段 | 用户可在 HA 重命名 |
 | model | `DEVICE_MODEL` | 映射为 KC761/KC761A/B/KC761C/KC761CN |
 | hw_version | `HW_VER` | 按十进制一位小数格式化 |
@@ -49,14 +51,16 @@
 
 | 稳定 key | 显示名称 | 来源 | 原生单位 | state class | 默认 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `<channel>_avg_cps` | 平滑计数率 | `RADn_AVG_CPS` | `cps` | measurement | 开启 | 官方主界面核心指标 |
-| `<channel>_avg_dose_rate` | 平滑剂量率 | `RADn_AVG_DOSE_RATE` | `mGy/h` | measurement | 开启 | 可在展示层转换为更易读单位，但原生值固定 |
-| `<channel>_avg_dose_equivalent_rate` | 平滑剂量当量率 | `RADn_AVG_DOSE_EQ_RATE` | `mSv/h` | measurement | 开启 | UI 可转换为 `µSv/h`，不能改变存储语义 |
-| `<channel>_raw_cps` | 上一秒计数率 | `RADn_RAW_CPS` | `cps` | measurement | 关闭 | 高频、噪声更大 |
-| `<channel>_raw_dose_rate` | 上一秒剂量率 | `RADn_RAW_DOSE_RATE` | `mGy/h` | measurement | 关闭 | FP16 待确认 |
-| `<channel>_raw_dose_equivalent_rate` | 上一秒剂量当量率 | `RADn_RAW_DOSE_EQ_RATE` | `mSv/h` | measurement | 关闭 | FP16 待确认 |
+| `<channel>_avg_cps` | 平滑计数率 | `RADn_AVG_CPS` | `cps` | measurement | 开启（已知问题） | 本设备恒为 0；忠实反映线协议字段，不代替上位机本地 30 秒平均 |
+| `<channel>_avg_dose_rate` | 平滑剂量率 | `RADn_AVG_DOSE_RATE` | `mGy/h` | measurement | 开启（已知问题） | 本设备恒为 0；需要实时值时启用 raw 实体 |
+| `<channel>_avg_dose_equivalent_rate` | 平滑剂量当量率 | `RADn_AVG_DOSE_EQ_RATE` | `mSv/h` | measurement | 开启（已知问题） | 本设备恒为 0；需要实时值时启用 raw 实体 |
+| `<channel>_raw_cps` | 上一秒计数率 | `RADn_RAW_CPS` | `cps` | measurement | 默认不创建 | 本设备已与上位机 CSV 逐帧确认；高频、随机波动较大 |
+| `<channel>_raw_dose_rate` | 上一秒剂量率 | `RADn_RAW_DOSE_RATE` | `mGy/h` | measurement | 默认不创建 | binary16 已解码；尚无独立上位机导出列确认其物理量 |
+| `<channel>_raw_dose_equivalent_rate` | 上一秒剂量当量率 | `RADn_RAW_DOSE_EQ_RATE` | `mSv/h` | measurement | 默认不创建 | 本设备已与上位机 µSv/h CSV 逐帧确认 |
 
 Home Assistant 当前没有针对核辐射剂量率的专用 device class，因此这些量使用明确的原生单位、`measurement` state class 和放射性图标，不错误套用功率、频率或其它不相干设备类。
+
+当前 Options 默认不创建上一秒原始读数实体。用户显式开启“创建高频原始读数实体”后，才为已安装通道创建并启用三类 raw 实体；它们仍归类为 diagnostic。实机已证明这些 raw 字段携带本设备的实时测量，而设备端 AVG 字段恒为 0。该行为作为 `KI-AVG-001` 接受，不阻塞本设备实机验收；用户需要实时测量时启用 raw 实体，后续是否调整默认值或新增 HA 侧派生平均另行评审。
 
 单位显示策略：
 
@@ -64,16 +68,16 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 - 如果 HA 的单位转换系统不支持辐射单位，实体固定发布一种单位；翻译只改变名称，不改变单位。
 - 在确认 FP16 和缩放前，剂量相关实体不能进入稳定版本。
 
-## 5. 每通道累计与诊断实体
+## 5. 每通道累计候选值与诊断实体
 
-| 稳定 key | 显示名称 | 来源 | 候选语义 | 默认 | 发布门禁 |
+| 稳定 key | 显示名称 | 来源 | 候选语义 | 当前 RC | 发布门禁 |
 | --- | --- | --- | --- | --- | --- |
-| `<channel>_spectrum_runtime` | 谱图累计时间 | `RADn_MC_RUNTIME` | duration `s` | 关闭 | 端序确认 |
-| `<channel>_dose_runtime` | 剂量累计时间 | `RADn_SUM_DOSE_TIME` | duration `s` | 关闭 | 端序确认 |
-| `<channel>_cumulative_dose` | 累计剂量 | `RADn_SUM_DOSE` | total increasing | 关闭 | 单位和缩放确认 |
-| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `RADn_SUM_DOSE_EQ` | total increasing | 关闭 | 单位和缩放确认 |
-| `<channel>_spectrum_accumulating` | 谱图正在累计 | `RAD_SENSOR_STATUS` 位 | binary sensor | 关闭 | 位定义实机确认 |
-| `<channel>_sensor_type` | 传感器型号 | `RADn_SENSOR_TYPE` | enum/text | 关闭 | 型号映射确认 |
+| `<channel>_spectrum_runtime` | 谱图累计时间 | `RADn_MC_RUNTIME` | duration `s` | 仅保留解析值，不创建实体 | 端序确认 |
+| `<channel>_dose_runtime` | 剂量累计时间 | `RADn_SUM_DOSE_TIME` | duration `s` | 仅保留解析值，不创建实体 | 端序确认 |
+| `<channel>_cumulative_dose` | 累计剂量 | `RADn_SUM_DOSE` | total increasing | 仅保留解析值，不创建实体 | 单位和缩放确认 |
+| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `RADn_SUM_DOSE_EQ` | total increasing | 仅保留解析值，不创建实体 | 单位和缩放确认 |
+| `<channel>_spectrum_accumulating` | 谱图正在累计 | `RAD_SENSOR_STATUS` 位 | binary sensor | 已安装通道创建、默认禁用/diagnostic | 位定义实机确认 |
+| `<channel>_sensor_type` | 传感器型号 | `RADn_SENSOR_TYPE` | enum/text | 不创建实体，仅 diagnostics | 型号映射确认 |
 
 累计剂量可以被命令 `0x66` 清零，因此若实机确认其只会递增或归零，可使用 `TOTAL_INCREASING`。在单位矛盾解决前不设置 state class，避免在长期统计中固化错误倍率。
 
@@ -152,13 +156,13 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 实体 unique ID 格式固定为：
 
 ```text
-<normalized_device_id>_<stable_key>
+<DEVICE_ID>_<stable_key>
 ```
 
 `stable_key` 使用英文协议语义，不包含翻译、用户名称、单位或 IP。例如：
 
-- `7601-0000-000001_gamma_avg_cps`
-- `7601-0000-000001_device_temperature`
+- `<DEVICE_ID>_gamma_avg_cps`
+- `<DEVICE_ID>_device_temperature`
 
 一旦发布不得因中文名称调整而改变。若后续修正单位，只迁移单位和数值，不重建 unique ID。
 
@@ -174,11 +178,11 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 
 ## 11. 默认启用摘要
 
-首版在对应通道存在且协议解码已完成 L 级验证后，默认只启用：
+当前代码候选在对应通道存在时默认启用以下实体，但所有实体固定公开 `hardware_verified=false`。实机逐帧证据已经证明其中三个设备端 AVG 实体在本设备上恒为 0；该限制已作为 `KI-AVG-001` 接受，以下清单同时描述当前实现和本轮验收口径：
 
 - 电池、气压、设备温度；
 - 各已安装通道的平滑计数率；
 - 各已安装通道的平滑剂量率；
 - 各已安装通道的平滑剂量当量率。
 
-原始读数、时钟、固件附加信息、累计时间、累计剂量、谱图累积状态和传感器型号默认关闭或仅进入 Device/Diagnostics。这样保留核心测量体验，同时控制实体数量和历史数据体积。
+原始读数目前仅在 Options 显式开启后创建；时钟、固件附加信息和谱图累积状态默认禁用/diagnostic；累计时间、累计剂量和传感器型号不创建实体，只保留在内存模型或脱敏 diagnostics。上位机的 30 秒平滑设置不能解释为设备协议参数；如果以后改变平均/原始实体策略，届时再执行 Recorder、迁移和实机回归，不影响当前按已知问题限制通过的验收结论。

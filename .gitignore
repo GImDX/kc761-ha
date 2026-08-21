@@ -30,6 +30,10 @@ logs/
 # Local vendor reference material; track reviewed hashes and findings in Markdown
 /docs/*.pdf
 /docs/KCSDI_*.png
+/docs/kcsdi_data/
+
+# Private hardware captures, probes, credentials, and local candidate bundles
+/private/
 
 # Never commit deployment credentials or Home Assistant secrets
 ssh_password.txt

@@ -1,0 +1,103 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add KC761x radiation meter",
+        "description": "Connect to the KC761x TCP service on your local network.",
+        "data": {"host": "Host or IP address", "port": "TCP port"}
+      },
+      "reconfigure": {
+        "title": "Reconfigure KC761x connection",
+        "description": "The device ID returned by the new endpoint must match this entry.",
+        "data": {"host": "Host or IP address", "port": "TCP port"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect or decode the KC761x device.",
+      "device_mismatch": "The new endpoint returned a different device ID."
+    },
+    "abort": {
+      "already_configured": "This KC761x device is already configured.",
+      "unknown": "The configuration entry was not found."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KC761x options",
+        "data": {
+          "status_interval": "Status polling interval (seconds)",
+          "info_interval": "Device information polling interval (seconds)",
+          "create_raw_entities": "Create high-frequency raw reading entities",
+          "time_sync_enabled": "Enable scheduled device time synchronization",
+          "time_sync_interval": "Time synchronization interval (hours)",
+          "spectrum_save_enabled": "Enable scheduled spectrum saving",
+          "spectrum_save_interval": "Spectrum saving interval (minutes)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_percentage": {"name": "Battery"},
+      "air_pressure": {"name": "Air pressure"},
+      "device_temperature": {"name": "Device temperature"},
+      "device_time": {"name": "Device time"},
+      "clock_offset": {"name": "Device clock offset"},
+      "coprocessor_firmware": {"name": "Coprocessor firmware"},
+      "device_id": {"name": "Device ID"},
+      "gamma_sensor_model": {"name": "Gamma sensor model"},
+      "neutron_sensor_model": {"name": "Neutron sensor model"},
+      "pin_sensor_model": {"name": "PIN sensor model"},
+      "spectrum": {"name": "Spectrum"},
+      "gamma_avg_cps": {"name": "Gamma average count rate"},
+      "gamma_avg_dose_rate": {"name": "Gamma average dose rate"},
+      "gamma_avg_dose_equivalent_rate": {"name": "Gamma average dose equivalent rate"},
+      "gamma_raw_cps": {"name": "Gamma raw count rate"},
+      "gamma_raw_dose_rate": {"name": "Gamma raw dose rate"},
+      "gamma_raw_dose_equivalent_rate": {"name": "Gamma raw dose equivalent rate"},
+      "neutron_avg_cps": {"name": "Neutron average count rate"},
+      "neutron_avg_dose_rate": {"name": "Neutron average dose rate"},
+      "neutron_avg_dose_equivalent_rate": {"name": "Neutron average dose equivalent rate"},
+      "neutron_raw_cps": {"name": "Neutron raw count rate"},
+      "neutron_raw_dose_rate": {"name": "Neutron raw dose rate"},
+      "neutron_raw_dose_equivalent_rate": {"name": "Neutron raw dose equivalent rate"},
+      "pin_avg_cps": {"name": "PIN average count rate"},
+      "pin_avg_dose_rate": {"name": "PIN average dose rate"},
+      "pin_avg_dose_equivalent_rate": {"name": "PIN average dose equivalent rate"},
+      "pin_raw_cps": {"name": "PIN raw count rate"},
+      "pin_raw_dose_rate": {"name": "PIN raw dose rate"},
+      "pin_raw_dose_equivalent_rate": {"name": "PIN raw dose equivalent rate"}
+    },
+    "switch": {
+      "auto_upload": {"name": "Automatic upload"},
+      "key_tone": {"name": "Key tone"},
+      "count_tone": {"name": "Count tone"},
+      "dense_count_effect": {"name": "Dense count effect"},
+      "count_flash": {"name": "Count flash"},
+      "backlight": {"name": "Backlight"},
+      "gamma_spectrum_accumulating": {"name": "Gamma spectrum accumulation"},
+      "neutron_spectrum_accumulating": {"name": "Neutron spectrum accumulation"},
+      "pin_spectrum_accumulating": {"name": "PIN spectrum accumulation"}
+    },
+    "select": {
+      "active_sensor": {"name": "Active sensor", "state": {"gamma": "Gamma", "neutron": "Neutron", "pin": "PIN"}},
+      "global_volume": {"name": "Global volume", "state": {"mute": "Mute", "low": "Low", "high": "High"}},
+      "backlight_brightness": {"name": "Backlight brightness", "state": {"dim": "Dim", "bright": "Bright"}}
+    },
+    "button": {
+      "sync_device_time": {"name": "Synchronize device time"},
+      "refresh_spectrum": {"name": "Refresh spectrum"},
+      "save_spectrum": {"name": "Save spectrum"},
+      "clear_gamma_spectrum": {"name": "Clear Gamma spectrum"},
+      "clear_gamma_dose_curve": {"name": "Clear Gamma dose curve"},
+      "clear_gamma_cumulative_dose": {"name": "Clear Gamma cumulative dose"},
+      "clear_neutron_spectrum": {"name": "Clear Neutron spectrum"},
+      "clear_neutron_dose_curve": {"name": "Clear Neutron dose curve"},
+      "clear_neutron_cumulative_dose": {"name": "Clear Neutron cumulative dose"},
+      "clear_pin_spectrum": {"name": "Clear PIN spectrum"},
+      "clear_pin_dose_curve": {"name": "Clear PIN dose curve"},
+      "clear_pin_cumulative_dose": {"name": "Clear PIN cumulative dose"}
+    }
+  }
+}
