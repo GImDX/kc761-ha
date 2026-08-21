@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.3`，已在 `feat/kc761-spectrum-controls` 开发分支和持久隔离测试栈验证
+状态：`0.2.0-alpha.4`，谱图卡自动加载修复已在独立分支和持久隔离测试栈验证
 
 日期：2026-08-21
 
@@ -101,12 +101,14 @@ Device Registry 使用：
 
 ## 6. 谱图卡、CSV 和历史谱图
 
-集成内置 `/kc761/kc761-spectrum-card.js`。在 Lovelace 资源中把 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.3` 注册为 JavaScript Module 后，可使用：
+集成内置 `/kc761/kc761-spectrum-card.js`，并在 Home Assistant 启动集成时自动注册为前端 JavaScript Module。正常安装或升级后不需要手动添加 Lovelace 资源；`KC761 Spectrum` 应自动出现在“添加卡片”选择器中，也可使用 YAML：
 
 ```yaml
 type: custom:kc761-spectrum-card
 entity: sensor.<kc761_spectrum_entity>
 ```
+
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.4` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 卡片提供：
 
@@ -152,6 +154,15 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 模拟器条目禁用时进入 `not_loaded`，30 个保留状态全部为 `unavailable`；重新启用后 30/30 恢复且不可用为 0，实机条目始终保持加载。随后单独重启 HA，约 4 秒恢复；两个条目、实体、当前谱图、历史谱图和卡片资源均恢复，日志没有集成异常或残留任务，模拟器只观察到初始化读命令。
 - 重启和生命周期验收后继续只读观察 600 秒，共 21 个样本；HTTP 失败、条目加载失败、活动实体 `unavailable` 和两份实时谱图点数失败均为 0。该短时结果只覆盖 0.2 当前候选，不能替代 0.1 RC 已完成的 24 小时运行证据，也不能证明真实设备写入安全。
 - 卡片 JavaScript 语法、静态资源 HTTP、当前/历史 WebSocket、保存和 CSV 已通过。自动化浏览器受到 LAN HTTP 客户端策略拦截，且没有已连接的外部浏览器，因此三种坐标、ROI、确认对话框和实际下载仍保留为人工可视门禁；没有绕过浏览器安全策略或向浏览器注入长期令牌。
+
+### 8.2 2026-08-22 `0.2.0-alpha.4` 卡片自动加载修复
+
+- alpha.3 只通过 `async_register_static_paths` 提供了卡片文件，但没有把模块加入 HA 前端启动资源。因此手写 `type: custom:kc761-spectrum-card` 会报 `Custom element not found`，卡片也不会自动进入选择器。
+- alpha.4 在同一幂等 setup 路径调用 HA 前端模块注册接口，并用集成版本作为查询参数刷新浏览器缓存；manifest 显式依赖 `frontend` 和 `http`。
+- 卡片脚本对 Custom Element 和 `window.customCards` 都增加重复加载保护，兼容升级后仍保留旧手工 Lovelace 资源的情况。
+- 本地 5 项静态契约测试、24 个 Python 文件和 5 个 JSON 文件通过；固定 HA 2026.7.4 ARM64 镜像再次通过 54 项 pytest，branch coverage 为 96%。候选包在本机和测试机的 SHA-256 均为 `78a9d5e2f9927b49abdca4c9cbce48da1cbcac81488d17b0cde0bd2ac58801da`。
+- 候选部署到持久测试栈并重启后，原来报错的手工卡已渲染为完整 `KC761 Spectrum` 界面。浏览器只读检查确认 `kc761-spectrum-card` 已定义，`window.customCards` 中恰有 1 个同类型条目，名称为 `KC761 Spectrum`；这同时验证了 YAML 加载与选择器登记。
+- 示例中的 `sensor.<kc761_spectrum_entity>` 是占位符，必须替换成当前设备真实的谱图实体 ID；占位符本身会显示 `Entity not found`，这与卡片模块加载无关。
 
 本地合并后继续测试的剩余门禁：
 

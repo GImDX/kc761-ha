@@ -236,6 +236,10 @@ class KC761SpectrumCard extends HTMLElement {
   }
 }
 
-customElements.define("kc761-spectrum-card", KC761SpectrumCard);
+if (!customElements.get("kc761-spectrum-card")) {
+  customElements.define("kc761-spectrum-card", KC761SpectrumCard);
+}
 window.customCards = window.customCards || [];
-window.customCards.push({ type: "kc761-spectrum-card", name: "KC761 Spectrum", description: "Current and saved KC761 spectra" });
+if (!window.customCards.some((card) => card.type === "kc761-spectrum-card")) {
+  window.customCards.push({ type: "kc761-spectrum-card", name: "KC761 Spectrum", description: "Current and saved KC761 spectra" });
+}

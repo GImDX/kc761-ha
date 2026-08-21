@@ -187,10 +187,17 @@ class FakeClient:
 def test_entry_setup_unload_reload_and_failure() -> None:
     hass = make_hass()
     assert callable(CONFIG_SCHEMA)
-    with patch("custom_components.kc761.websocket_api.async_register") as register:
+    with (
+        patch("custom_components.kc761.websocket_api.async_register") as register,
+        patch("homeassistant.components.frontend.add_extra_js_url") as add_extra_js_url,
+    ):
         assert run(async_setup(hass, {})) is True
         assert run(async_setup(hass, {})) is True
     register.assert_called_once_with(hass)
+    add_extra_js_url.assert_called_once_with(
+        hass,
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.4",
+    )
     hass.http.async_register_static_paths.assert_awaited_once()
     assert hass.data[DOMAIN] == {}
     entry = make_entry()

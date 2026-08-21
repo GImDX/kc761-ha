@@ -11,6 +11,7 @@ from .const import (
     DEFAULT_CREATE_RAW_ENTITIES,
     DOMAIN,
     PLATFORMS,
+    VERSION,
 )
 
 try:
@@ -66,14 +67,25 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
     marker = f"{DOMAIN}_api_registered"
     if not hass.data.get(marker):
+        from homeassistant.components import frontend as ha_frontend
         from homeassistant.components.http import StaticPathConfig
 
         from .websocket_api import async_register as async_register_websocket_api
 
         async_register_websocket_api(hass)
-        frontend = Path(__file__).parent / "frontend" / "kc761-spectrum-card.js"
+        frontend_path = Path(__file__).parent / "frontend" / "kc761-spectrum-card.js"
         await hass.http.async_register_static_paths(
-            [StaticPathConfig("/kc761/kc761-spectrum-card.js", str(frontend), True)]
+            [
+                StaticPathConfig(
+                    "/kc761/kc761-spectrum-card.js",
+                    str(frontend_path),
+                    True,
+                )
+            ]
+        )
+        ha_frontend.add_extra_js_url(
+            hass,
+            f"/kc761/kc761-spectrum-card.js?v={VERSION}",
         )
         hass.data[marker] = True
     return True
