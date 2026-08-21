@@ -73,12 +73,17 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         from .websocket_api import async_register as async_register_websocket_api
 
         async_register_websocket_api(hass)
-        frontend_path = Path(__file__).parent / "frontend" / "kc761-spectrum-card.js"
+        frontend_dir = Path(__file__).parent / "frontend"
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(
                     "/kc761/kc761-spectrum-card.js",
-                    str(frontend_path),
+                    str(frontend_dir / "kc761-spectrum-card.js"),
+                    True,
+                ),
+                StaticPathConfig(
+                    "/kc761/echarts.esm.min.js",
+                    str(frontend_dir / "echarts.esm.min.js"),
                     True,
                 )
             ]

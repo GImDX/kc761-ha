@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.4")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.5")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -69,6 +70,11 @@ class IntegrationStaticTests(unittest.TestCase):
             "switch.py",
             "websocket_api.py",
             "frontend/kc761-spectrum-card.js",
+            "frontend/echarts.esm.min.js",
+            "frontend/echarts.LICENSE",
+            "frontend/echarts.NOTICE",
+            "frontend/echarts-THIRD-PARTY.md",
+            "frontend/licenses/LICENSE-d3",
         ):
             self.assertTrue((integration / relative).is_file(), relative)
         frontend = (integration / "frontend" / "kc761-spectrum-card.js").read_text(encoding="utf-8")
@@ -79,10 +85,32 @@ class IntegrationStaticTests(unittest.TestCase):
             "Logarithmic",
             "ROI start channel",
             "Peak CH",
+            "refresh_interval",
+            "localStorage",
+            "renderer: \"svg\"",
+            "import(ECHARTS_URL)",
+            "markArea",
+            "markPoint",
+            "markLine",
+            "roi-start-cursor",
+            "roi-end-cursor",
+            "data-cursor",
+            "pointerdown",
             'customElements.get("kc761-spectrum-card")',
             'window.customCards.some((card) => card.type === "kc761-spectrum-card")',
         ):
             self.assertIn(feature, frontend)
+        vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(vendor).hexdigest(),
+            "28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da",
+        )
+        third_party = (integration / "frontend" / "echarts-THIRD-PARTY.md").read_text(encoding="utf-8")
+        self.assertIn("echarts`\n- Version: `6.1.0`", third_party)
+        self.assertIn(
+            "sha512-q0yaFPggC9FUdsWH4blavRWFmxdrIodbkoKNAjJudAI6CA9gNPxHtV2RcZNEepZVlk4yvBYkOkbk6HIVpIyHZA==",
+            third_party,
+        )
 
     def test_translation_keys_match_canonical_strings(self) -> None:
         integration = ROOT / "custom_components" / "kc761"

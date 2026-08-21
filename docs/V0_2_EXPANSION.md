@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.4`，谱图卡自动加载修复已在独立分支和持久隔离测试栈验证
+状态：`0.2.0-alpha.5`，谱图卡 ECharts SVG 重构已完成固定 runner 与持久测试栈的自动/只读核对；浏览器视觉门禁、Ruff 和持续观察仍待完成
 
 日期：2026-08-21
 
@@ -106,18 +106,27 @@ Device Registry 使用：
 ```yaml
 type: custom:kc761-spectrum-card
 entity: sensor.<kc761_spectrum_entity>
+refresh_interval: 0
+y_axis: linear
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.4` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.5` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 卡片提供：
 
 - Gamma、Neutron、PIN 已安装通道切换；
 - X 轴道址/能量 keV 切换；
 - Y 轴线性/对数切换；
+- Y 轴选择按谱图实体写入浏览器 `localStorage`，刷新或重新打开页面后恢复；
+- 使用本地 vendored ECharts 6.1.0 的 SVG renderer，Y 轴留出独立刻度/label 边距，不使用 Canvas 或外网 CDN；
+- 两个可拖动的 ROI 游标、非黄色的半透明 ROI 区域，以及独立颜色的自动峰值标记；
+- 一个可拖动的数据游标，实时显示道址、能量和计数；
 - 累积时间、获取时间、总计数和峰值显示；
 - 用户选择的 ROI 范围及范围内计数；
 - 手动刷新、保存和 CSV 下载；
+- YAML 可配置 `refresh_interval`（默认 `0` 关闭；启用时为 `5`–`3600` 秒）。自动刷新只在 `Latest`、已连接且没有保存/清空等操作进行时读取最新谱图，卡片卸载时清理定时器；
+
+ECharts 6.1.0 的 Apache-2.0 `LICENSE`、`NOTICE` 和 D3 派生许可证随卡片分发；npm registry integrity 和 vendored 文件 SHA-256 记录在 [echarts-THIRD-PARTY.md](../custom_components/kc761/frontend/echarts-THIRD-PARTY.md) 中。
 - 已保存谱图列表和历史谱图回看；
 - 三类清空操作及带设备身份的简单确认。
 
@@ -164,11 +173,25 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 候选部署到持久测试栈并重启后，原来报错的手工卡已渲染为完整 `KC761 Spectrum` 界面。浏览器只读检查确认 `kc761-spectrum-card` 已定义，`window.customCards` 中恰有 1 个同类型条目，名称为 `KC761 Spectrum`；这同时验证了 YAML 加载与选择器登记。
 - 示例中的 `sensor.<kc761_spectrum_entity>` 是占位符，必须替换成当前设备真实的谱图实体 ID；占位符本身会显示 `Entity not found`，这与卡片模块加载无关。
 
+### 8.3 2026-08-22 `0.2.0-alpha.5` ECharts SVG 卡片重构（固定 runner 与测试栈结果）
+
+- 卡片已移除手绘 Canvas 路径，改为集成内置的 ECharts 6.1.0 ESM，并固定 `renderer: "svg"`；第三方许可证、npm integrity 和文件哈希见 `frontend/echarts-THIRD-PARTY.md`。
+- ECharts `grid` 的左右边距和 Y 轴 `containLabel`/`nameGap` 为刻度与 label 留出独立空间；ROI 改为青色半透明 `markArea`，峰值、谱线和数据游标使用互不相同的颜色。
+- 两个 ROI 游标和一个数据游标使用可访问的 pointer/keyboard 控件，拖动时同步输入框、ROI 汇总、数据点读数和 ECharts 标记；游标位置在 ResizeObserver 调整后重新定位。
+- `refresh_interval` 只接受 `0` 或 `5`–`3600` 秒，并且仅在 Latest、已连接且非 busy 时捕获；`disconnectedCallback` 清理定时器、ResizeObserver 和 ECharts 实例。
+- `y_axis` 可在 YAML 中初始化，用户改变后的值以实体 ID 隔离写入浏览器 `localStorage`；存储异常按安全降级处理。
+- 固定 Home Assistant 2026.7.4 ARM64 runner 使用不可变镜像完成 `54` 项 pytest，branch coverage 为 `96%`；本地/远端候选源码包 SHA-256 均为 `6930091552e7df3ca3c531913842af9d57c08c34a647c64e2133ceae67124841`，随集成提供的 ECharts 6.1.0 文件 SHA-256 为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。固定镜像内完成 Python 编译与 JSON 检查；该镜像未安装 Ruff，不能将 Ruff 记为通过。
+- alpha.5 已在持久隔离测试栈启动并就绪；HA、卡片和 ECharts 静态资源均返回 HTTP 200，manifest 为 alpha.5。实机与模拟器条目均通过只读 API 检查为 loaded，实机 42/42 活动实体、模拟器 30/30 活动实体均无 unavailable，两个谱图均为 2048 点；模拟器条目通过正常 Config Flow 创建，未直接编辑 `.storage`。预部署只读核对未发现旧手工 KC761 JavaScript resource，未修改 Lovelace 配置。
+- 替换前完整备份已保留在测试栈的 `pre-v02-alpha5-echarts-20260821T181750Z` 备份目录。部署启动窗口曾记录 3 条真实设备 coordinator `TimeoutError`；随后只读检查已恢复为 loaded 且 unavailable 为 0，但本轮 120 秒持续观察被工具中断，未据此宣称无错误长期运行。
+- 本轮页面/Config Flow 只进行了读取路径核对，未调用控制实体；未对真实 KC761 发送写命令。固定 runner 中的模拟器控制测试属于历史软件路径覆盖，不能替代本轮持久运行命令计数审计。
+- 浏览器发现阶段返回 `No browser is available`，因此尚未自动验证实际 SVG DOM、无 canvas、Y 轴视觉间距、三游标拖动/读数、配色独立性、`y_axis` reload 持久性和 `refresh_interval` 两周期捕获；这些项目保留为用户浏览器中的人工门禁。
+
 本地合并后继续测试的剩余门禁：
 
-1. 当前扩展提交推送后重新运行官方 Hassfest、HACS 和 GitHub Actions；历史成功记录不能代替当前 HEAD。
-2. 在用户浏览器完成谱图卡三种坐标选择、ROI、确认对话框、实际 CSV 下载、手动/定时保存、历史回看和保留上限的可视验收；Recorder 排除已经实测通过。
-3. 使用专门测试设备，逐项、人工确认后验证 `0x62` 和 `0x63` ACK/读回；`0x66` 必须在用户明确接受数据丢失后单独验收。
-4. 自动上传开启态、其它传感器与型号、累计量跨固件单位和 BLE UUID 继续保持未确认；`hardware_verified=false` 不变。
+1. 当前扩展提交推送后重新运行官方 Hassfest、HACS、GitHub Actions 和 Ruff；历史成功记录不能代替当前 HEAD。
+2. 在用户浏览器完成谱图卡 SVG/无 canvas、三种坐标选择、Y 轴视觉间距、三游标拖动和读数、配色、`y_axis` reload 持久性、自动刷新、确认对话框、实际 CSV 下载、手动/定时保存、历史回看和保留上限的可视验收；Recorder 排除已经实测通过。
+3. 对持久测试栈补做独立的模拟器运行时命令计数审计，确认本轮自动刷新只增加 `0x52` 且 `0x62/0x63/0x64/0x66` 均为 0；当前固定 runner 的控制覆盖不能代替该审计。
+4. 使用专门测试设备，逐项、人工确认后验证 `0x62` 和 `0x63` ACK/读回；`0x66` 必须在用户明确接受数据丢失后单独验收。
+5. 自动上传开启态、其它传感器与型号、累计量跨固件单位和 BLE UUID 继续保持未确认；`hardware_verified=false` 不变。
 
 用户已经授权在本轮软件验收后进行本地合并，以便继续测试；这不等于发布授权。在上述剩余门禁完成前，不得推送合并结果、发布 tag/Release、部署正式环境或宣称控制功能已通过实机验证。
