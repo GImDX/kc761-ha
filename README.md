@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前分支实现 `0.1.0-rc.1` 只读候选：包含协议候选实现、异步 TCP 模拟器、Home Assistant 生命周期测试和 HACS 校验配置。当前代码/测试候选已在固定 Home Assistant 2026.7.4 镜像和持久隔离栈复验，并通过真实设备的正常 Config Flow、Options Flow、重载、HA 重启及 24 小时稳定性验收；Draft PR 当前 HEAD 的 push 与 pull-request 两次 GitHub Actions 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks。2026-08-20 已通过一台隔离测试设备、官方上位机和字节透明观察完成 A2/A5 及主动谱图/校准数据的字段级验证：CPS、实时剂量当量率、设备时间、2048 道谱图、能量刻度和电池低 7 位百分比均取得同设备证据，本设备本轮实机验收通过。该固件的设备端 AVG 字段始终为 0、官方上位机的 30 秒平均值由上位机本地计算，已登记为已知问题 `KI-AVG-001`；这不否定线协议字段解析和本轮实机验收，当前默认 AVG 实体会忠实显示设备返回的 0，用户可启用 raw 实体查看实时测量。跨固件单位、自动上传开启态和完整兼容性仍未确认，不能据此宣称完整硬件兼容。软件证据和实机记录均见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
+当前分支实现 `0.1.0-rc.1` 只读候选：包含协议候选实现、异步 TCP 模拟器、Home Assistant 生命周期测试和 HACS 校验配置。当前代码/测试候选已在固定 Home Assistant 2026.7.4 镜像和持久隔离栈复验，并通过真实设备的正常 Config Flow、Options Flow、重载、HA 重启及 24 小时稳定性验收；Draft PR 代码候选基线的 push 与 pull-request 两次 GitHub Actions 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks。2026-08-20 已通过一台隔离测试设备、官方上位机和字节透明观察完成 A2/A5 及主动谱图/校准数据的字段级验证：CPS、实时剂量当量率、设备时间、2048 道谱图、能量刻度和电池低 7 位百分比均取得同设备证据，本设备本轮实机验收通过。该固件的设备端 AVG 字段始终为 0、官方上位机的 30 秒平均值由上位机本地计算，已登记为已知问题 `KI-AVG-001`；这不否定线协议字段解析和本轮实机验收，当前默认 AVG 实体会忠实显示设备返回的 0，用户可启用 raw 实体查看实时测量。跨固件单位、自动上传开启态和完整兼容性仍未确认，不能据此宣称完整硬件兼容。软件证据和实机记录均见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
 
 ## 已确定的首版范围
 
@@ -73,7 +73,7 @@ tests/               # 纯协议测试与 asyncio 模拟器
 
 ## RC 验证边界
 
-- Draft PR 当前 HEAD `c8136424eb52ecb9c36665d5614431774308b21b` 的 push run `32294694277` 与 pull-request run `32294699080` 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest（invalid=0）和 HACS 9/9 checks；固定镜像、真实 HA 生命周期与 24 小时稳定性门禁也已完成。软件检查与 2026-08-20 至 2026-08-21 的实机证据分别记录，不能互相替代。
+- Draft PR 代码候选基线 `c8136424eb52ecb9c36665d5614431774308b21b` 的 push run `32294694277` 与 pull-request run `32294699080` 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest（invalid=0）和 HACS 9/9 checks；固定镜像、真实 HA 生命周期与 24 小时稳定性门禁也已完成。后续提交仅更新验收文档，不改变代码树；软件检查与 2026-08-20 至 2026-08-21 的实机证据分别记录，不能互相替代。
 - 模拟器允许验证 TCP 分片、粘包、重连、自动上传交错和畸形帧恢复；模拟结果不能替代实机 L 级证据。
 - 默认不创建完整谱图实体、不注册 service/action，也不会发送 `0x62`、`0x63`、`0x64`、`0x66`。
 - 本设备已确认 A2/A5/A6、主动 A0 谱图片段、CPS、实时剂量当量率的小端 binary16/单位换算、设备时间、2048 道谱图、工厂能量刻度和电池低 7 位百分比，本轮实机验收通过。完整 AVG 字段恒为 0 已登记为 `KI-AVG-001`，按已知问题接受，不作为本轮实机验收失败；跨固件表示、累计量单位、自动上传开启态和 BLE UUID 仍保持 `hardware-unverified`。字段级边界见 [协议证据账本](docs/PROTOCOL_EVIDENCE.md#103-2026-08-20-五分钟透明流与-kcsdi-导出对齐脱敏)。

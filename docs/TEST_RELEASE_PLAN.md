@@ -1,10 +1,10 @@
 # 测试、发布与部署计划
 
-状态：当前候选的本地/固定镜像/测试栈、当前 HEAD 官方 CI 及本设备 24 小时稳定性门禁已完成；发布门禁待完成
+状态：当前候选的本地/固定镜像/测试栈、代码候选基线官方 CI 及本设备 24 小时稳定性门禁已完成；发布门禁待完成
 
 日期：2026-08-21
 
-当前 RC 的验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。当前代码/测试候选已完成隔离 Home Assistant 与一台真实设备的 Config Flow、实体、重载、重启和 24 小时稳定性复验；Draft PR 当前 HEAD 的 push 与 pull-request 两次 GitHub workflow 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks。其它型号/固件、自动上传开启态、正式 Release 和正式环境部署仍未完成。
+当前 RC 的验证记录见 [RC_TEST_RESULTS.md](RC_TEST_RESULTS.md)。当前代码/测试候选已完成隔离 Home Assistant 与一台真实设备的 Config Flow、实体、重载、重启和 24 小时稳定性复验；Draft PR 代码候选基线的 push 与 pull-request 两次 GitHub workflow 均通过 Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks。其它型号/固件、自动上传开启态、正式 Release 和正式环境部署仍未完成。
 
 ## 1. 环境边界
 
@@ -124,7 +124,7 @@
 - release tag 与 manifest version 一致；
 - 发布说明列出兼容型号、固件证据、已知限制和回滚方法。
 
-当前软件验证：Draft PR 当前 HEAD `c8136424eb52ecb9c36665d5614431774308b21b` 的 push run `32294694277` 与 pull-request run `32294699080` 均完成，Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks 全部通过；同一候选也通过固定镜像、持久栈、本设备正常 Config Flow/生命周期和 24 小时稳定性复验。M5 整体仍未完成：不创建 tag/Release，尚未执行固定 Release 包的安装、升级、降级和删除闭环，兼容性声明仍受其它型号/固件与自动上传开启态限制。
+当前软件验证：Draft PR 代码候选基线 `c8136424eb52ecb9c36665d5614431774308b21b` 的 push run `32294694277` 与 pull-request run `32294699080` 均完成，Ruff、JSON、编译、41 项 pytest、95.99% branch coverage、Hassfest 和 HACS 9/9 checks 全部通过；后续提交仅更新验收文档且 required checks 也通过，同一代码候选还通过固定镜像、持久栈、本设备正常 Config Flow/生命周期和 24 小时稳定性复验。M5 整体仍未完成：不创建 tag/Release，尚未执行固定 Release 包的安装、升级、降级和删除闭环，兼容性声明仍受其它型号/固件与自动上传开启态限制。
 
 ### M6 - 正式环境部署
 

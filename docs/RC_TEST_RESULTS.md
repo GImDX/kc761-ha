@@ -118,15 +118,16 @@
 
 结论：在上述监控认证故障和两次已确认操作诱发事件的透明限制下，本设备 24 小时运行、自动恢复、任务生命周期、日志健康和只读命令安全门禁通过。该结论仅适用于本设备和当前固定 HA/固件组合，不提升跨型号/跨固件 `hardware_verified`，也不完成自动上传开启态门禁。
 
-## 2026-08-20 当前 HEAD 官方 GitHub 验证
+## 2026-08-20 代码候选基线官方 GitHub 验证
 
-Draft PR #1 的验证分支 HEAD 为 `c8136424eb52ecb9c36665d5614431774308b21b`。该提交是与 `main` 建立 ancestry 的零树差异 merge commit；`main` 仍为 `30e8f52930acba4be9541e24dad61b41e1145e55`。同一 HEAD 的 push 与 pull-request 两次 workflow 均成功：
+Draft PR #1 的代码候选基线为 `c8136424eb52ecb9c36665d5614431774308b21b`。该提交是与 `main` 建立 ancestry 的零树差异 merge commit；`main` 仍为 `30e8f52930acba4be9541e24dad61b41e1145e55`。该基线的 push 与 pull-request 两次 workflow 均成功：
 
 - push run `32294694277`：<https://github.com/GImDX/kc761-ha/actions/runs/32294694277>
 - pull-request run `32294699080`：<https://github.com/GImDX/kc761-ha/actions/runs/32294699080>
 - Ruff、JSON validation、Python compileall：通过。
 - pytest：41 passed、1 warning；branch coverage `95.99%`，95% 门禁通过。
 - Hassfest：`Invalid integrations: 0`；HACS validation：9/9 checks passed。
+- 后续提交仅更新验收文档，不改变代码树；Draft PR 最新两项 required checks 在本文发布时也均为 success。
 - PR 保持 Draft、open、mergeable；未合并 PR，未创建 tag 或 Release。
 
 ## 2026-08-14 审查修复复验（历史候选）
@@ -162,7 +163,7 @@ Draft PR #1 的验证分支 HEAD 为 `c8136424eb52ecb9c36665d5614431774308b21b`�
 - API 验收通过 Home Assistant 正常登录 flow 获取当次 token，并在查询后立即撤销；未直接编辑 `.storage`，未输出凭据或 token
 - 成功后 simulator 与 HA 两容器保留运行；正式环境未连接或修改
 
-这组结果验证当时的审查后软件行为，不提升任何真实设备协议字段的证据等级。当时尚待重跑的 Draft PR 官方检查已由上面的 2026-08-20 当前 HEAD 双 workflow 成功记录取代。
+这组结果验证当时的审查后软件行为，不提升任何真实设备协议字段的证据等级。当时尚待重跑的 Draft PR 官方检查已由上面的 2026-08-20 代码候选基线双 workflow 成功记录取代。
 
 ## 2026-08-11 固定镜像验证（历史快照）
 
@@ -222,7 +223,7 @@ coverage report --fail-under=95
 
 ## 当前结论与剩余门禁
 
-- HACS 根配置 `hacs.json`、当前全包 branch coverage 门禁、静态检查、固定镜像、真实 HA 生命周期、24 小时稳定性和只读安全门禁已通过；当前 HEAD 的 push 与 pull-request 两次官方 Hassfest/HACS 均成功。
+- HACS 根配置 `hacs.json`、当前全包 branch coverage 门禁、静态检查、固定镜像、真实 HA 生命周期、24 小时稳定性和只读安全门禁已通过；代码候选基线的 push 与 pull-request 两次官方 Hassfest/HACS 均成功，后续纯文档提交的 required checks 也通过。
 - 首版仍只读；不发送校准、清除统计、设备时间、状态设置或其它写命令。
 - 本设备 L 级证据已覆盖 A2/A5/A6、主动 A0 Gamma 谱图、RAW CPS、RAW 剂量当量率的 binary16/缩放、设备时间、电池低 7 位、2048 道谱图与 A6 能量刻度，以及官方上位机 `0x63` 的 ACK 回显；这些结论不得跨固件泛化。
 - 已知问题 `KI-AVG-001`：当前默认 AVG 实体在本设备上持续为 0，官方上位机平均值由本地计算；用户可启用 raw 实体查看实时值。该限制已接受，本设备本轮实机验收通过，不作为 RC 测试发布阻塞。
