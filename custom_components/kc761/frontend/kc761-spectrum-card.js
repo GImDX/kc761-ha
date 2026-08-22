@@ -1,12 +1,14 @@
-const CARD_VERSION = "0.2.0-alpha.6";
+const CARD_VERSION = "0.2.0-alpha.9";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
-const GRID = { left: 74, right: 28, top: 26, bottom: 62 };
-const COLORS = {
+// First-paint fallback only.  After ECharts lays out the axes, the overlay is
+// positioned from its actual grid coordinate system rather than guessed CSS
+// insets (which would drift when containLabel or a theme changes).
+const GRID_FALLBACK = { top: 15, bottom: 28 };
+const COLOR_FALLBACKS = {
   curve: "#4fc3f7",
   roiStart: "#00acc1",
   roiEnd: "#26c6da",
-  roiFill: "rgba(0, 172, 193, 0.16)",
   peak: "#ff7043",
   dataCursor: "#e91e63",
 };
@@ -35,6 +37,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._drawToken = 0;
     this._dragCleanup = null;
     this._detached = false;
+    this._colors = { ...COLOR_FALLBACKS };
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
   }
 
@@ -49,6 +52,7 @@ class KC761SpectrumCard extends HTMLElement {
       throw new Error("refresh_interval must be 0 or an integer between 5 and 3600 seconds");
     }
     this._config = { ...config, refresh_interval: refreshInterval };
+    this._refreshColors();
     this._setYAxis(this._initialYAxis(config.y_axis));
     this._renderBase();
     this._syncAutoRefresh();
@@ -76,6 +80,7 @@ class KC761SpectrumCard extends HTMLElement {
     const previous = this._hass?.states?.[this._config?.entity];
     this._hass = hass;
     if (!this._config) return;
+    this._refreshColors();
     const current = hass.states[this._config.entity];
     if (!current) {
       this._setStatus(`Entity not found: ${this._config.entity}`, true);
@@ -111,12 +116,12 @@ class KC761SpectrumCard extends HTMLElement {
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:7px 9px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
         button{cursor:pointer}button.danger{color:var(--error-color)}button:disabled{opacity:.45;cursor:not-allowed}
-        .chart-wrap{position:relative;margin-top:12px;height:430px;border:1px solid var(--divider-color);border-radius:6px;background:var(--primary-background-color);overflow:hidden}
-        #chart{width:100%;height:100%}.chart-cursor{position:absolute;top:${GRID.top}px;bottom:${GRID.bottom}px;width:0;border-left:2px dashed;z-index:5;pointer-events:auto;touch-action:none;cursor:ew-resize}
+        .chart-wrap{position:relative;margin-top:12px;height:430px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
+        #chart{width:100%;height:100%}.chart-cursor{position:absolute;top:${GRID_FALLBACK.top}px;bottom:${GRID_FALLBACK.bottom}px;width:0;border-left:2px dashed;z-index:5;pointer-events:auto;touch-action:none;cursor:ew-resize}
         .chart-cursor .handle{position:absolute;top:-8px;left:-9px;width:16px;height:16px;border-radius:50%;border:2px solid var(--card-background-color);box-shadow:0 0 0 1px currentColor;background:currentColor;cursor:ew-resize}
-        .chart-cursor .caption{position:absolute;top:-25px;left:5px;white-space:nowrap;font-size:11px;font-weight:600;color:currentColor;text-shadow:0 1px var(--primary-background-color)}
-        #roi-start-cursor{color:${COLORS.roiStart}}#roi-end-cursor{color:${COLORS.roiEnd}}#data-cursor{color:${COLORS.dataCursor}}
-        .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:${COLORS.roiStart}}.swatch.peak{background:${COLORS.peak}}.swatch.data{background:${COLORS.dataCursor}}.swatch.curve{background:${COLORS.curve}}
+        .chart-cursor .caption{position:absolute;top:-25px;left:5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:currentColor;text-shadow:0 1px var(--card-background-color);pointer-events:none}
+        #roi-start-cursor{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}#roi-end-cursor{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd})}#data-cursor{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}
+        .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
         .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:12px 0;font-size:13px}.summary div{padding:8px;background:var(--secondary-background-color);border-radius:6px}.summary b{display:block;font-size:15px;margin-top:3px}
         .status{min-height:20px;margin-top:8px;color:var(--secondary-text-color)}.status.error{color:var(--error-color)}.actions{margin-top:10px}.spacer{flex:1}
         .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}
@@ -234,13 +239,19 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _setCursorFromClient(kind, clientX) {
-    const wrap = this.shadowRoot.querySelector("#chart-wrap");
-    if (!wrap || !this._data?.points?.length) return;
-    const rect = wrap.getBoundingClientRect();
-    const width = Math.max(1, rect.width);
-    const pixel = clamp(clientX - rect.left, GRID.left, width - GRID.right);
-    const [minX, maxX] = this._xRange();
-    const xValue = minX + ((pixel - GRID.left) / Math.max(1, width - GRID.left - GRID.right)) * (maxX - minX);
+    const chartElement = this.shadowRoot.querySelector("#chart");
+    if (!chartElement || !this._chart || !this._data?.points?.length) return;
+    const chartRect = chartElement.getBoundingClientRect();
+    const xBounds = this._xPixelBounds();
+    if (!xBounds) return;
+    const pixel = clamp(clientX - chartRect.left, xBounds[0], xBounds[1]);
+    // With an xAxis finder ECharts' cartesian Grid maps a scalar pixel value
+    // through Axis.coordToData.  Passing an [x, y] pair would select the
+    // cartesian path only when a grid/series finder is used and is therefore
+    // not portable between ECharts versions.
+    const converted = this._chart.convertFromPixel({ xAxisIndex: 0 }, pixel);
+    const xValue = Array.isArray(converted) ? Number(converted[0]) : Number(converted);
+    if (!Number.isFinite(xValue)) return;
     const point = this._nearestPointByX(xValue);
     if (point) this._setCursorChannel(kind, point[0]);
   }
@@ -479,14 +490,25 @@ class KC761SpectrumCard extends HTMLElement {
     let peak = points[0];
     points.forEach((point) => { if (point[2] > peak[2]) peak = point; });
     const xFor = (point) => this._xValue(point);
-    const foreground = getComputedStyle(this).getPropertyValue("--primary-text-color").trim() || "#ddd";
-    const divider = getComputedStyle(this).getPropertyValue("--divider-color").trim() || "#555";
+    const foreground = this._themeValue("--primary-text-color", "#ddd");
+    const secondary = this._themeValue("--secondary-text-color", foreground);
+    const divider = this._themeValue("--divider-color", "#555");
+    const cardBackground = this._themeValue("--card-background-color", "#1c1c1c");
+    const colors = this._colors || COLOR_FALLBACKS;
     return {
       animation: false,
       textStyle: { color: foreground },
-      grid: { ...GRID, containLabel: true },
+      backgroundColor: "transparent",
+      // HA's own statistics chart uses a minimal grid and lets containLabel
+      // calculate the real plot inset.  A guessed left inset is not stable
+      // across themes, label widths, or the linear/log axis switch.
+      // Keep a small, explicit top reserve for the horizontal Y-axis title.
+      // The native HA charts use a similarly restrained top margin, but this
+      // card also exposes an axis name and must keep it away from max ticks.
+      grid: { top: 30, left: 1, right: 1, bottom: 28, containLabel: true },
       tooltip: {
-        trigger: "axis", axisPointer: { type: "line", snap: true },
+        trigger: "axis", renderMode: "html", backgroundColor: cardBackground, borderColor: divider, borderWidth: 1,
+        textStyle: { color: foreground }, axisPointer: { type: "line", snap: true, lineStyle: { color: colors.dataCursor } },
         formatter: (items) => {
           const item = items?.[0];
           if (!item) return "";
@@ -496,24 +518,35 @@ class KC761SpectrumCard extends HTMLElement {
       },
       xAxis: {
         type: "value", name: xMode === "energy" ? "Energy (keV)" : "Channel address", nameLocation: "middle", nameGap: 38,
-        min: this._xRange()[0], max: this._xRange()[1], boundaryGap: false, axisLabel: { hideOverlap: true, margin: 10 },
+        min: this._xRange()[0], max: this._xRange()[1], boundaryGap: false,
+        nameTextStyle: { color: secondary }, axisLabel: {
+          color: secondary, hideOverlap: true, showMinLabel: true, showMaxLabel: true, margin: 12,
+          formatter: (value) => {
+            const number = Number(value);
+            if (!Number.isFinite(number)) return "";
+            if (xMode === "channel") return String(Math.round(number));
+            const digits = Math.abs(number) >= 1000 ? 1 : 2;
+            return number.toFixed(digits).replace(/\.?(0+)$/, "");
+          },
+        },
         axisLine: { lineStyle: { color: divider } }, splitLine: { lineStyle: { color: divider, opacity: 0.45 } },
       },
       yAxis: {
-        type: logarithmic ? "log" : "value", name: logarithmic ? "Counts (log)" : "Counts", nameLocation: "middle", nameGap: 54,
-        min: logarithmic ? 1 : 0, axisLabel: { hideOverlap: true, margin: 12 }, axisLine: { lineStyle: { color: divider } },
+        type: logarithmic ? "log" : "value", name: logarithmic ? "Counts (log)" : "Counts", nameLocation: "end", nameRotate: 0, nameGap: 6,
+        nameTextStyle: { color: secondary, align: "left", verticalAlign: "bottom", padding: [0, 0, 4, 0] },
+        min: logarithmic ? 1 : 0, axisLabel: { color: secondary, hideOverlap: true, showMinLabel: true, showMaxLabel: true, margin: 8 }, axisLine: { lineStyle: { color: divider } },
         splitLine: { lineStyle: { color: divider, opacity: 0.45 } },
       },
       series: [{
         name: "Spectrum", type: "line", showSymbol: false, sampling: "lttb", data: lineData,
-        lineStyle: { color: COLORS.curve, width: 1.5 }, itemStyle: { color: COLORS.curve },
-        markArea: { silent: true, itemStyle: { color: COLORS.roiFill, borderColor: COLORS.roiStart, borderWidth: 1 }, data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]] },
+        lineStyle: { color: colors.curve, width: 1.5 }, itemStyle: { color: colors.curve },
+        markArea: { silent: true, itemStyle: { color: colors.roiStart, opacity: 0.16, borderColor: colors.roiStart, borderWidth: 1 }, data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]] },
         markLine: { silent: true, symbol: ["none", "none"], label: { show: false }, data: [
-          { xAxis: xFor(roiStartPoint), lineStyle: { color: COLORS.roiStart, type: "dashed", width: 1 } },
-          { xAxis: xFor(roiEndPoint), lineStyle: { color: COLORS.roiEnd, type: "dashed", width: 1 } },
-          { xAxis: xFor(cursorPoint), lineStyle: { color: COLORS.dataCursor, type: "solid", width: 1 } },
+          { xAxis: xFor(roiStartPoint), lineStyle: { color: colors.roiStart, type: "dashed", width: 1 } },
+          { xAxis: xFor(roiEndPoint), lineStyle: { color: colors.roiEnd, type: "dashed", width: 1 } },
+          { xAxis: xFor(cursorPoint), lineStyle: { color: colors.dataCursor, type: "solid", width: 1 } },
         ] },
-        markPoint: { symbol: "pin", symbolSize: 34, itemStyle: { color: COLORS.peak }, label: { color: "#fff", fontSize: 10 }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
+        markPoint: { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10 }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
       }],
     };
   }
@@ -547,19 +580,107 @@ class KC761SpectrumCard extends HTMLElement {
     return this._chart;
   }
 
+  _refreshColors() {
+    let computed;
+    try {
+      computed = getComputedStyle(this);
+    } catch (_error) {
+      computed = null;
+    }
+    const used = new Set();
+    const colors = {};
+    const entries = [["curve", 1], ["roiStart", 2], ["roiEnd", 3], ["peak", 4], ["dataCursor", 5]];
+    entries.forEach(([name, index]) => {
+      const fallback = COLOR_FALLBACKS[name];
+      const paletteIndex = ((index - 1) % 54) + 1;
+      const graphColor = computed?.getPropertyValue(`--graph-color-${index}`).trim();
+      const paletteColor = computed?.getPropertyValue(`--color-${paletteIndex}`).trim();
+      let value = graphColor || paletteColor || fallback;
+      if (used.has(value.toLowerCase())) value = fallback;
+      used.add(value.toLowerCase());
+      colors[name] = value;
+    });
+    this._colors = colors;
+    Object.entries({
+      "--kc761-spectrum-curve": colors.curve,
+      "--kc761-spectrum-roi-start": colors.roiStart,
+      "--kc761-spectrum-roi-end": colors.roiEnd,
+      "--kc761-spectrum-peak": colors.peak,
+      "--kc761-spectrum-data": colors.dataCursor,
+    }).forEach(([name, value]) => this.style.setProperty(name, value));
+  }
+
+  _themeValue(name, fallback) {
+    try {
+      return getComputedStyle(this).getPropertyValue(name).trim() || fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+
+  _plotRect() {
+    const coordinateSystem = this._chart?.getModel?.()?.getComponent?.("grid", 0)?.coordinateSystem;
+    const rect = coordinateSystem?.getRect?.();
+    if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
+    return rect;
+  }
+
+  _chartXPixel(value) {
+    if (!this._chart) return null;
+    const converted = this._chart.convertToPixel({ xAxisIndex: 0 }, value);
+    const pixel = Array.isArray(converted) ? Number(converted[0]) : Number(converted);
+    return Number.isFinite(pixel) ? pixel : null;
+  }
+
+  _xPixelBounds() {
+    const [minX, maxX] = this._xRange();
+    const minimum = this._chartXPixel(minX);
+    const maximum = this._chartXPixel(maxX);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) return null;
+    return minimum <= maximum ? [minimum, maximum] : [maximum, minimum];
+  }
+
   _positionCursors() {
     const wrap = this.shadowRoot.querySelector("#chart-wrap");
-    if (!wrap || !this._points().length) return;
-    const width = Math.max(1, wrap.getBoundingClientRect().width || wrap.clientWidth);
-    const [minX, maxX] = this._xRange();
+    const chartElement = this.shadowRoot.querySelector("#chart");
+    if (!wrap || !chartElement || !this._chart || !this._points().length) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const chartRect = chartElement.getBoundingClientRect();
+    const plot = this._plotRect();
+    const xBounds = this._xPixelBounds();
+    if (!xBounds) return;
     const pointPixel = (channel) => {
       const point = this._pointForChannel(channel) || this._points()[0];
-      const ratio = (this._xValue(point) - minX) / Math.max(1e-9, maxX - minX);
-      return GRID.left + clamp(ratio, 0, 1) * Math.max(1, width - GRID.left - GRID.right);
+      const pixel = this._chartXPixel(this._xValue(point));
+      return Number.isFinite(pixel) ? clamp(pixel, xBounds[0], xBounds[1]) : xBounds[0];
     };
-    [["#roi-start-cursor", this._cursor.roiStart], ["#roi-end-cursor", this._cursor.roiEnd], ["#data-cursor", this._cursor.data]].forEach(([selector, channel]) => {
+    // Absolute children are positioned from the wrap's padding edge.  The
+    // chart rect already includes the wrap border, so adding the raw
+    // chartRect-left delta double-counts that border and shifts every HTML
+    // cursor by about one pixel.  offsetLeft is the browser's actual offset
+    // from this containing block; the geometry fallback subtracts clientLeft
+    // for engines that do not expose it on a shadow-DOM element.
+    const relativeLeft = Number.isFinite(chartElement.offsetLeft)
+      ? chartElement.offsetLeft
+      : chartRect.left - wrapRect.left - (wrap.clientLeft || 0);
+    const top = plot ? plot.y : GRID_FALLBACK.top;
+    const bottom = plot ? Math.max(0, chartElement.clientHeight - plot.y - plot.height) : GRID_FALLBACK.bottom;
+    const cursorValues = [["#roi-start-cursor", this._cursor.roiStart, "ROI start"], ["#roi-end-cursor", this._cursor.roiEnd, "ROI end"], ["#data-cursor", this._cursor.data, "Data"]];
+    cursorValues.forEach(([selector, channel, label]) => {
       const element = this.shadowRoot.querySelector(selector);
-      if (element) element.style.left = `${pointPixel(channel)}px`;
+      if (!element) return;
+      const pixel = pointPixel(channel);
+      element.style.left = `${relativeLeft + pixel}px`;
+      element.style.top = `${top}px`;
+      element.style.bottom = `${bottom}px`;
+      const caption = element.querySelector(".caption");
+      const point = this._pointForChannel(channel);
+      if (caption && point) {
+        caption.textContent = label === "Data" ? `CH ${point[0]} · ${point[1].toFixed(2)} keV · ${point[2]}` : `${label} CH ${point[0]}`;
+        const atRightEdge = pixel > chartElement.clientWidth - 190;
+        caption.style.left = atRightEdge ? "auto" : "5px";
+        caption.style.right = atRightEdge ? "5px" : "auto";
+      }
     });
   }
 }

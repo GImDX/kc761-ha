@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.6`，谱图卡 ECharts SVG 重构已完成固定 runner 与持久测试栈的自动/只读核对；本版本新增 reconfigure 单连接所有权修复，真实条目仍只观察
+状态：`0.2.0-alpha.9`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升及左下角轴标签间距修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -116,7 +116,7 @@ refresh_interval: 0
 y_axis: linear
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.5` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.9` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 卡片提供：
 
@@ -135,6 +135,16 @@ y_axis: linear
 ECharts 6.1.0 的 Apache-2.0 `LICENSE`、`NOTICE` 和 D3 派生许可证随卡片分发；npm registry integrity 和 vendored 文件 SHA-256 记录在 [echarts-THIRD-PARTY.md](../custom_components/kc761/frontend/echarts-THIRD-PARTY.md) 中。
 - 已保存谱图列表和历史谱图回看；
 - 三类清空操作及带设备身份的简单确认。
+
+### 6.1 alpha.8 游标与原生 History 外观对齐
+
+- 游标的屏幕位置不再根据固定 `GRID.left/right` 横向换算；卡片使用 ECharts `convertToPixel({xAxisIndex: 0}, value)` 取得实际 plot 坐标，并使用 `convertFromPixel` 将拖动位置反算回当前 X 轴值。该路径同时覆盖 `containLabel`、Energy/Channel 和 resize 后的实际坐标。
+- ROI `markArea`、ROI 起止 `markLine` 和三个 HTML 游标共用同一最近通道点的 X 值，因此游标与谱图区域保持像素级对齐；游标竖向范围使用 ECharts grid rect，首次加载才使用很小的 CSS fallback。
+- 网格采用 HA 原生统计图同类的 `containLabel` inset，轴标签启用 `hideOverlap`、明确的首尾标签和主题色；Y 轴标题改为 plot 顶部的水平 `nameLocation:"end"`/`nameRotate:0` 布局，并为标题保留独立 top reserve，避免与最大刻度重叠。Energy 轴标签按量级保留 1–2 位小数，Channel 轴使用整数，避免长浮点端点挤压 Y 轴边缘。谱图背景、文字、分隔线从 HA 主题变量读取，暗/亮主题均有安全 fallback。
+- HTML 游标的 X 坐标使用 ECharts pixel 加上 `chartElement.offsetLeft`；若浏览器不提供该 offset，则使用实际 `getBoundingClientRect` 并扣除 `wrap.clientLeft`。不再把包含边框的 chart/wrap 左边距重复计入，目标是与 `markArea`/`markLine` 保持小于四分之一像素的边缘误差。
+- 谱线与图例不再把 `#4fc3f7` 当作运行时主色，而是复用 HA History 的 `--graph-color-N → --color-N` 变量链；ROI、峰值和数据游标使用后续序号并做重复色保护，Tooltip 背景、边框和文字跟随 HA card/divider/text 主题变量。
+- 测试机 HA 2026.7.4 构建取证：`frontend_latest/22752.a1299e9730c4c314.js` 的 `hui-history-graph-card` 将历史数据交给 `state-history-charts`，并设置 `--timeline-top-margin:16px`；`frontend_latest/23495.c7798ed370241bd4.js` 的 `statistics-chart` 使用 `ha-chart-base`、`grid:{top:15,left:1,right:1,bottom:0,containLabel:true}`、`yAxis.nameGap:2` 与 `tooltip.renderMode:"html"`。这些是测试机实际构建/运行规则，不将压缩产物误写成上游源码全文。
+- 同一 HA 前端的 `frontend_latest/24652.561e19dfa7c4a178.js` 模块 `63746`（在其它懒加载副本中也保持一致）定义原生 History 调色板链：序列 `t` 先读取 `--graph-color-${t+1}`，缺失时回退到 `--color-${t%54+1}`，再交给颜色解析器。KC761 卡片的曲线、图例、ROI 起止线、峰值和数据游标现在按同一 `--graph-color-N → --color-N → 固定 fallback` 链解析；ROI、peak、data 使用不同序号并检测重复值，保证仍与谱线可区分。Tooltip 使用 HA card/divider/text 主题变量、HTML render mode 和数据游标色轴指示线。
 
 CSV 每行包含 source、通道名称、获取时间、累积时间、道址、能量 keV 和计数，采用 UTF-8/RFC 4180 兼容文本。
 
@@ -200,6 +210,23 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - reconfigure 前后 simulator 容器日志的累计差分窗口只增加读取命令：初始观察值 `0x52/0x53/0x54/0x55 = 13/158127/12945/11`，提交后立即观察值为 `14/158148/12947/12`；`0x62/0x63/0x64/0x66` 计数保持 `12/1/0/3`，本轮没有新增写命令，`FORBIDDEN` 日志为 0。累计差分包含 reload 后的正常轮询，不能把每个读命令都归因于单次 flow。
 - 严格单客户端测试证明旧 client 关闭事件先于候选连接事件；候选失败和 wrong `DEVICE_ID` 均先关闭候选再恢复旧端点。远端 simulator 当前 namespace 的活动 TCP socket 观测为 0，表示没有残留连接；远端峰值顺序仍以严格 fake 的事件断言为软件证据，不伪称为 wire-level 峰值抓包。
 - 同期只读条目检查显示 simulator 为 `loaded`，真实条目仍为 `setup_retry`；真实条目未执行 reconfigure，未因本轮验收新增协议请求或写命令。
+
+### 8.5 `0.2.0-alpha.8` 谱图游标/网格修订（历史测试栈候选）
+
+- 卡片版本与 manifest/集成常量统一为 alpha.8；alpha.7 的 r2 功能代码保持不变，本次提升版本号是为了让 HA 额外 JS 模块 URL 由 `?v=0.2.0-alpha.7` 变为 `?v=0.2.0-alpha.8`，强制浏览器重新加载修订卡片；ECharts 6.1.0 vendored 文件未改动。
+- 静态契约新增 `convertToPixel`、`convertFromPixel`、实际 grid rect、`containLabel`、首尾轴标签、水平 Y 轴标题、短 X 标签、实际 containing-block offset 和主题 fallback 检查，并明确禁止重新使用 `GRID.left/right` 固定横向换算。
+- 本地 `pytest` 为 `47 passed, 1 skipped`，静态集成测试为 `5 passed`，Ruff、Python compile、JSON 和 diff whitespace 检查通过；本机未提供独立 Node/JavaScript parser，故未把 JS 语法门禁误记为独立通过。
+- alpha.8 缓存失效候选包 SHA-256 为 `f908a203cb111fbe39d241b740e748fa0a990f678df283d9fb4f1ca4979f5789`，卡片文件 SHA-256 为 `34263dc82d813fd08255ce84c84e1dfd7a75295d3d2dc43564eff5c36fdb64f8`，ECharts 6.1.0 文件 SHA-256 仍为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`；候选已在持久隔离测试栈运行，HA 根页面、alpha.8 卡片 URL 和 ECharts URL 均 HTTP 200，入口 HTML 已包含 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.8` 且不再包含 alpha.7 URL。两个 KC761 条目均 loaded，谱图均为 2048 点且无 unavailable。
+- 本轮部署前备份已保留；最近 15 分钟 HA 与模拟器日志未发现 KC761/frontend/traceback/pending-task 异常。模拟器累计命令审计的写命令计数仍为历史值 `0x62/0x63/0x64/0x66 = 12/1/0/3`，本轮部署及只读检查未增加写命令，禁止命令日志为 0；这不是对真实设备线速流量的替代证据。
+- alpha.8 浏览器复测已通过 SVG/no-Canvas、Y 标题、ROI 游标、主题色、log 持久化和键盘实时更新门禁；仅剩左下角最小轴标签 bbox 边缘交叠，已由 alpha.9 的 X 轴 label margin 修复。
+
+### 8.6 `0.2.0-alpha.9` 左下角轴标签间距修订（最终候选）
+
+- alpha.8 浏览器验收已确认 Y 标题与全部 Y 刻度无重叠、ROI start/end 与图上游标误差分别为 `-0.0109px`/`-0.0026px`、SVG renderer 生效且无 Canvas、主题色链正确、log 模式刷新后持久、键盘 `ArrowRight` 可将 ROI start 从 0 实时更新为 1。
+- alpha.8 仍有一个左下角 bbox 边缘交叠：Y 最小刻度 `1` 与 Energy 最小标签 `-92.47` 垂直方向相差约 `1.833px`。alpha.9 只将 X 轴 `axisLabel.margin` 从 8 调整为 12，并提升资源版本/查询参数以强制 HA 重新加载；不改变协议、游标映射、颜色或其它图表行为。
+- alpha.9 候选包 SHA-256 为 `981b3976b26015e1e68324d20ff7cec3071c83f208d66aae77d98fbf30969e2d`，卡片文件 SHA-256 为 `7daf12e26c7838cbb4d0ba2cf6ff741ab79834c1da96d3dbc0805ebb8c90a9a2`，manifest 文件 SHA-256 为 `7ae34e5387a74587717fccaa5b3966f05d87ade8eb2d54dcac364cc30033d9c8`，ECharts 文件 SHA-256 仍为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`；测试栈入口仅包含 alpha.9 URL，卡片/ECharts/HA 根页面均 HTTP 200，两个条目 loaded、谱图均 2048 点且无 unavailable。
+- alpha.9 浏览器验收在 alpha.9 URL reload 后确认 `cardCount=1`、`SVG=true`、`Canvas=false`、所有 SVG text bbox `overlaps=[]`；ROI start/end delta 分别为 `-0.010894775390625px` 和 `-0.0026397705078125px`，vertical top/bottom 分别为 `0px` 和 `0.007843017578125px`。主题色为 curve `rgb(66,105,208)`、ROI `rgb(244,189,74)`、peak `rgb(108,197,176)`、data `rgb(164,99,242)`；log 模式跨 HA restart/reload 持久。`ArrowRight` 从 0 到 1 的实时更新已在 alpha.8 验证，alpha.9 映射代码未变。
+- alpha.9 重启后最近 15 分钟 HA/模拟器日志未发现 KC761/frontend/traceback/pending-task 异常；模拟器写命令累计值仍为 `0x62/0x63/0x64/0x66 = 12/1/0/3`，本轮部署与只读检查未增加写命令，禁止命令日志为 0。CUA 自动化无法稳定定位指针拖动目标，实际 pointer-drag UX 仍保留为人工检查项；不将其误记为自动化通过。
 
 本地合并后继续测试的剩余门禁：
 

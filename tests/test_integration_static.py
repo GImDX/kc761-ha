@@ -43,7 +43,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.6")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.9")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -96,10 +96,32 @@ class IntegrationStaticTests(unittest.TestCase):
             "roi-end-cursor",
             "data-cursor",
             "pointerdown",
+            "convertToPixel",
+            "convertFromPixel",
+            "containLabel: true",
+            "_plotRect",
+            "_xPixelBounds",
+            "COLOR_FALLBACKS",
+            "_refreshColors",
+            "--graph-color-${index}",
+            "--color-${paletteIndex}",
+            "--kc761-spectrum-curve",
+            "renderMode: \"html\"",
+            "showMinLabel: true",
+            "showMaxLabel: true",
+            "nameLocation: \"end\"",
+            "nameRotate: 0",
+            "verticalAlign: \"bottom\"",
+            "formatter: (value) =>",
+            "chartElement.offsetLeft",
+            "wrap.clientLeft",
             'customElements.get("kc761-spectrum-card")',
             'window.customCards.some((card) => card.type === "kc761-spectrum-card")',
         ):
             self.assertIn(feature, frontend)
+        self.assertNotIn("GRID.left", frontend)
+        self.assertNotIn("GRID.right", frontend)
+        self.assertIn('renderer: "svg"', frontend)
         vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
         self.assertEqual(
             hashlib.sha256(vendor).hexdigest(),
