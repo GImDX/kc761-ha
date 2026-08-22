@@ -1,10 +1,16 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.5`，谱图卡 ECharts SVG 重构已完成固定 runner 与持久测试栈的自动/只读核对；浏览器视觉门禁、Ruff 和持续观察仍待完成
+状态：`0.2.0-alpha.6`，谱图卡 ECharts SVG 重构已完成固定 runner 与持久测试栈的自动/只读核对；本版本新增 reconfigure 单连接所有权修复，真实条目仍只观察
 
 日期：2026-08-21
 
 本文是 0.2 扩展分支的当前设计依据，并覆盖其它文档中仅针对 `0.1.0-rc.1` 的“严格只读”“不创建谱图实体”和“不注册控制实体”等旧范围描述。0.1 RC 的历史验证结果仍然有效，但不能自动证明本扩展分支的软件行为或实机写入安全。
+
+## 0.2.0-alpha.6 reconfigure 连接所有权修复
+
+已加载条目的 reconfigure 现在只调用现有 `KC761Coordinator.async_reconfigure`。Coordinator 在同一锁内先关闭旧客户端，随后才创建候选客户端并读取 `DEVICE_INFO`；同一 `DEVICE_ID` 才切换所有权。候选连接、响应或设备 ID 校验失败时，候选客户端先关闭，再创建旧端点的新客户端恢复轮询；恢复失败会保留原配置数据并报告连接错误，不留下候选后台任务。未加载或 `setup_retry` 条目不在 `hass.data` 中时，Config Flow 才使用一次性临时客户端预检。
+
+本修复的自动门禁必须同时覆盖：旧连接关闭顺序、同 ID 成功切换、候选连接/读取失败回滚、不同 ID 回滚、旧端点恢复失败、setup_retry 临时预检，以及 reload/shutdown 后无残留连接。真实 KC761 条目不执行 reconfigure，不以测试机模拟器结果替代实机服务可用性证据。
 
 ## 1. 边界和安全状态
 
@@ -185,6 +191,15 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 替换前完整备份已保留在测试栈的 `pre-v02-alpha5-echarts-20260821T181750Z` 备份目录。部署启动窗口曾记录 3 条真实设备 coordinator `TimeoutError`；随后只读检查已恢复为 loaded 且 unavailable 为 0，但本轮 120 秒持续观察被工具中断，未据此宣称无错误长期运行。
 - 本轮页面/Config Flow 只进行了读取路径核对，未调用控制实体；未对真实 KC761 发送写命令。固定 runner 中的模拟器控制测试属于历史软件路径覆盖，不能替代本轮持久运行命令计数审计。
 - 浏览器发现阶段返回 `No browser is available`，因此尚未自动验证实际 SVG DOM、无 canvas、Y 轴视觉间距、三游标拖动/读数、配色独立性、`y_axis` reload 持久性和 `refresh_interval` 两周期捕获；这些项目保留为用户浏览器中的人工门禁。
+
+### 8.4 2026-08-22 `0.2.0-alpha.6` reconfigure 单连接所有权验收
+
+- alpha.6 固定 runner 在 HA 2026.7.4 ARM64 不可变镜像中通过 `55` 项 pytest，branch coverage 为 `96%`；候选包 SHA-256 为 `65f907c3a65627f5a75f5eab3b6a80e5a4c463f1ba64d3a97cf08ae8d6528ca5`，ECharts 文件 SHA-256 仍为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。
+- 持久测试栈已保留完整替换前备份，并运行 alpha.6 release；manifest 为 alpha.6，HA、卡片和 ECharts 资源均 HTTP 200，最近集成日志错误计数为 0。
+- 首次验收脚本从 REST 条目列表读取被脱敏的 endpoint `data`，将缺失端口默认为 `0`，因此得到 HTTP 400 `{"errors":{"port":"value must be at least 1"}}`。检查 HA 2026.7.4 实际 handler 后确认标准接口为 `POST /api/config/config_entries/flow` 携带 `handler` 和 `entry_id`，再向 flow resource 提交表单。修正脚本使用持久栈固定的 simulator endpoint 后，正常 Config Flow same-endpoint reconfigure 已完成；随后只读检查为 simulator `loaded`、30 个注册实体、0 个 `unavailable`。
+- reconfigure 前后 simulator 容器日志的累计差分窗口只增加读取命令：初始观察值 `0x52/0x53/0x54/0x55 = 13/158127/12945/11`，提交后立即观察值为 `14/158148/12947/12`；`0x62/0x63/0x64/0x66` 计数保持 `12/1/0/3`，本轮没有新增写命令，`FORBIDDEN` 日志为 0。累计差分包含 reload 后的正常轮询，不能把每个读命令都归因于单次 flow。
+- 严格单客户端测试证明旧 client 关闭事件先于候选连接事件；候选失败和 wrong `DEVICE_ID` 均先关闭候选再恢复旧端点。远端 simulator 当前 namespace 的活动 TCP socket 观测为 0，表示没有残留连接；远端峰值顺序仍以严格 fake 的事件断言为软件证据，不伪称为 wire-level 峰值抓包。
+- 同期只读条目检查显示 simulator 为 `loaded`，真实条目仍为 `setup_retry`；真实条目未执行 reconfigure，未因本轮验收新增协议请求或写命令。
 
 本地合并后继续测试的剩余门禁：
 

@@ -37,6 +37,7 @@ from .const import (
     MIN_STATUS_INTERVAL,
     MIN_TIME_SYNC_INTERVAL,
 )
+from .coordinator import DeviceIdentityError, KC761Coordinator
 from .protocol.client import KC761Client
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,33 +84,49 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(step_id="reconfigure", data_schema=_connection_schema(entry.data))
         host = str(user_input[CONF_HOST]).strip()
         port = int(user_input[CONF_PORT])
-        client = KC761Client(host, port)
-        info = None
-        error: str | None = None
         try:
-            await client.async_connect()
-            info = await client.async_get_device_info()
-        except Exception:
-            error = "cannot_connect"
-        finally:
-            await client.async_close()
-        if error is not None or info is None:
-            return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=_connection_schema(user_input),
-                errors={"base": error or "cannot_connect"},
-            )
-        expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
-        if info.device_id != expected_device_id:
+            coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if isinstance(coordinator, KC761Coordinator):
+                await coordinator.async_reconfigure(host, port)
+            else:
+                await self._async_validate_reconfigure_endpoint(host, port)
+        except DeviceIdentityError:
             return self.async_show_form(
                 step_id="reconfigure",
                 data_schema=_connection_schema(user_input),
                 errors={"base": "device_mismatch"},
             )
+        except Exception as err:
+            _LOGGER.warning("KC761 reconfigure preflight failed: %s", type(err).__name__)
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=_connection_schema(user_input),
+                errors={"base": "cannot_connect"},
+            )
         return self.async_update_reload_and_abort(
             entry,
             data_updates={CONF_HOST: host, CONF_PORT: port},
         )
+
+    async def _async_validate_reconfigure_endpoint(self, host: str, port: int) -> None:
+        """Preflight an entry without a loaded coordinator.
+
+        A setup-retry entry has no connection owner in ``hass.data``.  This
+        temporary client is therefore safe and is always closed before the
+        flow returns.
+        """
+        client = KC761Client(host, port)
+        try:
+            await client.async_connect()
+            info = await client.async_get_device_info()
+            if info is None:
+                raise ValueError("KC761 returned no device information")
+            entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+            expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
+            if info.device_id != expected_device_id:
+                raise DeviceIdentityError("KC761 DEVICE_ID changed")
+        finally:
+            await client.async_close()
 
     @staticmethod
     @callback

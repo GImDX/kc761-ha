@@ -57,6 +57,15 @@ class DeviceIdentityError(ValueError):
     """A reachable endpoint returned a different physical DEVICE_ID."""
 
 
+class ReconfigureRestoreError(ConnectionError):
+    """The requested endpoint failed and the previous endpoint could not be restored."""
+
+    def __init__(self, candidate_error: Exception, restore_error: Exception) -> None:
+        self.candidate_error = candidate_error
+        self.restore_error = restore_error
+        super().__init__("KC761 endpoint reconfiguration rollback failed")
+
+
 @dataclass(frozen=True, slots=True)
 class KC761Snapshot:
     """Immutable values consumed by HA entities."""
@@ -160,6 +169,11 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             self._start_background(self._async_spectrum_save_loop(), "kc761-spectrum-save")
 
     async def _async_update_data(self) -> KC761Snapshot:
+        async with self._write_lock:
+            return await self._async_update_data_locked()
+
+    async def _async_update_data_locked(self) -> KC761Snapshot:
+        """Poll while the connection ownership lock is held."""
         try:
             new_connection = not self.client.connected
             if new_connection:
@@ -420,20 +434,89 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             await asyncio.sleep(self.spectrum_save_interval * 60)
 
     async def async_reconfigure(self, host: str, port: int) -> None:
-        """Validate and replace the endpoint while preserving DEVICE_ID."""
+        """Atomically validate and replace the endpoint while preserving DEVICE_ID.
+
+        The old client is closed before a candidate is constructed.  Failed
+        candidates are closed before a new client for the old endpoint is
+        restored, so a single-entry device never has two active TCP sessions.
+        """
         async with self._write_lock:
+            old_client = self.client
+            old_host, old_port = self.host, self.port
+            old_info = self._device_info
+            old_info_at = self._last_info_at
+
+            await old_client.async_close()
             candidate = self._new_client(host, port, on_push=False)
             try:
                 await candidate.async_connect()
                 info = await candidate.async_get_device_info()
-                if info.device_id != self.expected_device_id:
-                    raise ValueError("DEVICE_ID does not match this config entry")
-            finally:
-                await candidate.async_close()
-        await self.client.async_close()
-        self.host, self.port = host, port
-        self.client = self._new_client(host, port)
-        self._last_info_at = None
+                if not isinstance(info, DeviceInfo):
+                    raise UpdateFailed("KC761 returned no device information")
+                self._validate_device_info(info)
+            except Exception as candidate_error:
+                await self._close_client_quietly(candidate)
+                try:
+                    restored, restored_info, restored_info_at = await self._restore_client(
+                        old_host,
+                        old_port,
+                        old_info,
+                    )
+                except Exception as restore_error:
+                    self.host, self.port = old_host, old_port
+                    self.client = self._new_client(old_host, old_port)
+                    self._device_info = old_info
+                    self._last_info_at = old_info_at
+                    _LOGGER.error(
+                        "KC761 endpoint rollback failed: candidate=%s restore=%s",
+                        type(candidate_error).__name__,
+                        type(restore_error).__name__,
+                    )
+                    raise ReconfigureRestoreError(candidate_error, restore_error) from candidate_error
+                self.host, self.port = old_host, old_port
+                self.client = restored
+                self._device_info = restored_info
+                self._last_info_at = restored_info_at
+                raise
+
+            candidate.on_push = self._async_push
+            self.host, self.port = host, int(port)
+            self.client = candidate
+            self._device_info = info
+            self._last_info_at = datetime.now(UTC)
+            self.last_error = None
+            self.retry_delay = None
+
+    async def _restore_client(
+        self,
+        host: str,
+        port: int,
+        previous_info: DeviceInfo | None,
+    ) -> tuple[KC761Client, DeviceInfo | None, datetime | None]:
+        """Create and validate the one replacement client after a rollback."""
+        restored = self._new_client(host, port)
+        try:
+            await restored.async_connect()
+            restored_info = previous_info
+            restored_info_at: datetime | None = None
+            if previous_info is not None:
+                info = await restored.async_get_device_info()
+                if not isinstance(info, DeviceInfo):
+                    raise UpdateFailed("KC761 returned no device information")
+                self._validate_device_info(info)
+                restored_info = info
+                restored_info_at = datetime.now(UTC)
+            return restored, restored_info, restored_info_at
+        except Exception:
+            await self._close_client_quietly(restored)
+            raise
+
+    @staticmethod
+    async def _close_client_quietly(client: KC761Client) -> None:
+        try:
+            await client.async_close()
+        except Exception as err:
+            _LOGGER.debug("KC761 client close failed: %s", type(err).__name__)
 
     def _new_client(self, host: str, port: int, *, on_push: bool = True) -> KC761Client:
         return KC761Client(

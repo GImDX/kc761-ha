@@ -184,6 +184,29 @@ class FakeClient:
         self.clear_writes.append(masks)
 
 
+class StrictSingleClient(FakeClient):
+    """Fake TCP endpoint that rejects overlapping active connections."""
+
+    def __init__(self, owner, label, **kwargs):
+        super().__init__(**kwargs)
+        self.owner = owner
+        self.label = label
+
+    async def async_connect(self):
+        if self.owner["active"]:
+            raise AssertionError(f"overlapping connection: {self.label}")
+        self.owner["events"].append(f"{self.label}:connect")
+        await super().async_connect()
+        if self.connected:
+            self.owner["active"] += 1
+
+    async def async_close(self):
+        self.owner["events"].append(f"{self.label}:close")
+        if self.connected:
+            self.owner["active"] -= 1
+        await super().async_close()
+
+
 def test_entry_setup_unload_reload_and_failure() -> None:
     hass = make_hass()
     assert callable(CONFIG_SCHEMA)
@@ -196,7 +219,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.5",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.6",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
@@ -424,6 +447,20 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
             result = await reconfigure.async_step_reconfigure({"host": "new", "port": 7602})
         assert result["type"] == "abort"
 
+        loaded_coordinator = object.__new__(coordinator_module.KC761Coordinator)
+        loaded_coordinator.async_reconfigure = AsyncMock()
+        hass.data[DOMAIN] = {entry.entry_id: loaded_coordinator}
+        loaded = config_flow_module.KC761ConfigFlow()
+        loaded.hass = hass
+        loaded.context = {"entry_id": entry.entry_id}
+        loaded.async_update_reload_and_abort = MagicMock(return_value={"type": "abort"})
+        with patch.object(config_flow_module, "KC761Client") as temporary_client:
+            result = await loaded.async_step_reconfigure({"host": "loaded", "port": 7604})
+        assert result["type"] == "abort"
+        loaded_coordinator.async_reconfigure.assert_awaited_once_with("loaded", 7604)
+        temporary_client.assert_not_called()
+        hass.data.clear()
+
         unknown = config_flow_module.KC761ConfigFlow()
         unknown.hass = hass
         unknown.context = {"entry_id": "missing"}
@@ -592,11 +629,12 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         candidate = FakeClient()
         coordinator.client = old
         coordinator._device_info = make_info()
-        with patch.object(coordinator_module, "KC761Client", return_value=candidate):
+        with patch.object(coordinator_module, "KC761Client", side_effect=[candidate, FakeClient()]):
             await coordinator.async_reconfigure("new-host", 7602)
         assert old.closed is True
         assert coordinator.host == "new-host"
-        assert candidate.closed is True
+        assert candidate.closed is False
+        assert candidate.connected is True
 
         bad_candidate = FakeClient(info=make_info())
         mismatch = bad_candidate.info.__class__(
@@ -612,16 +650,29 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
             hardware_verified=False,
         )
         bad_candidate.info = mismatch
-        with patch.object(coordinator_module, "KC761Client", return_value=bad_candidate):
-            with pytest.raises(ValueError):
+        restored = FakeClient()
+        with patch.object(coordinator_module, "KC761Client", side_effect=[bad_candidate, restored]):
+            with pytest.raises(coordinator_module.DeviceIdentityError):
                 await coordinator.async_reconfigure("bad-host", 7603)
         assert bad_candidate.closed is True
+        assert restored.closed is False
+        assert restored.connected is True
+        assert coordinator.host == "new-host"
 
         reconnect_candidate = FakeClient(error=OSError("offline"))
-        with patch.object(coordinator_module, "KC761Client", return_value=reconnect_candidate):
-            with pytest.raises(OSError):
+        reconnect_restore = FakeClient(error=OSError("restore-offline"))
+        reconnect_fallback = FakeClient()
+        with patch.object(
+            coordinator_module,
+            "KC761Client",
+            side_effect=[reconnect_candidate, reconnect_restore, reconnect_fallback],
+        ):
+            with pytest.raises(coordinator_module.ReconfigureRestoreError):
                 await coordinator.async_reconfigure("error-host", 7604)
         assert reconnect_candidate.closed is True
+        assert reconnect_restore.closed is True
+        assert coordinator.client is reconnect_fallback
+        assert reconnect_fallback.connected is False
 
         coordinator._device_info = make_info()
         coordinator.last_update_success = False
@@ -656,6 +707,50 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
         assert mismatch_coordinator.identity_mismatches == 1
         assert mismatch_client.closed is True
         assert mismatch_client.status_calls == 0
+
+    run(exercise())
+
+
+def test_reconfigure_serializes_single_client_and_rolls_back() -> None:
+    async def exercise() -> None:
+        owner = {"active": 0, "events": []}
+        old = StrictSingleClient(owner, "old")
+        candidate = StrictSingleClient(owner, "candidate")
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=old):
+                coordinator = coordinator_module.KC761Coordinator(make_hass(), make_entry())
+        coordinator.client = old
+        old.connected = True
+        owner["active"] = 1
+
+        with patch.object(coordinator_module, "KC761Client", return_value=candidate):
+            await coordinator.async_reconfigure("candidate-host", 7602)
+        assert owner["active"] == 1
+        assert owner["events"][:2] == ["old:close", "candidate:connect"]
+        assert candidate.connected is True
+
+        failing = StrictSingleClient(owner, "failing", error=OSError("offline"))
+        restored = StrictSingleClient(owner, "restored")
+        with patch.object(coordinator_module, "KC761Client", side_effect=[failing, restored]):
+            with pytest.raises(OSError):
+                await coordinator.async_reconfigure("offline-host", 7603)
+        assert owner["active"] == 1
+        assert failing.closed is True
+        assert restored.connected is True
+        assert coordinator.host == "candidate-host"
+
+        wrong_info = make_info(device_id="different-device")
+        wrong = StrictSingleClient(owner, "wrong", info=wrong_info)
+        restored_again = StrictSingleClient(owner, "restored-again")
+        with patch.object(coordinator_module, "KC761Client", side_effect=[wrong, restored_again]):
+            with pytest.raises(coordinator_module.DeviceIdentityError):
+                await coordinator.async_reconfigure("wrong-host", 7604)
+        assert owner["active"] == 1
+        assert wrong.closed is True
+        assert restored_again.connected is True
+        with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", new=AsyncMock()):
+            await coordinator.async_shutdown()
+        assert owner["active"] == 0
 
     run(exercise())
 

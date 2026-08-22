@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.5";
+const CARD_VERSION = "0.2.0-alpha.6";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const GRID = { left: 74, right: 28, top: 26, bottom: 62 };
