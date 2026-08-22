@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.16`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界和 unavailable 状态保留已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.18`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留和 Configure 一键编辑交接已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -123,7 +123,7 @@ show_actions: true
 show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.16` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.18` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 ### 6.0 原生 Lovelace 编辑器与可见性边界
 
@@ -289,6 +289,25 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - alpha.16 候选包 SHA-256 为 `b33484921209d76f0f5d15a85b862172eee7f87791f9a46cad22c469ad726017`；本地门禁为 pytest `48 passed, 3 skipped`、Ruff、绑定 Node `--check`/frontend contract、Python `compileall`、JSON 和 `git diff --check` 通过。测试 HA 的 release/live 哈希一致，入口仅含 alpha.16，卡片与 ECharts 静态资源均返回 HTTP 200。
 - alpha.16 浏览器复核确认普通视图和 dashboard edit view 都加载新 URL：普通 DOM 中 Configure 可见、编辑工具栏隐藏、两个 ROI 控件均为 `range`，图内没有 ROI 起止游标；不可用实体文案为 `Selected spectrum entity is unavailable`，无卡片配置错误。普通卡片 rect top `113.58`、bottom `946.07`、height `832.49`，viewport `983px` 下 document `scrollHeight=clientHeight=983`，chart `430px`、summary `121.98px`。Configure 的语义/坐标点击自动化均超时/重置且未打开对话框，卡片编辑对话框视觉验收仍保留人工门禁。
 - 测试 HA 只读 API 中 simulator 为 loaded、30/30 active、0 unavailable、2048 点；real 条目仍为 setup_retry、42 个实体 unavailable、主谱图 0 点。当前 dashboard 目标为 real，因此峰值/数据游标实时叠加和 ROI live data 只完成自动化契约验证，未宣称浏览器实时数据视觉通过。官方编辑事件来源为 [Home Assistant `hui-view`](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/views/hui-view.ts) 与 [card edit mode](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/components/hui-card-edit-mode.ts)，卡片不导入私有 `showEditCardDialog`。
+
+### 8.12 `0.2.0-alpha.17` Configure 一键原生编辑交接
+
+- 普通视图点击 Configure 时，卡片把当前 dashboard URL（去除 `edit=1`）和完整规范化配置生成稳定指纹，并将带短 TTL 的一次性 marker 写入 session storage（不可用时安全降级为现有 storage/fallback）；随后只进入 `?edit=1`，不猜测卡片数组索引，也不导入 HA 私有 dialog API。
+- 进入 dashboard edit view 后，重建卡片只在 `preview=true` 且祖先最终暴露真实 Lovelace `path` 时登记为候选；短暂收集窗口内只有一个相同 URL/指纹候选时才消费 marker 并冒泡官方 `ll-edit-card(detail.path)`。重复配置、URL/指纹不匹配、过期 marker、缺失 path 或事件构造器时均不自动打开，避免错误卡片或重复 dialog；候选定时器、marker 重试和卸载路径均有清理。
+- 带真实 path 的 dashboard edit 卡片仍可直接点击 Configure；没有 path 的实际编辑对话框 preview 继续只显示配置辅助控件而不消费 handoff。alpha.17 仅改变前端缓存版本与编辑交接，不改变 TCP 协议或真实设备请求。
+- 本地静态契约覆盖普通点击写入 marker、普通视图存在路径祖先仍导航、edit view 唯一路径事件、直接 path 事件、错配/过期与重复候选安全放弃、marker 消费后不重复打开、ShadowRoot path 祖先和卸载清理；测试机部署及浏览器一键对话框视觉门禁仍需记录实际结果。
+- alpha.17 候选包 SHA-256 为 `4176e8a23baf8afc7c282f3eb11648642a7bd36c2035ba21032db438e5038d97`；测试栈 release/live 的 manifest、卡片和 ECharts SHA-256 分别一致为 `1ef3b74e264f742454d42e14e534041bf5bdbf06c32a39368a8c9cf6141634fd`、`754830d3e8ed7a392c46ab6d4de9682501cf351e5de3f8c844a5fbca58e5f823`、`28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。固定 HA 2026.7.4 镜像启动后 HA_READY=1，HA/模拟器 running、restart count 均为 0；替换前备份已保留。
+- alpha.17 入口只含新查询参数，卡片和 ECharts 返回 HTTP 200 `text/javascript`；测试 HA 只读 API 快照显示 real `loaded`、43 注册/42 active/0 unavailable，simulator `loaded`、30 注册/30 active/0 unavailable。该快照没有调用任何 `kc761/*` WebSocket 命令，当前两条谱图状态的普通属性点数为 0，不能据此宣称 2048 点实时谱图已捕获。
+- 部署后模拟器日志中的命令计数为 `0x62/0x63/0x64/0x66 = 0/0/0/0`、`FORBIDDEN_LOGS=0`；宿主和 HA namespace 没有真实设备目标 socket，也没有探针残留。最近日志只有 HA 自定义集成未测试提示及 `hardware_verified=false` 既有警告，没有新的 KC761 traceback/TransportError/pending-task/frontend 异常。Configure 一键进入原生编辑对话框仍由主任务浏览器验收，不把 HTTP/契约结果写成视觉通过。
+
+### 8.13 `0.2.0-alpha.18` 普通视图 Configure 路由修复
+
+- alpha.17 浏览器复核显示普通仪表盘中的 Configure 点击后仍停留在原 URL，且没有原生编辑对话框；结合 HA 官方 `hui-view` 的事件契约，根因候选是卡片在普通视图发现路径祖先后错误地直接派发 `ll-edit-card`，绕过了普通视图必须执行的 `?edit=1` handoff。该判断由源码/契约回归测试支持，仍需浏览器重测确认。
+- alpha.18 将直接派发 `ll-edit-card` 限定为 `preview=true` 且存在真实 Lovelace path 的 dashboard edit wrapper；普通视图无条件写入一次性 marker 并调用 `location.assign(?edit=1)`，即使宿主误暴露路径也不会提前返回。新增回归断言覆盖“普通视图有路径仍导航”和“编辑预览有路径才派发”两态，同时保留 marker 指纹、TTL、重复候选和 ShadowRoot 路径保护。
+- 本地 Node syntax/contract 及全量 Python 门禁通过：Node `--check`、frontend contract、pytest `48 passed, 3 skipped`、Ruff、compileall、JSON 和 `git diff --check` 均通过；3 个 skip 仅为本机未安装 Home Assistant 或 PATH Node，绑定 Node contract 已单独执行。coverage 在缺少 Home Assistant 的开发机环境为 `51%`，不替代固定 HA runner 的历史 `96%` 结果。
+- alpha.18 候选归档 SHA-256 为 `2b2e99497075e6acb7ddd054b84205bf765503c539371c15a90373061b9a14bf`；测试机 release `/home/pi/Codes/kc761-ha-test/releases/v02-alpha18-configure-fix-2b2e9949` 与 live 的 manifest、卡片和 ECharts SHA-256 分别一致为 `1de4c0c2d1cee29e40a1b33a37c9fbaed4794216b48494e5905c73a8da3aa748`、`8d90362dce9cde2d5e782a92272a8d47fda86fe2a72f6363e980ca9c6caabf5a`、`28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。备份为 `/home/pi/Codes/kc761-ha-test/backups/pre-v02-alpha18-configure-fix-20260822T202453Z`。
+- 测试机 HA_READY=1，HA 与 simulator 均 running、restart count 为 0；alpha.18 卡片/ECharts 资源均 HTTP 200 `text/javascript`，入口仅含 alpha.18。只读 API 快照显示 real `loaded`、43 注册/42 active/0 unavailable，simulator `loaded`、30 注册/30 active/0 unavailable；该快照不调用 `kc761/*` 命令，谱图普通状态点数为 0，不能据此宣称实时 2048 点已捕获。
+- 部署后 simulator 命令日志 `0x52/0x53/0x54/0x55/0x62/0x63/0x64/0x66 = 0/0/0/0/0/0/0/0`、`FORBIDDEN_LOGS=0`；宿主/HA namespace 无真实设备目标 socket、无探针残留，HA 最近日志无新的 KC761/frontend/pending-task 异常。alpha.18 普通视图 Configure 的真实浏览器一键对话框仍由主任务复测，不把 HTTP/契约结果写成视觉通过。
 
 本地合并后继续测试的剩余门禁：
 

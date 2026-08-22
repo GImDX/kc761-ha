@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.16";
+const CARD_VERSION = "0.2.0-alpha.18";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -20,6 +20,11 @@ const CARD_CONTENT_VISIBILITY_KEYS = Object.freeze([
   "show_peak",
 ]);
 const CARD_DOCUMENTATION_URL = "https://github.com/GImDX/kc761-ha";
+const EDIT_HANDOFF_STORAGE_KEY = "kc761-spectrum-card:edit-handoff:v1";
+const EDIT_HANDOFF_TTL_MS = 15000;
+const EDIT_HANDOFF_GRACE_MS = 150;
+const EDIT_HANDOFF_MAX_RETRIES = 20;
+const EDIT_HANDOFF_REGISTRY_KEY = "__kc761SpectrumEditHandoffRegistry";
 // First-paint fallback only.  After ECharts lays out the axes, the overlay is
 // positioned from its actual grid coordinate system rather than guessed CSS
 // insets (which would drift when containLabel or a theme changes).
@@ -34,6 +39,38 @@ const COLOR_FALLBACKS = {
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function canonicalConfigValue(value) {
+  if (Array.isArray(value)) return value.map((item) => canonicalConfigValue(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = canonicalConfigValue(value[key]);
+    return result;
+  }, {});
+}
+
+function editorHandoffStorage() {
+  const hostWindow = globalThis.window;
+  return hostWindow?.sessionStorage || hostWindow?.localStorage || null;
+}
+
+function editorHandoffRegistry() {
+  const hostWindow = globalThis.window;
+  if (!hostWindow) return null;
+  if (!(hostWindow[EDIT_HANDOFF_REGISTRY_KEY] instanceof Map)) {
+    hostWindow[EDIT_HANDOFF_REGISTRY_KEY] = new Map();
+  }
+  return hostWindow[EDIT_HANDOFF_REGISTRY_KEY];
+}
+
+function removeEditorHandoffMarker() {
+  const storage = editorHandoffStorage();
+  try {
+    storage?.removeItem(EDIT_HANDOFF_STORAGE_KEY);
+  } catch (_error) {
+    // Session/local storage can be blocked by browser privacy settings.
+  }
 }
 
 class KC761SpectrumCard extends HTMLElement {
@@ -57,6 +94,9 @@ class KC761SpectrumCard extends HTMLElement {
     this._entityGeneration = 0;
     this._drawToken = 0;
     this._dragCleanup = null;
+    this._handoffRetryTimer = null;
+    this._handoffRetryCount = 0;
+    this._handoffCandidate = null;
     this._preview = false;
     this._detached = false;
     this._colors = { ...COLOR_FALLBACKS };
@@ -206,6 +246,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._detached = true;
     this._drawToken += 1;
     this._stopAutoRefresh();
+    this._clearEditorHandoffRetry();
+    this._unregisterEditorHandoffCandidate();
     if (this._dragCleanup) this._dragCleanup();
     this._dragCleanup = null;
     if (this._resizeObserver) this._resizeObserver.disconnect();
@@ -368,6 +410,14 @@ class KC761SpectrumCard extends HTMLElement {
     const configure = this.shadowRoot.querySelector("#configure");
     if (editorControls) editorControls.hidden = !dialogPreview;
     if (configure) configure.hidden = dialogPreview;
+    if (path && this._preview) {
+      this._clearEditorHandoffRetry();
+      this._tryConsumeEditorHandoff(path);
+    } else if (this._preview) {
+      this._scheduleEditorHandoffRetry();
+    } else {
+      this._clearEditorHandoffRetry();
+    }
   }
 
   _ensureLayoutObserver() {
@@ -446,15 +496,155 @@ class KC761SpectrumCard extends HTMLElement {
     return null;
   }
 
+  _editorLocationKey() {
+    const href = globalThis.window?.location?.href;
+    if (!href) return null;
+    try {
+      const url = new URL(String(href));
+      url.searchParams.delete("edit");
+      return `${url.pathname}${url.search}${url.hash}`;
+    } catch (_error) {
+      return String(href).replace(/([?&])edit=1(?:&|$)/, "$1").replace(/[?&]$/, "");
+    }
+  }
+
+  _configFingerprint() {
+    return JSON.stringify(canonicalConfigValue(this._config || {}));
+  }
+
+  _readPendingEditorHandoff() {
+    const storage = editorHandoffStorage();
+    if (!storage) return null;
+    let marker;
+    try {
+      const raw = storage.getItem(EDIT_HANDOFF_STORAGE_KEY);
+      if (!raw) return null;
+      marker = JSON.parse(raw);
+    } catch (_error) {
+      removeEditorHandoffMarker();
+      return null;
+    }
+    if (!marker || marker.version !== 1 || typeof marker.token !== "string" || typeof marker.createdAt !== "number") {
+      removeEditorHandoffMarker();
+      return null;
+    }
+    if (Date.now() - marker.createdAt > EDIT_HANDOFF_TTL_MS) {
+      removeEditorHandoffMarker();
+      return null;
+    }
+    if (marker.urlKey !== this._editorLocationKey() || marker.fingerprint !== this._configFingerprint()) return null;
+    return marker;
+  }
+
+  _writePendingEditorHandoff() {
+    const storage = editorHandoffStorage();
+    const urlKey = this._editorLocationKey();
+    if (!storage || !urlKey) return false;
+    const marker = {
+      version: 1,
+      token: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      createdAt: Date.now(),
+      urlKey,
+      fingerprint: this._configFingerprint(),
+    };
+    try {
+      storage.setItem(EDIT_HANDOFF_STORAGE_KEY, JSON.stringify(marker));
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  _clearEditorHandoffRetry() {
+    if (this._handoffRetryTimer !== null && typeof globalThis.clearTimeout === "function") {
+      globalThis.clearTimeout(this._handoffRetryTimer);
+    }
+    this._handoffRetryTimer = null;
+    this._handoffRetryCount = 0;
+  }
+
+  _scheduleEditorHandoffRetry() {
+    if (!this._preview || this._handoffRetryTimer !== null || this._handoffRetryCount >= EDIT_HANDOFF_MAX_RETRIES) return;
+    if (!this._readPendingEditorHandoff() || typeof globalThis.setTimeout !== "function") return;
+    this._handoffRetryCount += 1;
+    this._handoffRetryTimer = globalThis.setTimeout(() => {
+      this._handoffRetryTimer = null;
+      if (!this._detached) this._applyPresentationMode();
+    }, 50);
+  }
+
+  _unregisterEditorHandoffCandidate() {
+    const candidate = this._handoffCandidate;
+    if (!candidate) return;
+    candidate.record.candidates.delete(this);
+    this._handoffCandidate = null;
+    if (candidate.record.candidates.size === 0 && !candidate.record.timer) {
+      editorHandoffRegistry()?.delete(candidate.token);
+    }
+  }
+
+  _resolveEditorHandoff(token, record) {
+    const registry = editorHandoffRegistry();
+    if (!registry || registry.get(token) !== record) return;
+    record.timer = null;
+    registry.delete(token);
+    const candidates = [...record.candidates.entries()].filter(([card]) => (
+      card && card.isConnected !== false && card._preview && card._findLovelacePath()
+    ));
+    record.candidates.forEach((card) => {
+      if (card._handoffCandidate?.record === record) card._handoffCandidate = null;
+    });
+    record.candidates.clear();
+    if (candidates.length !== 1) {
+      if (candidates.length > 1) removeEditorHandoffMarker();
+      return;
+    }
+    const [card, path] = candidates[0];
+    if (!card._consumeEditorHandoff(token, path)) return;
+  }
+
+  _tryConsumeEditorHandoff(path) {
+    const marker = this._readPendingEditorHandoff();
+    if (!marker || !this._preview || !path) return;
+    const registry = editorHandoffRegistry();
+    if (!registry) return;
+    if (this._handoffCandidate?.token === marker.token) return;
+    this._unregisterEditorHandoffCandidate();
+    let record = registry.get(marker.token);
+    if (!record) {
+      record = { candidates: new Map(), timer: null };
+      registry.set(marker.token, record);
+    }
+    record.candidates.set(this, [...path]);
+    this._handoffCandidate = { token: marker.token, record };
+    if (record.timer === null && typeof globalThis.setTimeout === "function") {
+      record.timer = globalThis.setTimeout(() => this._resolveEditorHandoff(marker.token, record), EDIT_HANDOFF_GRACE_MS);
+    }
+  }
+
+  _consumeEditorHandoff(token, path) {
+    const marker = this._readPendingEditorHandoff();
+    if (!marker || marker.token !== token) return false;
+    if (!this._dispatchEditorEvent(path)) return false;
+    removeEditorHandoffMarker();
+    return true;
+  }
+
+  _dispatchEditorEvent(path) {
+    const EventConstructor = globalThis.CustomEvent;
+    if (typeof EventConstructor !== "function") return false;
+    this.dispatchEvent(new EventConstructor("ll-edit-card", { detail: { path }, bubbles: true, composed: true }));
+    return true;
+  }
+
   _openEditor() {
     const path = this._findLovelacePath();
-    if (path) {
-      const EventConstructor = globalThis.CustomEvent;
-      if (typeof EventConstructor === "function") {
-        this.dispatchEvent(new EventConstructor("ll-edit-card", { detail: { path }, bubbles: true, composed: true }));
-        return;
-      }
-    }
+    // A path is authoritative only while HA has rendered this card inside its
+    // dashboard edit wrapper.  Normal-view cards can still have a path-bearing
+    // ancestor supplied by a host shell, but dispatching ll-edit-card there is
+    // ignored by HA and prevents the URL handoff from entering edit mode.
+    if (this._preview && path && this._dispatchEditorEvent(path)) return;
+    this._writePendingEditorHandoff();
     const location = globalThis.window?.location;
     if (location?.href && typeof location.assign === "function") {
       try {

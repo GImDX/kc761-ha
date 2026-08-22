@@ -78,12 +78,15 @@ globalThis.customElements = {
   define: (name, value) => registry.set(name, value),
 };
 const storage = new Map();
+const storageApi = {
+  getItem: (key) => storage.get(key) ?? null,
+  setItem: (key, value) => storage.set(key, String(value)),
+  removeItem: (key) => storage.delete(key),
+};
 globalThis.window = {
   customCards: [],
-  localStorage: {
-    getItem: (key) => storage.get(key) ?? null,
-    setItem: (key, value) => storage.set(key, String(value)),
-  },
+  sessionStorage: storageApi,
+  localStorage: storageApi,
   addEventListener() {},
   removeEventListener() {},
   setInterval: () => 1,
@@ -93,6 +96,19 @@ globalThis.window = {
     href: "http://ha.local/dashboard-kc761/0",
     assign: (value) => { globalThis.window.location.assigned = value; },
   },
+};
+const scheduledTimers = new Map();
+let nextTimerId = 0;
+globalThis.setTimeout = (callback) => {
+  const id = ++nextTimerId;
+  scheduledTimers.set(id, callback);
+  return id;
+};
+globalThis.clearTimeout = (id) => scheduledTimers.delete(id);
+const flushTimers = () => {
+  const callbacks = [...scheduledTimers.values()];
+  scheduledTimers.clear();
+  callbacks.forEach((callback) => callback());
 };
 globalThis.CustomEvent = class {
   constructor(type, init = {}) {
@@ -205,16 +221,112 @@ layoutCard.clientHeight = 900;
 card._updateCompactHeight();
 assert.equal(layoutCard.classList.contains("compact-height"), false);
 layoutCard.clientHeight = 430;
-card._updateCompactHeight();
+  card._updateCompactHeight();
 
-card._openEditor();
-assert.equal(card.lastEvent.type, "ll-edit-card");
-assert.deepEqual(card.lastEvent.detail, { path: [0, 1, 2] });
-card.parentElement = null;
-card.getRootNode = undefined;
-globalThis.window.location.assigned = null;
+  // A normal-view card must use the URL handoff even if a host shell exposes
+  // an incidental path-bearing ancestor.  ll-edit-card is only meaningful for
+  // the dashboard edit wrapper/preview.
+  globalThis.window.location.href = "http://ha.local/dashboard-kc761/0";
+  globalThis.window.location.assigned = null;
+  card._openEditor();
+  assert.equal(card.lastEvent, undefined, "normal view does not dispatch an edit event");
+  assert.match(globalThis.window.location.assigned, /[?&]edit=1(?:&|$)/);
+
+  // In dashboard edit mode the same path is dispatched directly to HA's
+  // native card editor listener.
+  card.preview = true;
+  card.lastEvent = undefined;
+  card._openEditor();
+  assert.equal(card.lastEvent.type, "ll-edit-card");
+  assert.deepEqual(card.lastEvent.detail, { path: [0, 1, 2] });
+  card.preview = false;
+  card.parentElement = null;
+  card.getRootNode = undefined;
+  globalThis.window.location.assigned = null;
 card._openEditor();
 assert.match(globalThis.window.location.assigned, /[?&]edit=1(?:&|$)/);
+
+// A normal-view Configure click leaves a scoped one-time marker.  The card
+// recreated by HA in edit mode must wait for a real path and then dispatch
+// the native event exactly once.
+const handoffKey = "kc761-spectrum-card:edit-handoff:v1";
+const handoffConfig = { entity: "sensor.handoff_spectrum", title: "Handoff" };
+const normalHandoffCard = new Card();
+normalHandoffCard.isConnected = true;
+normalHandoffCard.setConfig(handoffConfig);
+normalHandoffCard.parentElement = null;
+normalHandoffCard.getRootNode = undefined;
+globalThis.window.location.href = "http://ha.local/dashboard-kc761/0";
+normalHandoffCard._openEditor();
+assert.ok(storage.get(handoffKey), "normal Configure writes a pending handoff");
+assert.match(globalThis.window.location.assigned, /[?&]edit=1(?:&|$)/);
+
+const recreatedHandoffCard = new Card();
+recreatedHandoffCard.isConnected = true;
+recreatedHandoffCard.setConfig(handoffConfig);
+recreatedHandoffCard.parentElement = null;
+recreatedHandoffCard.getRootNode = () => ({ host: { parentElement: null } });
+recreatedHandoffCard.preview = true;
+// The path is deliberately attached after the first preview pass.
+recreatedHandoffCard.getRootNode = () => ({ host: { path: [0, 4, 1] } });
+let handoffDispatches = 0;
+recreatedHandoffCard.dispatchEvent = (event) => {
+  handoffDispatches += 1;
+  recreatedHandoffCard.lastEvent = event;
+  return true;
+};
+flushTimers();
+flushTimers();
+assert.equal(handoffDispatches, 1, "unique matching edit card opens once");
+assert.deepEqual(recreatedHandoffCard.lastEvent.detail, { path: [0, 4, 1] });
+assert.equal(storage.has(handoffKey), false, "consumed handoff is removed");
+recreatedHandoffCard._applyPresentationMode();
+flushTimers();
+assert.equal(handoffDispatches, 1, "consumed handoff cannot reopen");
+
+// Wrong fingerprints do not consume another card's marker; expired markers
+// are removed without navigation or event dispatch.
+storage.set(handoffKey, JSON.stringify({
+  version: 1,
+  token: "wrong-fingerprint",
+  createdAt: Date.now(),
+  urlKey: "/dashboard-kc761/0",
+  fingerprint: "not-this-card",
+}));
+const mismatchCard = new Card();
+mismatchCard.isConnected = true;
+mismatchCard.setConfig(handoffConfig);
+mismatchCard.parentElement = { path: [0, 4, 1], parentElement: null };
+mismatchCard.preview = true;
+flushTimers();
+assert.equal(mismatchCard.lastEvent, undefined, "mismatched marker does not open a card");
+assert.ok(storage.get(handoffKey), "mismatched marker is not consumed by the wrong card");
+storage.set(handoffKey, JSON.stringify({
+  version: 1,
+  token: "expired",
+  createdAt: Date.now() - 60000,
+  urlKey: "/dashboard-kc761/0",
+  fingerprint: mismatchCard._configFingerprint(),
+}));
+mismatchCard._applyPresentationMode();
+assert.equal(storage.has(handoffKey), false, "expired marker is removed");
+
+// Two identical cards are ambiguous: consume the marker but do not guess an
+// array index or open either card.
+normalHandoffCard._openEditor();
+const duplicateA = new Card();
+const duplicateB = new Card();
+for (const duplicate of [duplicateA, duplicateB]) {
+  duplicate.isConnected = true;
+  duplicate.setConfig(handoffConfig);
+  duplicate.parentElement = { path: [0, 4, 1], parentElement: null };
+  duplicate.preview = true;
+}
+flushTimers();
+flushTimers();
+assert.equal(duplicateA.lastEvent, undefined, "ambiguous card A is not guessed");
+assert.equal(duplicateB.lastEvent, undefined, "ambiguous card B is not guessed");
+assert.equal(storage.has(handoffKey), false, "ambiguous marker is discarded safely");
 
 card._data = { points: [[0, 1, 5], [321, 100, 50], [2047, 200, 4]] };
 card._cursor.data = 321;

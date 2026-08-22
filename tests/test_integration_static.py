@@ -47,7 +47,7 @@ class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.16")
+        self.assertEqual(VERSION, "0.2.0-alpha.18")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -185,6 +185,20 @@ class IntegrationStaticTests(unittest.TestCase):
             "registerKC761SpectrumCard",
             'globalThis.customElements',
             'Array.isArray(hostWindow.customCards)',
+            "EDIT_HANDOFF_STORAGE_KEY",
+            "EDIT_HANDOFF_TTL_MS",
+            "EDIT_HANDOFF_GRACE_MS",
+            "EDIT_HANDOFF_REGISTRY_KEY",
+            "sessionStorage",
+            "_editorLocationKey",
+            "_configFingerprint",
+            "_writePendingEditorHandoff",
+            "_readPendingEditorHandoff",
+            "_tryConsumeEditorHandoff",
+            "_consumeEditorHandoff",
+            "_resolveEditorHandoff",
+            "_scheduleEditorHandoffRetry",
+            "_unregisterEditorHandoffCandidate",
         ):
             self.assertIn(feature, frontend)
         for summary_id in ("acquired", "runtime", "total", "peak", "roi-total", "cursor-value"):
