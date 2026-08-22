@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.13` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.13 在 alpha.12 的稳定高度和模块注册基础上增加 HA 原生 Lovelace 配置表单、实体建议、YAML 向后兼容校验、X/Y 轴配置、内容可见性开关和原生 Sections 布局接口；整卡“可见性/布局”仍由 HA 标准编辑器壳提供。alpha.12 保留 alpha.9 的缓存失效、谱图坐标和轴标签修复，并将六个 summary 单元统一为固定 80px grid/cell 与完整两行 value 区：短值与长值不会改变卡片高度，完整内容仍通过 title/aria-label 可访问；同时将卡片 Custom Element 与选择器注册集中为幂等的 `registerKC761SpectrumCard()`，用于降低 HA 启动期间重复导入或全局注册时序风险。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
+当前开发版本为 `0.2.0-alpha.14` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.14 在 alpha.13 原生 Lovelace 配置表单、实体建议、YAML 向后兼容校验、X/Y 轴配置、内容可见性开关和原生 Sections 布局接口基础上，修复 Sections 固定行高下卡片超出 grid cell 覆盖后续布局的问题；整卡“可见性/布局”仍由 HA 标准编辑器壳提供。alpha.12 保留 alpha.9 的缓存失效、谱图坐标和轴标签修复，并将六个 summary 单元统一为固定 80px grid/cell 与完整两行 value 区：短值与长值不会改变卡片高度，完整内容仍通过 title/aria-label 可访问；同时将卡片 Custom Element 与选择器注册集中为幂等的 `registerKC761SpectrumCard()`，用于降低 HA 启动期间重复导入或全局注册时序风险。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
 
 ## 0.2 当前范围
 
@@ -11,6 +11,10 @@
 alpha.12 浏览器复核已确认谱图卡真实渲染并存在 `kc761-spectrum-card` DOM；六个 summary cell 均为 `80px`，六个 value 区均为 `39px`，动态值的 `title`/`aria-label` 与完整文本一致。Data cursor 从 `CH 149 · 96.71 keV · 2147` 更新到 `CH 154 · 103.68 keV · 2171` 后，卡片高度始终为 `1217.484375px`（`delta=0`），浏览器 error/warning 日志为空。该证据只覆盖 alpha.12 summary/注册修复，不替代其它谱图交互和真实设备门禁。
 
 alpha.13 已部署到测试 HA；当前 `HUI-SECTIONS-VIEW` 页面中的卡片已真实渲染，DOM 存在 `kc761-spectrum-card`，显示 2048 点谱图控件，未出现 `Custom element not found`。浏览器自动化可以进入编辑模式并识别卡片菜单，但打开卡片编辑器面板多次超时，因此 Config、HA 原生整卡 Visibility 和 Sections Layout 三页仍是人工检查项，不将运行时渲染或静态 schema 检查写成三页已通过。
+
+alpha.14 修复 Sections 的“Automatic height”关闭后固定行高场景：卡片 host 和内部 `ha-card` 沿 HA grid wrapper 使用 `height: 100%`，`min-height: 0` 允许固定行高正确收缩，内容超出时在卡片内部滚动，不再溢出覆盖后续卡片。Automatic height 开启时父级高度仍为 auto，卡片保持自然内容高度；`grid_options.rows` 等用户配置字段继续原样保留。
+
+alpha.14 已在测试 HA 的同一 `HUI-SECTIONS-VIEW` 固定行高编辑场景完成浏览器复核：`--row-size:8` 时卡片 rect 为 `503.997375px`，`HUI-CARD-EDIT-MODE` wrapper rect 同为 `503.997375px`（delta `0`）；内部 `ha-card` 同高，卡片 `overflow:hidden`、内部 `overflow:auto`，`clientHeight=502`、`scrollHeight=940`。修复前卡片高度为 `941.302px`，相对 `503.997px` wrapper 溢出约 `437px`。该复核覆盖 Automatic height 关闭的固定行高路径；Automatic height 开启的自然高度路径尚未完成浏览器验收。KC761 过滤后的浏览器错误/警告为空，但部署/重载时间点有一条无法归因于集成的通用 `Object` 错误，因此不宣称全局浏览器日志绝对无错误。
 
 - 集成域名规划为 `kc761`。
 - 首版传输仅支持局域网 TCP；设备作为 TCP 服务端，Home Assistant 主动连接。

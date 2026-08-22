@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.13`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、summary 稳定高度、模块幂等注册和原生 Lovelace 编辑器候选已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.14`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、summary 稳定高度、模块幂等注册、原生 Lovelace 编辑器候选和 Sections 固定行高修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -123,7 +123,7 @@ show_actions: true
 show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.13` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.14` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 ### 6.0 原生 Lovelace 编辑器与可见性边界
 
@@ -271,6 +271,14 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - Y 轴 localStorage 改为 configured baseline + selected preference：显式编辑器配置覆盖旧偏好，运行时选择在 baseline 不变时跨刷新保留；entity 切换清理旧连接关联、历史、数据、计时器和 ECharts 实例，并用 generation 丢弃迟到结果。未知 YAML 字段在配置归一化时保留。
 - 当前 alpha.13 已完成本地门禁：项目虚拟环境 `pytest` 为 `47 passed, 3 skipped`（HA 运行时依赖、PATH Node 两项按环境跳过）；绑定 Node 24.19.0 的 `--check` 与 `tests/frontend_card_contract.mjs` 均通过，Python `compileall`、JSON 解析和 `git diff --check` 通过。候选已部署到测试 HA；浏览器复核确认当前 `HUI-SECTIONS-VIEW` 页面中的卡片真实渲染，DOM 存在 `kc761-spectrum-card`，显示 2048 点谱图控件，未出现 `Custom element not found`。这只证明卡片运行时加载，不替代标准编辑器三页或其它浏览器视觉门禁。
 - 浏览器自动化能够进入 `?edit=1` 并识别卡片菜单，但在继续打开卡片编辑器时多次超时；因此 Config 页字段、HA 原生整卡 Visibility 条件页、Sections 上下文 Layout 页目前均保留为人工门禁，不能把页面已渲染或静态 `getConfigForm()` 契约误记为三页已通过。预期的编辑器边界仍是：Config 页包含 entity/title/x_axis/y_axis/refresh_interval 与五个 `show_*` 内容开关；Visibility/Layout 由 HA 标准 `hui-card-element-editor` 提供，卡片不复制这两页。
+
+### 8.10 `0.2.0-alpha.14` Sections 固定行高修复
+
+- 测试机实时复现：HA `HUI-SECTIONS-VIEW` 的固定高度卡片 wrapper 为 `card fit-rows full-width`、`--row-size:8`，外层高度约 `503.997px`；alpha.13 的 `KC761-SPECTRUM-CARD` 仍按自然内容高度约 `941.302px` 渲染，overflow/overflowY 为 visible，超出约 `437px` 并覆盖后续布局。故障发生在 Sections 固定 grid cell 与卡片 host 高度链之间，不是谱图数据或协议问题。
+- Home Assistant Sections 的固定 rows 由外层 `.card.fit-rows` 计算；卡片配置中的 `grid_options.rows` 仍由 HA 保存。alpha.14 不在 `getGridOptions()` 中伪造固定 rows，而是让卡片 host 和内部 `ha-card` 沿已有 wrapper 使用 `height:100%`、`min-height:0`；内部内容改为 `overflow:auto`，固定高度不足时在卡片内部滚动，避免溢出覆盖后续 grid item。Automatic height 为 auto 时百分比高度回落为自然内容高度，保留原有谱图、游标、控件和按钮。
+- 静态回归契约覆盖 host/`ha-card` 高度链、内部滚动、`grid_options.rows` 保留、无 `rows:8` 硬编码和无网络 getter；官方背景见 [Home Assistant custom card sizing](https://developers.home-assistant.io/docs/frontend/custom-ui/custom-card/)。
+- 主任务在测试 HA 的同一 `HUI-SECTIONS-VIEW` 编辑页面完成固定行高浏览器复核：保持 `--row-size:8` 时，卡片 rect 为 `503.997375px`，`HUI-CARD-EDIT-MODE` wrapper rect 为 `503.997375px`，delta 为 `0`；内部 `ha-card` 同高，卡片 `overflow:hidden`、内部 `overflow:auto`，`clientHeight=502`、`scrollHeight=940`。alpha.13 修复前卡片 rect 为 `941.302px`，相对约 `503.997px` wrapper 溢出约 `437px`，本次复核确认固定行高路径不再覆盖后续布局。
+- 浏览器日志中 KC761 过滤后的 error/warning 为空；部署/重载时间点另有一条无法归因于 KC761 的通用 `Object` 错误，因此不把日志记为全局零错误。上述浏览器证据只覆盖 Automatic height 关闭的固定行高路径；Automatic height 开启时的自然高度视觉行为仍是人工门禁，尚未宣称通过。
 
 本地合并后继续测试的剩余门禁：
 

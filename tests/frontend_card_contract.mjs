@@ -136,6 +136,13 @@ assert.equal(card.shadowRoot.querySelector("#actions").hidden, true);
 assert.equal(card.getCardSize(), 9);
 assert.deepEqual(card.getGridOptions(), { columns: "full", min_columns: 6 });
 
+// Sections writes a numeric grid_options.rows when Automatic height is off.
+// The card must preserve that config for HA's wrapper while its own host/ha-card
+// CSS follows the wrapper height and scrolls its content instead of overflowing
+// into the next grid item.
+card.setConfig({ entity: "sensor.real_spectrum", grid_options: { columns: "full", rows: 8 } });
+assert.deepEqual(card._config.grid_options, { columns: "full", rows: 8 });
+
 const preference = Object.create(Card.prototype);
 preference._config = { entity: "sensor.real_spectrum" };
 assert.equal(preference._initialYAxis("linear", true), "linear");

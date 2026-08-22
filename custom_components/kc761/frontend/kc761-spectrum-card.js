@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.13";
+const CARD_VERSION = "0.2.0-alpha.14";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -259,7 +259,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._rendered = true;
     this.shadowRoot.innerHTML = `
       <style>
-        :host{display:block} ha-card{padding:16px;overflow:hidden}[hidden]{display:none!important}
+        :host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden} ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto}[hidden]{display:none!important}
         h2{margin:0 0 12px;font-size:20px}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:7px 9px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}

@@ -45,7 +45,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.13")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.14")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -119,6 +119,8 @@ class IntegrationStaticTests(unittest.TestCase):
             "wrap.clientLeft",
             "grid-auto-rows:80px",
             "height:80px",
+            ":host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden}",
+            "ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto}",
             "getConfigForm",
             "getEntitySuggestion",
             "getGridOptions",
