@@ -16,6 +16,7 @@ from custom_components.kc761.const import (
     CMD_GET_STA,
     FORBIDDEN_WRITE_COMMANDS,
     READ_COMMANDS,
+    VERSION,
     WRITE_COMMANDS,
 )
 
@@ -45,7 +46,8 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.14")
+        self.assertEqual(manifest["version"], VERSION)
+        self.assertEqual(VERSION, "0.2.0-alpha.16")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -54,6 +56,28 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertEqual(hacs, {"name": "KC761x", "homeassistant": "2026.7.0"})
         brand_dir = ROOT / "custom_components" / "kc761" / "brand"
         self.assertTrue((brand_dir / "icon.png").is_file())
+
+    def test_frontend_and_manifest_versions_are_coherent(self) -> None:
+        manifest = json.loads(
+            (ROOT / "custom_components" / "kc761" / "manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        frontend = (
+            ROOT
+            / "custom_components"
+            / "kc761"
+            / "frontend"
+            / "kc761-spectrum-card.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'const CARD_VERSION = "{VERSION}";', frontend)
+        self.assertIn(
+            'f"/kc761/kc761-spectrum-card.js?v={VERSION}"',
+            (ROOT / "custom_components" / "kc761" / "__init__.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual(manifest["version"], VERSION)
 
     def test_public_protocol_commands_match_the_expansion_scope(self) -> None:
         self.assertEqual({CMD_GET_STA, CMD_GET_DEVICE_INFO}, {0x53, 0x54})
@@ -94,9 +118,20 @@ class IntegrationStaticTests(unittest.TestCase):
             "markArea",
             "markPoint",
             "markLine",
-            "roi-start-cursor",
-            "roi-end-cursor",
             "data-cursor",
+            'type="range"',
+            'aria-label="ROI start channel"',
+            'aria-label="ROI end channel"',
+            "_updateRoiSliderUI",
+            "_applyPresentationMode",
+            "const dialogPreview = this._preview && !path",
+            "_ensureLayoutObserver",
+            "_updateCompactHeight",
+            "compact-height",
+            "_openEditor",
+            'new EventConstructor("ll-edit-card"',
+            'searchParams.set("edit", "1")',
+            "cursorNearPeak",
             "pointerdown",
             "convertToPixel",
             "convertFromPixel",
@@ -117,10 +152,13 @@ class IntegrationStaticTests(unittest.TestCase):
             "formatter: (value) =>",
             "chartElement.offsetLeft",
             "wrap.clientLeft",
-            "grid-auto-rows:80px",
-            "height:80px",
+            "grid-auto-rows:58px",
+            "height:58px",
             ":host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden}",
-            "ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto}",
+            (
+                "ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto;"
+                "display:flex;flex-direction:column}"
+            ),
             "getConfigForm",
             "getEntitySuggestion",
             "getGridOptions",
@@ -143,7 +181,7 @@ class IntegrationStaticTests(unittest.TestCase):
             "_setSummaryValue",
             "aria-label",
             "title = text",
-            "-webkit-line-clamp:2",
+            "white-space:nowrap",
             "registerKC761SpectrumCard",
             'globalThis.customElements',
             'Array.isArray(hostWindow.customCards)',
@@ -152,6 +190,11 @@ class IntegrationStaticTests(unittest.TestCase):
         for summary_id in ("acquired", "runtime", "total", "peak", "roi-total", "cursor-value"):
             self.assertIn(f'this._setSummaryValue("#{summary_id}"', frontend)
         self.assertNotIn('entity: "sensor.kc761_spectrum"', frontend)
+        self.assertNotIn("roi-start-cursor", frontend)
+        self.assertNotIn("roi-end-cursor", frontend)
+        self.assertNotIn("container:kc761-card / size", frontend)
+        self.assertNotIn("@container", frontend)
+        self.assertNotIn('type=\"number\" min=\"0\" max=\"2047\"', frontend)
         self.assertNotIn("GRID.left", frontend)
         self.assertNotIn("GRID.right", frontend)
         self.assertNotIn("min_rows", frontend)

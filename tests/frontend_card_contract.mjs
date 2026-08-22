@@ -4,7 +4,16 @@ class FakeNode {
   constructor(selector = "") {
     this.selector = selector;
     this.style = { setProperty() {} };
-    this.classList = { toggle() {} };
+    this.classList = {
+      values: new Set(),
+      toggle: (name, force) => {
+        const next = force === undefined ? !this.classList.values.has(name) : Boolean(force);
+        if (next) this.classList.values.add(name);
+        else this.classList.values.delete(name);
+        return next;
+      },
+      contains: (name) => this.classList.values.has(name),
+    };
     this.dataset = {};
     this.options = [];
     this.value = "";
@@ -48,11 +57,17 @@ class FakeHTMLElement {
   constructor() {
     this.style = { setProperty() {} };
     this.isConnected = false;
+    this.parentElement = null;
   }
 
   attachShadow() {
     this.shadowRoot = new FakeShadowRoot();
     return this.shadowRoot;
+  }
+
+  dispatchEvent(event) {
+    this.lastEvent = event;
+    return true;
   }
 }
 
@@ -74,6 +89,18 @@ globalThis.window = {
   setInterval: () => 1,
   clearInterval() {},
   confirm: () => false,
+  location: {
+    href: "http://ha.local/dashboard-kc761/0",
+    assign: (value) => { globalThis.window.location.assigned = value; },
+  },
+};
+globalThis.CustomEvent = class {
+  constructor(type, init = {}) {
+    this.type = type;
+    this.detail = init.detail;
+    this.bubbles = init.bubbles;
+    this.composed = init.composed;
+  }
 };
 globalThis.document = {
   createElement: (selector) => new FakeNode(selector),
@@ -85,7 +112,17 @@ globalThis.Option = class extends FakeNode {
     this.value = value;
   }
 };
-globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+globalThis.ResizeObserver = class {
+  constructor(callback) {
+    this.callback = callback;
+    this.targets = [];
+    this.disconnectCalls = 0;
+  }
+
+  observe(target) { this.targets.push(target); }
+  disconnect() { this.disconnectCalls += 1; }
+  trigger() { this.callback(); }
+};
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
 
 await import(new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js", import.meta.url));
@@ -125,7 +162,11 @@ card.setConfig({ entity: "sensor.real_spectrum", future_option: { keep: true }, 
 assert.deepEqual(card._config.future_option, { keep: true });
 assert.deepEqual(card._config.visibility, [{ condition: "state" }]);
 assert.equal(card.shadowRoot.querySelector("#source").listenerCount("change"), 1);
+assert.equal(card.shadowRoot.querySelector("#roi-start").listenerCount("input"), 1);
+assert.equal(card.shadowRoot.querySelector("#roi-end").listenerCount("input"), 1);
 assert.equal(card.shadowRoot.querySelector("#controls").hidden, true);
+assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true);
+assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
 assert.equal(card.shadowRoot.querySelector(".summary").hidden, false);
 assert.equal(card.shadowRoot.querySelector('[data-summary="peak"]').hidden, true);
 assert.equal(card.shadowRoot.querySelector('[data-legend="peak"]').hidden, true);
@@ -135,6 +176,51 @@ assert.equal(card.shadowRoot.querySelector(".legend").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#actions").hidden, true);
 assert.equal(card.getCardSize(), 9);
 assert.deepEqual(card.getGridOptions(), { columns: "full", min_columns: 6 });
+
+card.preview = true;
+assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, false, "dialog preview shows editor-only controls");
+assert.equal(card.shadowRoot.querySelector("#configure").hidden, true, "dialog preview has no card path");
+const pathAncestor = { path: [0, 1, 2], parentElement: null };
+const shadowHost = { parentElement: null, getRootNode: () => ({ host: pathAncestor }) };
+card.parentElement = null;
+card.getRootNode = () => ({ host: shadowHost });
+card.connectedCallback();
+assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true, "dashboard edit wrapper hides editor-only controls");
+assert.equal(card.shadowRoot.querySelector("#configure").hidden, false, "edit-mode card with path keeps Configure visible");
+card.preview = false;
+assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true);
+assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
+card.parentElement = null;
+assert.equal(card.shadowRoot.querySelector("#roi-start")["aria-valuenow"], "0");
+assert.equal(card.shadowRoot.querySelector("#roi-end")["aria-valuenow"], "2047");
+card._setCursorChannel("roiStart", 321);
+assert.equal(card.shadowRoot.querySelector("#roi-start").value, "321");
+assert.equal(card.shadowRoot.querySelector("#roi-start-value").textContent, "321");
+
+const layoutCard = card.shadowRoot.querySelector("ha-card");
+layoutCard.clientHeight = 500;
+card._updateCompactHeight();
+assert.equal(layoutCard.classList.contains("compact-height"), true);
+layoutCard.clientHeight = 900;
+card._updateCompactHeight();
+assert.equal(layoutCard.classList.contains("compact-height"), false);
+layoutCard.clientHeight = 430;
+card._updateCompactHeight();
+
+card._openEditor();
+assert.equal(card.lastEvent.type, "ll-edit-card");
+assert.deepEqual(card.lastEvent.detail, { path: [0, 1, 2] });
+card.parentElement = null;
+card.getRootNode = undefined;
+globalThis.window.location.assigned = null;
+card._openEditor();
+assert.match(globalThis.window.location.assigned, /[?&]edit=1(?:&|$)/);
+
+card._data = { points: [[0, 1, 5], [321, 100, 50], [2047, 200, 4]] };
+card._cursor.data = 321;
+const chartOption = card._option();
+assert.equal(chartOption.series[0].markLine.data.length, 1, "ROI boundaries are markArea-only");
+assert.equal(chartOption.series[0].markPoint.label.distance, 28, "peak label is staggered from a nearby data cursor");
 
 // Sections writes a numeric grid_options.rows when Automatic height is off.
 // The card must preserve that config for HA's wrapper while its own host/ha-card
@@ -186,12 +272,40 @@ hassCard._data = null;
 hassCard.hass = { states: { "sensor.live_spectrum": liveState } };
 assert.ok(hassCard._data, "same state object must repopulate a cleared latest spectrum");
 
+const unavailableCard = new Card();
+unavailableCard.setConfig({ entity: "sensor.unavailable_spectrum" });
+unavailableCard.preview = true;
+unavailableCard._entryId = "entry";
+unavailableCard._device = { model: "KC761" };
+unavailableCard._data = { points: [[0, 1, 2]] };
+unavailableCard.hass = {
+  states: {
+    "sensor.unavailable_spectrum": {
+      state: "unavailable",
+      attributes: {},
+    },
+  },
+};
+assert.equal(unavailableCard.shadowRoot.querySelector("#status").textContent, "Selected spectrum entity is unavailable");
+assert.deepEqual(unavailableCard._data, { points: [[0, 1, 2]] }, "unavailable state keeps last valid spectrum");
+assert.equal(unavailableCard._entryId, "entry", "unavailable state keeps entity ownership");
+assert.equal(unavailableCard._device.model, "KC761", "unavailable state keeps device metadata");
+assert.equal(
+  Card.isSpectrumEntityState({ state: "unavailable", attributes: {} }),
+  false,
+  "unavailable state remains outside strict spectrum validation",
+);
+
 let cleanupCalls = 0;
 const lifecycle = new Card();
 lifecycle.setConfig({ entity: "sensor.lifecycle" });
+assert.ok(lifecycle._layoutResizeObserver);
+const layoutObserver = lifecycle._layoutResizeObserver;
 lifecycle._dragCleanup = () => { cleanupCalls += 1; };
 lifecycle.disconnectedCallback();
 assert.equal(cleanupCalls, 1);
 assert.equal(lifecycle._dragCleanup, null);
+assert.equal(layoutObserver.disconnectCalls, 1);
+assert.equal(lifecycle._layoutResizeObserver, null);
 
 console.log("frontend card contract: ok");

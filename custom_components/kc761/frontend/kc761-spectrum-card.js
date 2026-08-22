@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.14";
+const CARD_VERSION = "0.2.0-alpha.16";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -51,11 +51,13 @@ class KC761SpectrumCard extends HTMLElement {
     this._echarts = null;
     this._echartsPromise = null;
     this._resizeObserver = null;
+    this._layoutResizeObserver = null;
     this._refreshTimer = null;
     this._busyState = false;
     this._entityGeneration = 0;
     this._drawToken = 0;
     this._dragCleanup = null;
+    this._preview = false;
     this._detached = false;
     this._colors = { ...COLOR_FALLBACKS };
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
@@ -165,6 +167,17 @@ class KC761SpectrumCard extends HTMLElement {
     };
   }
 
+  get preview() {
+    return this._preview;
+  }
+
+  set preview(value) {
+    const next = Boolean(value);
+    if (next === this._preview) return;
+    this._preview = next;
+    this._applyPresentationMode();
+  }
+
   setConfig(config) {
     const previous = this._config;
     const normalized = KC761SpectrumCard.validateConfig(config);
@@ -183,6 +196,8 @@ class KC761SpectrumCard extends HTMLElement {
 
   connectedCallback() {
     this._detached = false;
+    this._ensureLayoutObserver();
+    this._applyPresentationMode();
     this._syncAutoRefresh();
     if (this._data) this._draw();
   }
@@ -195,6 +210,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._dragCleanup = null;
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
+    if (this._layoutResizeObserver) this._layoutResizeObserver.disconnect();
+    this._layoutResizeObserver = null;
     if (this._chart) this._chart.dispose();
     this._chart = null;
   }
@@ -218,6 +235,15 @@ class KC761SpectrumCard extends HTMLElement {
       return;
     }
     if (!KC761SpectrumCard.isSpectrumEntityState(current)) {
+      if (current.state === "unavailable") {
+        // HA may omit all extra attributes while an entity is unavailable.
+        // Keep strict KC761 validation for every usable state, but do not
+        // discard the last good spectrum or mislabel this transient state as
+        // a different entity.  A later valid state will repopulate normally.
+        this._stopAutoRefresh();
+        this._setStatus("Selected spectrum entity is unavailable", true);
+        return;
+      }
       this._entryId = null;
       this._device = null;
       this._stopAutoRefresh();
@@ -254,40 +280,43 @@ class KC761SpectrumCard extends HTMLElement {
       this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
       this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
       this._applyVisibility();
+      this._ensureLayoutObserver();
+      this._applyPresentationMode();
       return;
     }
     this._rendered = true;
     this.shadowRoot.innerHTML = `
       <style>
-        :host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden} ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto}[hidden]{display:none!important}
-        h2{margin:0 0 12px;font-size:20px}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
+        :host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden} ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto;display:flex;flex-direction:column}[hidden]{display:none!important}
+        h2{margin:0 0 8px;font-size:20px}.header{display:flex;align-items:center;gap:8px}.header h2{flex:1}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
-        select,input,button{font:inherit;padding:7px 9px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
+        select,input,button{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
         button{cursor:pointer}button.danger{color:var(--error-color)}button:disabled{opacity:.45;cursor:not-allowed}
-        .chart-wrap{position:relative;margin-top:12px;height:430px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
+        .chart-wrap{position:relative;margin-top:8px;height:430px;flex:0 1 430px;min-height:220px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
         #chart{width:100%;height:100%}.chart-cursor{position:absolute;top:${GRID_FALLBACK.top}px;bottom:${GRID_FALLBACK.bottom}px;width:0;border-left:2px dashed;z-index:5;pointer-events:auto;touch-action:none;cursor:ew-resize}
         .chart-cursor .handle{position:absolute;top:-8px;left:-9px;width:16px;height:16px;border-radius:50%;border:2px solid var(--card-background-color);box-shadow:0 0 0 1px currentColor;background:currentColor;cursor:ew-resize}
         .chart-cursor .caption{position:absolute;top:-25px;left:5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:currentColor;text-shadow:0 1px var(--card-background-color);pointer-events:none}
-        #roi-start-cursor{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}#roi-end-cursor{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd})}#data-cursor{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}
+        .chart-cursor .caption.staggered{top:-50px}
+        #data-cursor{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}
         .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
-        .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));grid-auto-rows:80px;gap:8px;margin:12px 0;font-size:13px}.summary div{box-sizing:border-box;min-width:0;height:80px;padding:8px;background:var(--secondary-background-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:-webkit-box;min-width:0;height:2.6em;max-height:2.6em;overflow:hidden;text-overflow:ellipsis;overflow-wrap:anywhere;word-break:break-word;-webkit-box-orient:vertical;-webkit-line-clamp:2;font-size:15px;line-height:1.3;margin-top:3px}
+        .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:58px;gap:6px;margin:8px 0;font-size:12px}.summary div{box-sizing:border-box;min-width:0;height:58px;padding:6px 8px;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:block;min-width:0;height:1.3em;max-height:1.3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.3;margin-top:2px}
         .status{min-height:20px;margin-top:8px;color:var(--secondary-text-color)}.status.error{color:var(--error-color)}.actions{margin-top:10px}.spacer{flex:1}
-        .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}
+        .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}.roi-slider{position:relative;min-width:250px;flex:1 1 300px;padding:8px 0 4px}.roi-slider-track{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:4px;background:var(--divider-color)}.roi-slider-fill{position:absolute;top:0;height:4px;border-radius:4px;background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});opacity:.9}.roi-slider input{position:absolute;left:0;top:8px;width:100%;height:24px;margin:0;padding:0;border:0;background:transparent;appearance:none;pointer-events:none}.roi-slider input::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});pointer-events:auto;cursor:ew-resize}.roi-slider input::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});pointer-events:auto;cursor:ew-resize}.roi-slider input:first-of-type{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});z-index:2}.roi-slider input:last-of-type{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd});z-index:3}.roi-values{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;margin-top:20px}.editor-only{display:block}.configure{font-size:12px;padding:5px 8px}
+        @media (max-width:600px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.header h2{font-size:18px}}
+        ha-card.compact-height .chart-wrap{height:240px;flex-basis:240px;min-height:200px}ha-card.compact-height .summary{grid-auto-rows:52px}ha-card.compact-height .summary div{height:52px;padding:5px 7px}ha-card.compact-height .summary b{font-size:13px}ha-card.compact-height .actions{margin-top:6px}ha-card.compact-height select,ha-card.compact-height input,ha-card.compact-height button{padding:5px 7px}
       </style>
       <ha-card>
-        <h2 id="title"></h2>
+        <div class="header"><h2 id="title"></h2><button id="configure" class="configure" type="button">Configure</button></div>
         <div id="controls">
-          <div class="toolbar">
+          <div id="editor-controls" class="toolbar editor-only">
             <label>Channel<select id="source"></select></label>
             <label>X axis<select id="xaxis"><option value="energy">Energy (keV)</option><option value="channel">Channel</option></select></label>
             <label>Y axis<select id="yaxis"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></label>
             <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
           </div>
-          <div class="roi">
-            <label>ROI start channel<input id="roi-start" type="number" min="0" max="2047" value="0"></label>
-            <label>ROI end channel<input id="roi-end" type="number" min="0" max="2047" value="2047"></label>
+          <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">0</span><span aria-hidden="true">–</span><span id="roi-end-value">2047</span></div></div>
           </div>
-          <div class="help">Drag the two cyan ROI handles to select a range. Drag the pink handle to inspect a point.</div>
+          <div class="help">Drag the two ROI handles to select a range. Drag the pink plot handle to inspect a point.</div>
         </div>
         <div class="summary">
           <div data-summary="acquired">Acquired<b id="acquired">—</b></div><div data-summary="runtime">Accumulation<b id="runtime">—</b></div>
@@ -296,8 +325,6 @@ class KC761SpectrumCard extends HTMLElement {
         </div>
         <div id="chart-wrap" class="chart-wrap">
           <div id="chart" role="img" aria-label="KC761 spectrum chart"></div>
-          <div id="roi-start-cursor" class="chart-cursor" role="slider" aria-label="ROI start cursor" tabindex="0"><span class="handle"></span><span class="caption">ROI start</span></div>
-          <div id="roi-end-cursor" class="chart-cursor" role="slider" aria-label="ROI end cursor" tabindex="0"><span class="handle"></span><span class="caption">ROI end</span></div>
           <div id="data-cursor" class="chart-cursor" role="slider" aria-label="Data cursor" tabindex="0"><span class="handle"></span><span class="caption">Data</span></div>
         </div>
         <div class="legend"><span><i class="swatch curve"></i> Spectrum</span><span><i class="swatch roi"></i> ROI range</span><span data-legend="peak"><i class="swatch peak"></i> Auto peak</span><span><i class="swatch data"></i> Data cursor</span></div>
@@ -318,17 +345,47 @@ class KC761SpectrumCard extends HTMLElement {
       this._persistYAxis();
       this._draw();
     });
-    this.shadowRoot.querySelector("#roi-start").addEventListener("change", () => this._syncRoiFromInputs("start"));
-    this.shadowRoot.querySelector("#roi-end").addEventListener("change", () => this._syncRoiFromInputs("end"));
+    this.shadowRoot.querySelector("#roi-start").addEventListener("input", () => this._syncRoiFromInputs("start"));
+    this.shadowRoot.querySelector("#roi-end").addEventListener("input", () => this._syncRoiFromInputs("end"));
     this.shadowRoot.querySelector("#history").addEventListener("change", (event) => this._selectHistory(event.target.value));
     this.shadowRoot.querySelector("#capture").addEventListener("click", () => this._capture());
     this.shadowRoot.querySelector("#save").addEventListener("click", () => this._save());
     this.shadowRoot.querySelector("#csv").addEventListener("click", () => this._csv());
+    this.shadowRoot.querySelector("#configure").addEventListener("click", () => this._openEditor());
     this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => button.addEventListener("click", () => this._clear(button.dataset.clear)));
-    this._attachCursor("roiStart", "#roi-start-cursor");
-    this._attachCursor("roiEnd", "#roi-end-cursor");
     this._attachCursor("data", "#data-cursor");
+    this._updateRoiSliderUI();
     this._applyVisibility();
+    this._ensureLayoutObserver();
+    this._applyPresentationMode();
+  }
+
+  _applyPresentationMode() {
+    if (!this._rendered) return;
+    const path = this._findLovelacePath();
+    const dialogPreview = this._preview && !path;
+    const editorControls = this.shadowRoot.querySelector("#editor-controls");
+    const configure = this.shadowRoot.querySelector("#configure");
+    if (editorControls) editorControls.hidden = !dialogPreview;
+    if (configure) configure.hidden = dialogPreview;
+  }
+
+  _ensureLayoutObserver() {
+    const card = this.shadowRoot?.querySelector("ha-card");
+    if (!card) return;
+    this._updateCompactHeight();
+    if (this._layoutResizeObserver || typeof ResizeObserver !== "function") return;
+    this._layoutResizeObserver = new ResizeObserver(() => this._updateCompactHeight());
+    this._layoutResizeObserver.observe(card);
+  }
+
+  _updateCompactHeight() {
+    const card = this.shadowRoot?.querySelector("ha-card");
+    if (!card) return;
+    const measured = Number(card.clientHeight) || Number(card.getBoundingClientRect?.().height);
+    const compact = Number.isFinite(measured) && measured > 0 && measured < 620;
+    card.classList.toggle("compact-height", compact);
+    this._compactHeight = compact;
   }
 
   _applyVisibility() {
@@ -377,6 +434,67 @@ class KC761SpectrumCard extends HTMLElement {
     const end = this.shadowRoot.querySelector("#roi-end");
     if (start) start.value = "0";
     if (end) end.value = String(MAX_CHANNEL);
+    this._updateRoiSliderUI();
+  }
+
+  _findLovelacePath() {
+    let node = this;
+    for (let depth = 0; node && depth < 12; depth += 1) {
+      if (Array.isArray(node.path) && node.path.length >= 2) return [...node.path];
+      node = node.parentElement || node.getRootNode?.()?.host || null;
+    }
+    return null;
+  }
+
+  _openEditor() {
+    const path = this._findLovelacePath();
+    if (path) {
+      const EventConstructor = globalThis.CustomEvent;
+      if (typeof EventConstructor === "function") {
+        this.dispatchEvent(new EventConstructor("ll-edit-card", { detail: { path }, bubbles: true, composed: true }));
+        return;
+      }
+    }
+    const location = globalThis.window?.location;
+    if (location?.href && typeof location.assign === "function") {
+      try {
+        const url = new URL(location.href);
+        url.searchParams.set("edit", "1");
+        location.assign(url.toString());
+        return;
+      } catch (_error) {
+        // Fall through to a non-destructive status message when a host shell
+        // exposes an incomplete location object.
+      }
+    }
+    this._setStatus("Open dashboard edit mode to configure this card.");
+  }
+
+  _updateRoiSliderUI() {
+    if (!this._rendered) return;
+    const startValueNumber = Number(this._cursor.roiStart);
+    const endValueNumber = Number(this._cursor.roiEnd);
+    const start = clamp(Number.isFinite(startValueNumber) ? startValueNumber : 0, 0, MAX_CHANNEL);
+    const end = clamp(Number.isFinite(endValueNumber) ? endValueNumber : MAX_CHANNEL, start, MAX_CHANNEL);
+    const startInput = this.shadowRoot.querySelector("#roi-start");
+    const endInput = this.shadowRoot.querySelector("#roi-end");
+    const startValue = this.shadowRoot.querySelector("#roi-start-value");
+    const endValue = this.shadowRoot.querySelector("#roi-end-value");
+    const fill = this.shadowRoot.querySelector("#roi-range-fill");
+    if (startInput) {
+      startInput.value = String(start);
+      startInput.setAttribute("aria-valuenow", String(start));
+    }
+    if (endInput) {
+      endInput.value = String(end);
+      endInput.setAttribute("aria-valuenow", String(end));
+    }
+    if (startValue) startValue.textContent = String(start);
+    if (endValue) endValue.textContent = String(end);
+    if (fill) {
+      fill.style.left = `${(start / MAX_CHANNEL) * 100}%`;
+      fill.style.right = `${100 - (end / MAX_CHANNEL) * 100}%`;
+    }
   }
 
   _initialYAxis(value, explicitlyConfigured = false) {
@@ -493,6 +611,7 @@ class KC761SpectrumCard extends HTMLElement {
     const endInput = this.shadowRoot.querySelector("#roi-end");
     if (startInput) startInput.value = String(this._cursor.roiStart);
     if (endInput) endInput.value = String(this._cursor.roiEnd);
+    this._updateRoiSliderUI();
     this._updateSummary();
     this._draw();
   }
@@ -500,12 +619,15 @@ class KC761SpectrumCard extends HTMLElement {
   _syncRoiFromInputs(changed) {
     const startInput = this.shadowRoot.querySelector("#roi-start");
     const endInput = this.shadowRoot.querySelector("#roi-end");
-    const start = clamp(Math.round(Number(startInput?.value) || 0), 0, MAX_CHANNEL);
-    const end = clamp(Math.round(Number(endInput?.value) || MAX_CHANNEL), 0, MAX_CHANNEL);
+    const startValue = Number(startInput?.value);
+    const endValue = Number(endInput?.value);
+    const start = clamp(Math.round(Number.isFinite(startValue) ? startValue : 0), 0, MAX_CHANNEL);
+    const end = clamp(Math.round(Number.isFinite(endValue) ? endValue : MAX_CHANNEL), 0, MAX_CHANNEL);
     if (changed === "start") this._cursor.roiStart = Math.min(start, end);
     else this._cursor.roiEnd = Math.max(end, start);
     if (startInput) startInput.value = String(this._cursor.roiStart);
     if (endInput) endInput.value = String(this._cursor.roiEnd);
+    this._updateRoiSliderUI();
     this._updateSummary();
     this._draw();
   }
@@ -715,7 +837,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (!element) return;
     const text = String(value);
     element.textContent = text;
-    // The visible value is deliberately limited to two lines so one long
+    // The visible value is deliberately limited to one line so one long
     // cursor/peak value cannot resize the whole card.  Keep the full string
     // available to hover and assistive technology.
     element.title = text;
@@ -753,6 +875,7 @@ class KC761SpectrumCard extends HTMLElement {
     let peak = points[0];
     points.forEach((point) => { if (point[2] > peak[2]) peak = point; });
     const xFor = (point) => this._xValue(point);
+    const cursorNearPeak = Math.abs(peak[0] - cursorPoint[0]) <= 16;
     const foreground = this._themeValue("--primary-text-color", "#ddd");
     const secondary = this._themeValue("--secondary-text-color", foreground);
     const divider = this._themeValue("--divider-color", "#555");
@@ -803,13 +926,11 @@ class KC761SpectrumCard extends HTMLElement {
       series: [{
         name: "Spectrum", type: "line", showSymbol: false, sampling: "lttb", data: lineData,
         lineStyle: { color: colors.curve, width: 1.5 }, itemStyle: { color: colors.curve },
-        markArea: { silent: true, itemStyle: { color: colors.roiStart, opacity: 0.16, borderColor: colors.roiStart, borderWidth: 1 }, data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]] },
+        markArea: { silent: true, itemStyle: { color: colors.roiStart, opacity: 0.16 }, data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]] },
         markLine: { silent: true, symbol: ["none", "none"], label: { show: false }, data: [
-          { xAxis: xFor(roiStartPoint), lineStyle: { color: colors.roiStart, type: "dashed", width: 1 } },
-          { xAxis: xFor(roiEndPoint), lineStyle: { color: colors.roiEnd, type: "dashed", width: 1 } },
           { xAxis: xFor(cursorPoint), lineStyle: { color: colors.dataCursor, type: "solid", width: 1 } },
         ] },
-        markPoint: this._config?.show_peak === false ? { data: [] } : { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10 }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
+        markPoint: this._config?.show_peak === false ? { data: [] } : { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10, position: "top", distance: cursorNearPeak ? 28 : 8, offset: cursorNearPeak ? [0, -8] : [0, 0] }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
       }],
     };
   }
@@ -928,7 +1049,11 @@ class KC761SpectrumCard extends HTMLElement {
       : chartRect.left - wrapRect.left - (wrap.clientLeft || 0);
     const top = plot ? plot.y : GRID_FALLBACK.top;
     const bottom = plot ? Math.max(0, chartElement.clientHeight - plot.y - plot.height) : GRID_FALLBACK.bottom;
-    const cursorValues = [["#roi-start-cursor", this._cursor.roiStart, "ROI start"], ["#roi-end-cursor", this._cursor.roiEnd, "ROI end"], ["#data-cursor", this._cursor.data, "Data"]];
+    const points = this._points();
+    let peak = points[0];
+    points.forEach((point) => { if (point[2] > peak[2]) peak = point; });
+    const dataPoint = this._pointForChannel(this._cursor.data) || points[0];
+    const cursorValues = [["#data-cursor", this._cursor.data, "Data"]];
     cursorValues.forEach(([selector, channel, label]) => {
       const element = this.shadowRoot.querySelector(selector);
       if (!element) return;
@@ -939,7 +1064,8 @@ class KC761SpectrumCard extends HTMLElement {
       const caption = element.querySelector(".caption");
       const point = this._pointForChannel(channel);
       if (caption && point) {
-        caption.textContent = label === "Data" ? `CH ${point[0]} · ${point[1].toFixed(2)} keV · ${point[2]}` : `${label} CH ${point[0]}`;
+        caption.textContent = `CH ${point[0]} · ${point[1].toFixed(2)} keV · ${point[2]}`;
+        caption.classList.toggle("staggered", label === "Data" && dataPoint && Math.abs(peak[0] - dataPoint[0]) <= 16);
         const atRightEdge = pixel > chartElement.clientWidth - 190;
         caption.style.left = atRightEdge ? "auto" : "5px";
         caption.style.right = atRightEdge ? "5px" : "auto";

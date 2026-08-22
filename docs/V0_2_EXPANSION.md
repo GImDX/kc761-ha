@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.14`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、summary 稳定高度、模块幂等注册、原生 Lovelace 编辑器候选和 Sections 固定行高修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.16`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界和 unavailable 状态保留已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -123,7 +123,7 @@ show_actions: true
 show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.14` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.16` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 ### 6.0 原生 Lovelace 编辑器与可见性边界
 
@@ -156,12 +156,12 @@ ECharts 6.1.0 的 Apache-2.0 `LICENSE`、`NOTICE` 和 D3 派生许可证随卡�
 ### 6.1 alpha.8 游标与原生 History 外观对齐
 
 - 游标的屏幕位置不再根据固定 `GRID.left/right` 横向换算；卡片使用 ECharts `convertToPixel({xAxisIndex: 0}, value)` 取得实际 plot 坐标，并使用 `convertFromPixel` 将拖动位置反算回当前 X 轴值。该路径同时覆盖 `containLabel`、Energy/Channel 和 resize 后的实际坐标。
-- ROI `markArea`、ROI 起止 `markLine` 和三个 HTML 游标共用同一最近通道点的 X 值，因此游标与谱图区域保持像素级对齐；游标竖向范围使用 ECharts grid rect，首次加载才使用很小的 CSS fallback。
+- ROI `markArea` 和唯一的数据游标 `markLine` 共用同一最近通道点的 X 值，因此高亮区域、数据线与谱图保持像素级对齐；ROI 起止点由双 range input 选择，不再在图内叠加两条竖线或文字标签。
 - 网格采用 HA 原生统计图同类的 `containLabel` inset，轴标签启用 `hideOverlap`、明确的首尾标签和主题色；Y 轴标题改为 plot 顶部的水平 `nameLocation:"end"`/`nameRotate:0` 布局，并为标题保留独立 top reserve，避免与最大刻度重叠。Energy 轴标签按量级保留 1–2 位小数，Channel 轴使用整数，避免长浮点端点挤压 Y 轴边缘。谱图背景、文字、分隔线从 HA 主题变量读取，暗/亮主题均有安全 fallback。
 - HTML 游标的 X 坐标使用 ECharts pixel 加上 `chartElement.offsetLeft`；若浏览器不提供该 offset，则使用实际 `getBoundingClientRect` 并扣除 `wrap.clientLeft`。不再把包含边框的 chart/wrap 左边距重复计入，目标是与 `markArea`/`markLine` 保持小于四分之一像素的边缘误差。
 - 谱线与图例不再把 `#4fc3f7` 当作运行时主色，而是复用 HA History 的 `--graph-color-N → --color-N` 变量链；ROI、峰值和数据游标使用后续序号并做重复色保护，Tooltip 背景、边框和文字跟随 HA card/divider/text 主题变量。
 - 测试机 HA 2026.7.4 构建取证：`frontend_latest/22752.a1299e9730c4c314.js` 的 `hui-history-graph-card` 将历史数据交给 `state-history-charts`，并设置 `--timeline-top-margin:16px`；`frontend_latest/23495.c7798ed370241bd4.js` 的 `statistics-chart` 使用 `ha-chart-base`、`grid:{top:15,left:1,right:1,bottom:0,containLabel:true}`、`yAxis.nameGap:2` 与 `tooltip.renderMode:"html"`。这些是测试机实际构建/运行规则，不将压缩产物误写成上游源码全文。
-- 同一 HA 前端的 `frontend_latest/24652.561e19dfa7c4a178.js` 模块 `63746`（在其它懒加载副本中也保持一致）定义原生 History 调色板链：序列 `t` 先读取 `--graph-color-${t+1}`，缺失时回退到 `--color-${t%54+1}`，再交给颜色解析器。KC761 卡片的曲线、图例、ROI 起止线、峰值和数据游标现在按同一 `--graph-color-N → --color-N → 固定 fallback` 链解析；ROI、peak、data 使用不同序号并检测重复值，保证仍与谱线可区分。Tooltip 使用 HA card/divider/text 主题变量、HTML render mode 和数据游标色轴指示线。
+- 同一 HA 前端的 `frontend_latest/24652.561e19dfa7c4a178.js` 模块 `63746`（在其它懒加载副本中也保持一致）定义原生 History 调色板链：序列 `t` 先读取 `--graph-color-${t+1}`，缺失时回退到 `--color-${t%54+1}`，再交给颜色解析器。KC761 卡片的曲线、图例、ROI 区域、峰值和数据游标现在按同一 `--graph-color-N → --color-N → 固定 fallback` 链解析；ROI、peak、data 使用不同序号并检测重复值，保证仍与谱线可区分。Tooltip 使用 HA card/divider/text 主题变量、HTML render mode 和数据游标色轴指示线。
 
 CSV 每行包含 source、通道名称、获取时间、累积时间、道址、能量 keV 和计数，采用 UTF-8/RFC 4180 兼容文本。
 
@@ -280,10 +280,20 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 主任务在测试 HA 的同一 `HUI-SECTIONS-VIEW` 编辑页面完成固定行高浏览器复核：保持 `--row-size:8` 时，卡片 rect 为 `503.997375px`，`HUI-CARD-EDIT-MODE` wrapper rect 为 `503.997375px`，delta 为 `0`；内部 `ha-card` 同高，卡片 `overflow:hidden`、内部 `overflow:auto`，`clientHeight=502`、`scrollHeight=940`。alpha.13 修复前卡片 rect 为 `941.302px`，相对约 `503.997px` wrapper 溢出约 `437px`，本次复核确认固定行高路径不再覆盖后续布局。
 - 浏览器日志中 KC761 过滤后的 error/warning 为空；部署/重载时间点另有一条无法归因于 KC761 的通用 `Object` 错误，因此不把日志记为全局零错误。上述浏览器证据只覆盖 Automatic height 关闭的固定行高路径；Automatic height 开启时的自然高度视觉行为仍是人工门禁，尚未宣称通过。
 
+### 8.11 `0.2.0-alpha.16` 谱图卡交互收敛与缓存修复候选
+
+- 普通仪表盘视图和带真实 Lovelace `path` 的 dashboard edit wrapper 隐藏 Channel、X axis、Y axis 和 Saved spectrum 选择器，只保留谱图内容与必要操作；实际卡片编辑对话框 preview（标准 `preview=true` 且没有路径）显示这些配置辅助控件。卡片标题旁的 Configure 按钮不调用 HA 私有对话框 API：在真实编辑祖先提供 `path` 时冒泡官方 `ll-edit-card` 事件，否则仅把当前仪表盘 URL 切换到 `edit=1`，由 HA 编辑壳继续打开配置。
+- ROI start/end 改为两个可键盘操作的 `input[type=range]`，带 `aria-label`、`aria-valuenow` 和可见范围摘要；ECharts 只保留 ROI `markArea`，移除 ROI 起止两条 `markLine` 与其图内文字。数据游标继续使用一条 `markLine` 和一个可拖动 HTML 游标。
+- 摘要网格改为紧凑的 3 列/58px 值区（窄屏为 2 列），动态值单行省略但完整文本保留在 `title`/`aria-label`；卡片使用 `ResizeObserver` 按实际 `ha-card` 约束高度切换 `compact-height` class，在短固定高度下将谱图区收缩到约 240px，自动高度不依赖 CSS size containment，减少不必要的内部滚动，同时保留 alpha.14 的 host/`ha-card` 高度链和溢出隔离。峰值标记与数据游标接近时采用不同垂直层级，避免文字重叠。
+- `hass` 收到 `state === "unavailable"` 且 HA 已省略谱图实体属性时，仍保留可用状态的严格 KC761 身份/2048 点校验；卡片显示 unavailable 状态并保留最后有效数据、entry 和设备关联，后续合法状态恢复时重新填充，避免编辑预览把暂时不可用误报为错误实体。
+- alpha.16 候选包 SHA-256 为 `b33484921209d76f0f5d15a85b862172eee7f87791f9a46cad22c469ad726017`；本地门禁为 pytest `48 passed, 3 skipped`、Ruff、绑定 Node `--check`/frontend contract、Python `compileall`、JSON 和 `git diff --check` 通过。测试 HA 的 release/live 哈希一致，入口仅含 alpha.16，卡片与 ECharts 静态资源均返回 HTTP 200。
+- alpha.16 浏览器复核确认普通视图和 dashboard edit view 都加载新 URL：普通 DOM 中 Configure 可见、编辑工具栏隐藏、两个 ROI 控件均为 `range`，图内没有 ROI 起止游标；不可用实体文案为 `Selected spectrum entity is unavailable`，无卡片配置错误。普通卡片 rect top `113.58`、bottom `946.07`、height `832.49`，viewport `983px` 下 document `scrollHeight=clientHeight=983`，chart `430px`、summary `121.98px`。Configure 的语义/坐标点击自动化均超时/重置且未打开对话框，卡片编辑对话框视觉验收仍保留人工门禁。
+- 测试 HA 只读 API 中 simulator 为 loaded、30/30 active、0 unavailable、2048 点；real 条目仍为 setup_retry、42 个实体 unavailable、主谱图 0 点。当前 dashboard 目标为 real，因此峰值/数据游标实时叠加和 ROI live data 只完成自动化契约验证，未宣称浏览器实时数据视觉通过。官方编辑事件来源为 [Home Assistant `hui-view`](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/views/hui-view.ts) 与 [card edit mode](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/components/hui-card-edit-mode.ts)，卡片不导入私有 `showEditCardDialog`。
+
 本地合并后继续测试的剩余门禁：
 
 1. 当前扩展提交推送后重新运行官方 Hassfest、HACS、GitHub Actions 和 Ruff；历史成功记录不能代替当前 HEAD。
-2. 在用户浏览器完成谱图卡 SVG/无 canvas、三种坐标选择、Y 轴视觉间距、三游标拖动和读数、配色、`y_axis` reload 持久性、自动刷新、确认对话框、实际 CSV 下载、手动/定时保存、历史回看和保留上限的可视验收；Recorder 排除已经实测通过。
+2. 在用户浏览器完成谱图卡 SVG/无 canvas、编辑器/普通视图控件边界、双 ROI 滑块与数据游标拖动和读数、Y 轴视觉间距、配色、`y_axis` reload 持久性、自动刷新、确认对话框、实际 CSV 下载、手动/定时保存、历史回看和保留上限的可视验收；Recorder 排除已经实测通过。
 3. 对持久测试栈补做独立的模拟器运行时命令计数审计，确认本轮自动刷新只增加 `0x52` 且 `0x62/0x63/0x64/0x66` 均为 0；当前固定 runner 的控制覆盖不能代替该审计。
 4. 使用专门测试设备，逐项、人工确认后验证 `0x62` 和 `0x63` ACK/读回；`0x66` 必须在用户明确接受数据丢失后单独验收。
 5. 自动上传开启态、其它传感器与型号、累计量跨固件单位和 BLE UUID 继续保持未确认；`hardware_verified=false` 不变。
