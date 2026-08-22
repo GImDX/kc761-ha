@@ -2,11 +2,15 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.12` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.12 保留 alpha.9 的缓存失效、谱图坐标和轴标签修复，并将六个 summary 单元统一为固定 80px grid/cell 与完整两行 value 区：短值与长值不会改变卡片高度，完整内容仍通过 title/aria-label 可访问；同时将卡片 Custom Element 与选择器注册集中为幂等的 `registerKC761SpectrumCard()`，用于降低 HA 启动期间重复导入或全局注册时序风险。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
+当前开发版本为 `0.2.0-alpha.13` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.13 在 alpha.12 的稳定高度和模块注册基础上增加 HA 原生 Lovelace 配置表单、实体建议、YAML 向后兼容校验、X/Y 轴配置、内容可见性开关和原生 Sections 布局接口；整卡“可见性/布局”仍由 HA 标准编辑器壳提供。alpha.12 保留 alpha.9 的缓存失效、谱图坐标和轴标签修复，并将六个 summary 单元统一为固定 80px grid/cell 与完整两行 value 区：短值与长值不会改变卡片高度，完整内容仍通过 title/aria-label 可访问；同时将卡片 Custom Element 与选择器注册集中为幂等的 `registerKC761SpectrumCard()`，用于降低 HA 启动期间重复导入或全局注册时序风险。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
 
 ## 0.2 当前范围
 
+谱图卡可从 Lovelace 的“添加卡片”选择器进入原生配置页；实体选择器只建议带 KC761 身份及结构化谱图属性的 `sensor` 实体。配置页支持实体、标题、X/Y 轴、自动刷新和五个内容开关（controls、summary、legend、actions、peak），默认均为可见，未知 YAML 字段（包括 HA 的整卡 `visibility`）由运行时配置保留。`getCardSize()` 会在已渲染时按实际 `ha-card` 高度换算安全 Masonry 行数，未渲染时使用保守估算；`getGridOptions()` 仅声明 Sections 使用满宽并至少 6 列，不声明固定行数或任意像素高度。整卡的“可见性”条件页和“布局”页由 Home Assistant 标准 `hui-card-element-editor` 提供；卡片内部的 `show_*` 只控制谱图内容，不替代整卡条件。
+
 alpha.12 浏览器复核已确认谱图卡真实渲染并存在 `kc761-spectrum-card` DOM；六个 summary cell 均为 `80px`，六个 value 区均为 `39px`，动态值的 `title`/`aria-label` 与完整文本一致。Data cursor 从 `CH 149 · 96.71 keV · 2147` 更新到 `CH 154 · 103.68 keV · 2171` 后，卡片高度始终为 `1217.484375px`（`delta=0`），浏览器 error/warning 日志为空。该证据只覆盖 alpha.12 summary/注册修复，不替代其它谱图交互和真实设备门禁。
+
+alpha.13 已部署到测试 HA；当前 `HUI-SECTIONS-VIEW` 页面中的卡片已真实渲染，DOM 存在 `kc761-spectrum-card`，显示 2048 点谱图控件，未出现 `Custom element not found`。浏览器自动化可以进入编辑模式并识别卡片菜单，但打开卡片编辑器面板多次超时，因此 Config、HA 原生整卡 Visibility 和 Sections Layout 三页仍是人工检查项，不将运行时渲染或静态 schema 检查写成三页已通过。
 
 - 集成域名规划为 `kc761`。
 - 首版传输仅支持局域网 TCP；设备作为 TCP 服务端，Home Assistant 主动连接。

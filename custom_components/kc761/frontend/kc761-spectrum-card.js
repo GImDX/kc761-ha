@@ -1,6 +1,25 @@
-const CARD_VERSION = "0.2.0-alpha.12";
+const CARD_VERSION = "0.2.0-alpha.13";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
+const DEFAULT_CARD_CONFIG = Object.freeze({
+  title: "KC761 Spectrum",
+  x_axis: "energy",
+  y_axis: "linear",
+  refresh_interval: 0,
+  show_controls: true,
+  show_summary: true,
+  show_legend: true,
+  show_actions: true,
+  show_peak: true,
+});
+const CARD_CONTENT_VISIBILITY_KEYS = Object.freeze([
+  "show_controls",
+  "show_summary",
+  "show_legend",
+  "show_actions",
+  "show_peak",
+]);
+const CARD_DOCUMENTATION_URL = "https://github.com/GImDX/kc761-ha";
 // First-paint fallback only.  After ECharts lays out the axes, the overlay is
 // positioned from its actual grid coordinate system rather than guessed CSS
 // insets (which would drift when containLabel or a theme changes).
@@ -34,6 +53,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._resizeObserver = null;
     this._refreshTimer = null;
     this._busyState = false;
+    this._entityGeneration = 0;
     this._drawToken = 0;
     this._dragCleanup = null;
     this._detached = false;
@@ -42,19 +62,121 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { entity: "sensor.kc761_spectrum", title: "KC761 Spectrum", refresh_interval: 0, y_axis: "linear" };
+    // The card picker opens the native editor before an entity is known.  Do
+    // not put a fictional entity ID in the stub; the required selector will
+    // ask the user to choose a real KC761 spectrum entity.
+    return { ...DEFAULT_CARD_CONFIG };
   }
 
-  setConfig(config) {
-    if (!config || !config.entity) throw new Error("KC761 spectrum card requires an entity");
-    const refreshInterval = config.refresh_interval === undefined ? 0 : Number(config.refresh_interval);
+  static isSpectrumEntityState(state) {
+    const attributes = state?.attributes || {};
+    const hasKC761Identity = typeof attributes.config_entry_id === "string" || typeof attributes.codec_profile === "string";
+    const points = attributes.points;
+    return hasKC761Identity && (
+      Number(attributes.point_count) === 2048
+      || (Array.isArray(points) && (points.length === 0 || points.length === 2048))
+    );
+  }
+
+  static getEntitySuggestion(hass, entityId) {
+    if (!entityId || !String(entityId).startsWith("sensor.")) return null;
+    const state = hass?.states?.[entityId];
+    if (!KC761SpectrumCard.isSpectrumEntityState(state)) return null;
+    return {
+      config: {
+        type: "custom:kc761-spectrum-card",
+        entity: entityId,
+        ...DEFAULT_CARD_CONFIG,
+      },
+    };
+  }
+
+  static validateConfig(config, { allowMissingEntity = true } = {}) {
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("KC761 spectrum card configuration must be an object");
+    const next = { ...config };
+    if (next.entity === undefined || next.entity === null || next.entity === "") {
+      if (!allowMissingEntity) throw new Error("KC761 spectrum card requires an entity");
+      delete next.entity;
+    } else if (typeof next.entity !== "string" || !next.entity.startsWith("sensor.")) {
+      throw new Error("KC761 spectrum card entity must be a sensor entity");
+    }
+    const refreshInterval = next.refresh_interval === undefined ? 0 : Number(next.refresh_interval);
     if (!Number.isInteger(refreshInterval) || (refreshInterval !== 0 && (refreshInterval < 5 || refreshInterval > 3600))) {
       throw new Error("refresh_interval must be 0 or an integer between 5 and 3600 seconds");
     }
-    this._config = { ...config, refresh_interval: refreshInterval };
+    next.refresh_interval = refreshInterval;
+    if (next.x_axis === undefined) next.x_axis = DEFAULT_CARD_CONFIG.x_axis;
+    if (!["energy", "channel"].includes(next.x_axis)) throw new Error("x_axis must be energy or channel");
+    if (next.y_axis === undefined) next.y_axis = DEFAULT_CARD_CONFIG.y_axis;
+    if (!["linear", "log"].includes(next.y_axis)) throw new Error("y_axis must be linear or log");
+    if (next.title === undefined) next.title = DEFAULT_CARD_CONFIG.title;
+    if (next.title !== undefined && typeof next.title !== "string") throw new Error("title must be text");
+    CARD_CONTENT_VISIBILITY_KEYS.forEach((key) => {
+      if (next[key] === undefined) next[key] = true;
+      if (typeof next[key] !== "boolean") throw new Error(`${key} must be true or false`);
+    });
+    return next;
+  }
+
+  static getConfigForm() {
+    return {
+      schema: [
+        { name: "entity", required: true, selector: { entity: { filter: { integration: "kc761", domain: "sensor" } } } },
+        { name: "title", default: DEFAULT_CARD_CONFIG.title, selector: { text: {} } },
+        {
+          name: "display",
+          title: "Display",
+          type: "expandable",
+          flatten: true,
+          schema: [
+            { name: "x_axis", default: DEFAULT_CARD_CONFIG.x_axis, selector: { select: { options: [{ value: "energy", label: "Energy (keV)" }, { value: "channel", label: "Channel address" }] } } },
+            { name: "y_axis", default: DEFAULT_CARD_CONFIG.y_axis, selector: { select: { options: [{ value: "linear", label: "Linear" }, { value: "log", label: "Logarithmic" }] } } },
+          ],
+        },
+        {
+          name: "refresh",
+          title: "Refresh",
+          type: "expandable",
+          flatten: true,
+          schema: [{ name: "refresh_interval", default: DEFAULT_CARD_CONFIG.refresh_interval, selector: { number: { min: 0, max: 3600, mode: "box", step: 1 } } }],
+        },
+        {
+          name: "content",
+          title: "Card content",
+          type: "expandable",
+          flatten: true,
+          schema: CARD_CONTENT_VISIBILITY_KEYS.map((name) => ({ name, default: true, selector: { boolean: {} } })),
+        },
+      ],
+      computeLabel: (schema) => ({
+        entity: "Spectrum entity",
+        title: "Title",
+        x_axis: "X axis",
+        y_axis: "Y axis",
+        refresh_interval: "Auto refresh interval (seconds)",
+        show_controls: "Show controls",
+        show_summary: "Show summary",
+        show_legend: "Show legend",
+        show_actions: "Show actions",
+        show_peak: "Show peak",
+      })[schema.name] || schema.name,
+      computeHelper: (schema) => schema.name === "refresh_interval" ? "0 disables automatic capture; enabled values are 5–3600 seconds." : undefined,
+      assertConfig: (config) => KC761SpectrumCard.validateConfig(config, { allowMissingEntity: true }),
+    };
+  }
+
+  setConfig(config) {
+    const previous = this._config;
+    const normalized = KC761SpectrumCard.validateConfig(config);
+    const entityChanged = previous?.entity !== normalized.entity;
+    const yAxisProvided = Object.prototype.hasOwnProperty.call(config || {}, "y_axis");
+    if (entityChanged) this._resetEntityRuntime();
+    this._config = normalized;
     this._refreshColors();
-    this._setYAxis(this._initialYAxis(config.y_axis));
+    this._setYAxis(this._initialYAxis(normalized.y_axis, yAxisProvided));
     this._renderBase();
+    this._applyVisibility();
+    if (!this._config.entity) this._setStatus("Select a KC761 spectrum entity");
     this._syncAutoRefresh();
     if (this._data) this._draw();
   }
@@ -70,6 +192,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._drawToken += 1;
     this._stopAutoRefresh();
     if (this._dragCleanup) this._dragCleanup();
+    this._dragCleanup = null;
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
     if (this._chart) this._chart.dispose();
@@ -81,15 +204,29 @@ class KC761SpectrumCard extends HTMLElement {
     this._hass = hass;
     if (!this._config) return;
     this._refreshColors();
+    if (!this._config.entity) {
+      this._entryId = null;
+      this._device = null;
+      this._stopAutoRefresh();
+      this._setStatus("Select a KC761 spectrum entity");
+      return;
+    }
     const current = hass.states[this._config.entity];
     if (!current) {
       this._setStatus(`Entity not found: ${this._config.entity}`, true);
       this._stopAutoRefresh();
       return;
     }
+    if (!KC761SpectrumCard.isSpectrumEntityState(current)) {
+      this._entryId = null;
+      this._device = null;
+      this._stopAutoRefresh();
+      this._setStatus("Selected entity is not a KC761 spectrum entity", true);
+      return;
+    }
     this._entryId = current.attributes.config_entry_id;
     const historySelect = this.shadowRoot.querySelector("#history");
-    if ((!historySelect || historySelect.value === "latest") && current !== previous) {
+    if ((!historySelect || historySelect.value === "latest") && (current !== previous || !this._data)) {
       this._data = this._fromEntity(current);
       this._updateSummary();
       this._draw();
@@ -99,19 +236,30 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 10;
+    const card = this.shadowRoot?.querySelector("ha-card");
+    const height = card?.getBoundingClientRect?.().height;
+    if (Number.isFinite(height) && height > 0) return Math.max(8, Math.ceil(height / 50));
+    // A conservative unrendered estimate avoids clipping this card's summary,
+    // chart and action rows before the browser has performed layout.
+    return 24;
+  }
+
+  getGridOptions() {
+    return { columns: "full", min_columns: 6 };
   }
 
   _renderBase() {
     if (this._rendered) {
       this.shadowRoot.querySelector("#title").textContent = this._config.title || "KC761 Spectrum";
       this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
+      this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
+      this._applyVisibility();
       return;
     }
     this._rendered = true;
     this.shadowRoot.innerHTML = `
       <style>
-        :host{display:block} ha-card{padding:16px;overflow:hidden}
+        :host{display:block} ha-card{padding:16px;overflow:hidden}[hidden]{display:none!important}
         h2{margin:0 0 12px;font-size:20px}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:7px 9px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
@@ -128,30 +276,32 @@ class KC761SpectrumCard extends HTMLElement {
       </style>
       <ha-card>
         <h2 id="title"></h2>
-        <div class="toolbar">
-          <label>Channel<select id="source"></select></label>
-          <label>X axis<select id="xaxis"><option value="energy">Energy (keV)</option><option value="channel">Channel</option></select></label>
-          <label>Y axis<select id="yaxis"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></label>
-          <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
+        <div id="controls">
+          <div class="toolbar">
+            <label>Channel<select id="source"></select></label>
+            <label>X axis<select id="xaxis"><option value="energy">Energy (keV)</option><option value="channel">Channel</option></select></label>
+            <label>Y axis<select id="yaxis"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></label>
+            <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
+          </div>
+          <div class="roi">
+            <label>ROI start channel<input id="roi-start" type="number" min="0" max="2047" value="0"></label>
+            <label>ROI end channel<input id="roi-end" type="number" min="0" max="2047" value="2047"></label>
+          </div>
+          <div class="help">Drag the two cyan ROI handles to select a range. Drag the pink handle to inspect a point.</div>
         </div>
         <div class="summary">
-          <div>Acquired<b id="acquired">—</b></div><div>Accumulation<b id="runtime">—</b></div>
-          <div>Total counts<b id="total">—</b></div><div>Peak<b id="peak">—</b></div><div>ROI counts<b id="roi-total">—</b></div>
+          <div data-summary="acquired">Acquired<b id="acquired">—</b></div><div data-summary="runtime">Accumulation<b id="runtime">—</b></div>
+          <div data-summary="total">Total counts<b id="total">—</b></div><div data-summary="peak">Peak<b id="peak">—</b></div><div data-summary="roi-total">ROI counts<b id="roi-total">—</b></div>
           <div>Data cursor<b id="cursor-value">—</b></div>
         </div>
-        <div class="roi">
-          <label>ROI start channel<input id="roi-start" type="number" min="0" max="2047" value="0"></label>
-          <label>ROI end channel<input id="roi-end" type="number" min="0" max="2047" value="2047"></label>
-        </div>
-        <div class="help">Drag the two cyan ROI handles to select a range. Drag the pink handle to inspect a point.</div>
         <div id="chart-wrap" class="chart-wrap">
           <div id="chart" role="img" aria-label="KC761 spectrum chart"></div>
           <div id="roi-start-cursor" class="chart-cursor" role="slider" aria-label="ROI start cursor" tabindex="0"><span class="handle"></span><span class="caption">ROI start</span></div>
           <div id="roi-end-cursor" class="chart-cursor" role="slider" aria-label="ROI end cursor" tabindex="0"><span class="handle"></span><span class="caption">ROI end</span></div>
           <div id="data-cursor" class="chart-cursor" role="slider" aria-label="Data cursor" tabindex="0"><span class="handle"></span><span class="caption">Data</span></div>
         </div>
-        <div class="legend"><span><i class="swatch curve"></i> Spectrum</span><span><i class="swatch roi"></i> ROI range</span><span><i class="swatch peak"></i> Auto peak</span><span><i class="swatch data"></i> Data cursor</span></div>
-        <div class="actions">
+        <div class="legend"><span><i class="swatch curve"></i> Spectrum</span><span><i class="swatch roi"></i> ROI range</span><span data-legend="peak"><i class="swatch peak"></i> Auto peak</span><span><i class="swatch data"></i> Data cursor</span></div>
+        <div id="actions" class="actions">
           <button id="capture">Refresh</button><button id="save">Save spectrum</button><button id="csv">Export CSV</button>
           <span class="spacer"></span><button class="danger" data-clear="spectrum">Clear spectrum</button>
           <button class="danger" data-clear="dose_curve">Clear dose curve</button><button class="danger" data-clear="cumulative_dose">Clear cumulative dose</button>
@@ -160,7 +310,9 @@ class KC761SpectrumCard extends HTMLElement {
       </ha-card>`;
     this.shadowRoot.querySelector("#title").textContent = this._config.title || "KC761 Spectrum";
     this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
+    this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
     this.shadowRoot.querySelector("#xaxis").addEventListener("change", () => this._draw());
+    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture());
     this.shadowRoot.querySelector("#yaxis").addEventListener("change", (event) => {
       this._setYAxis(event.target.value);
       this._persistYAxis();
@@ -176,21 +328,98 @@ class KC761SpectrumCard extends HTMLElement {
     this._attachCursor("roiStart", "#roi-start-cursor");
     this._attachCursor("roiEnd", "#roi-end-cursor");
     this._attachCursor("data", "#data-cursor");
+    this._applyVisibility();
   }
 
-  _initialYAxis(value) {
+  _applyVisibility() {
+    if (!this._rendered) return;
+    const visibility = {
+      show_controls: "#controls",
+      show_summary: ".summary",
+      show_legend: ".legend",
+      show_actions: "#actions",
+    };
+    Object.entries(visibility).forEach(([key, selector]) => {
+      const node = this.shadowRoot.querySelector(selector);
+      if (node) node.hidden = this._config?.[key] === false;
+    });
+    const peakVisible = this._config?.show_peak !== false;
+    const peakSummary = this.shadowRoot.querySelector('[data-summary="peak"]');
+    const peakLegend = this.shadowRoot.querySelector('[data-legend="peak"]');
+    if (peakSummary) peakSummary.hidden = !peakVisible;
+    if (peakLegend) peakLegend.hidden = !peakVisible;
+  }
+
+  _resetEntityRuntime() {
+    this._entityGeneration = (this._entityGeneration || 0) + 1;
+    this._drawToken += 1;
+    this._stopAutoRefresh();
+    if (this._dragCleanup) this._dragCleanup();
+    this._dragCleanup = null;
+    this._device = null;
+    this._entryId = null;
+    this._data = null;
+    this._history = [];
+    this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
+    if (this._resizeObserver) this._resizeObserver.disconnect();
+    this._resizeObserver = null;
+    if (this._chart) this._chart.dispose();
+    this._chart = null;
+    if (!this._rendered) return;
+    const source = this.shadowRoot.querySelector("#source");
+    const history = this.shadowRoot.querySelector("#history");
+    if (source) source.replaceChildren();
+    if (history) {
+      history.replaceChildren(new Option("Latest", "latest"));
+      history.value = "latest";
+    }
+    const start = this.shadowRoot.querySelector("#roi-start");
+    const end = this.shadowRoot.querySelector("#roi-end");
+    if (start) start.value = "0";
+    if (end) end.value = String(MAX_CHANNEL);
+  }
+
+  _initialYAxis(value, explicitlyConfigured = false) {
+    const configuredValue = value === "log" ? "log" : "linear";
+    const keys = this._storageKeys();
+    if (!keys) return configuredValue;
+    const read = (key) => {
+      try {
+        const candidate = window.localStorage.getItem(key);
+        return candidate === "linear" || candidate === "log" ? candidate : null;
+      } catch (_error) {
+        return null;
+      }
+    };
+    const storedConfigured = read(keys.configured);
+    const storedSelected = read(keys.selected) || read(keys.legacy);
+    // The configured baseline identifies a deliberate editor change.  A new
+    // baseline wins over an older runtime preference; once the baseline is
+    // unchanged, the selected preference survives HA/Lovelace refreshes.
+    if (explicitlyConfigured && storedConfigured !== configuredValue) {
+      this._writeYAxis(keys.configured, configuredValue);
+      this._writeYAxis(keys.selected, configuredValue);
+      this._writeYAxis(keys.legacy, configuredValue);
+      return configuredValue;
+    }
+    return storedSelected || configuredValue;
+  }
+
+  _storageKeys(entity = this._config?.entity) {
+    if (!entity) return null;
+    return {
+      configured: `kc761-spectrum:y-axis:configured:${entity}`,
+      selected: `kc761-spectrum:y-axis:selected:${entity}`,
+      legacy: `kc761-spectrum:y-axis:${entity}`,
+    };
+  }
+
+  _writeYAxis(key, value) {
     try {
-      const stored = window.localStorage.getItem(this._storageKey());
-      if (stored === "linear" || stored === "log") return stored;
+      window.localStorage.setItem(key, value);
     } catch (_error) {
       // Storage can be unavailable in private browsing or a locked-down HA iframe.
     }
-    if (value === "linear" || value === "log") return value;
-    return "linear";
-  }
-
-  _storageKey() {
-    return `kc761-spectrum:y-axis:${this._config?.entity || "unknown"}`;
   }
 
   _setYAxis(value) {
@@ -198,11 +427,10 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _persistYAxis() {
-    try {
-      window.localStorage.setItem(this._storageKey(), this._yAxis);
-    } catch (_error) {
-      // A failed preference write must never break the chart.
-    }
+    const keys = this._storageKeys();
+    if (!keys) return;
+    this._writeYAxis(keys.selected, this._yAxis);
+    this._writeYAxis(keys.legacy, this._yAxis);
   }
 
   _attachCursor(kind, selector) {
@@ -304,8 +532,12 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _loadInitial() {
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     try {
-      this._device = await this._call({ type: "kc761/info", entry_id: this._entryId });
+      const device = await this._call({ type: "kc761/info", entry_id: entryId });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      this._device = device;
       const source = this.shadowRoot.querySelector("#source");
       source.replaceChildren();
       ["Gamma", "Neutron", "PIN"].forEach((name, index) => {
@@ -316,8 +548,8 @@ class KC761SpectrumCard extends HTMLElement {
         source.append(option);
       });
       if (this._data) source.value = String(this._data.source);
-      source.addEventListener("change", () => this._capture());
-      await this._loadHistory();
+      await this._loadHistory(generation, entryId);
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._setStatus("");
       this._syncAutoRefresh();
     } catch (error) {
@@ -325,8 +557,10 @@ class KC761SpectrumCard extends HTMLElement {
     }
   }
 
-  async _loadHistory() {
-    this._history = await this._call({ type: "kc761/spectrum/list", entry_id: this._entryId });
+  async _loadHistory(generation = this._entityGeneration, entryId = this._entryId) {
+    const history = await this._call({ type: "kc761/spectrum/list", entry_id: entryId });
+    if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+    this._history = history;
     const select = this.shadowRoot.querySelector("#history");
     const selected = select.value;
     select.replaceChildren(new Option("Latest", "latest"));
@@ -339,12 +573,17 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _selectHistory(snapshotId) {
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     if (snapshotId === "latest") {
       const state = this._hass.states[this._config.entity];
       this._data = this._fromEntity(state);
     } else {
-      this._data = await this._call({ type: "kc761/spectrum/get", entry_id: this._entryId, snapshot_id: snapshotId });
+      const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      this._data = data;
     }
+    if (generation !== this._entityGeneration || entryId !== this._entryId) return;
     this.shadowRoot.querySelector("#source").value = String(this._data.source);
     this._updateSummary();
     this._draw();
@@ -353,8 +592,12 @@ class KC761SpectrumCard extends HTMLElement {
 
   async _capture({ silent = false } = {}) {
     if (this._busyState || !this._entryId) return;
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     await this._busy(async () => {
-      this._data = await this._call({ type: "kc761/spectrum/capture", entry_id: this._entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
+      const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      this._data = data;
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -362,9 +605,12 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _save() {
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     await this._busy(async () => {
-      await this._call({ type: "kc761/spectrum/save", entry_id: this._entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
-      await this._loadHistory();
+      await this._call({ type: "kc761/spectrum/save", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      await this._loadHistory(generation, entryId);
     }, "Spectrum saved");
   }
 
@@ -389,9 +635,14 @@ class KC761SpectrumCard extends HTMLElement {
     const label = { spectrum: "spectrum and accumulation time", dose_curve: "dose-time curve", cumulative_dose: "cumulative dose and runtime" }[kind];
     const identity = `${this._device.model} / ${this._device.serial_number}`;
     if (!window.confirm(`Device: ${identity}\nChannel: ${channel}\n\nClear ${label}? This cannot be undone.`)) return;
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     await this._busy(async () => {
-      await this._call({ type: "kc761/clear", entry_id: this._entryId, source, kind });
-      this._data = await this._call({ type: "kc761/spectrum/capture", entry_id: this._entryId, source });
+      await this._call({ type: "kc761/clear", entry_id: entryId, source, kind });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source });
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      this._data = data;
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -558,7 +809,7 @@ class KC761SpectrumCard extends HTMLElement {
           { xAxis: xFor(roiEndPoint), lineStyle: { color: colors.roiEnd, type: "dashed", width: 1 } },
           { xAxis: xFor(cursorPoint), lineStyle: { color: colors.dataCursor, type: "solid", width: 1 } },
         ] },
-        markPoint: { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10 }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
+        markPoint: this._config?.show_peak === false ? { data: [] } : { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10 }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
       }],
     };
   }
@@ -710,9 +961,17 @@ function registerKC761SpectrumCard() {
   if (!hostWindow) return;
   const cards = Array.isArray(hostWindow.customCards) ? hostWindow.customCards : [];
   if (hostWindow.customCards !== cards) hostWindow.customCards = cards;
-  if (!cards.some((card) => card.type === "kc761-spectrum-card")) {
-    cards.push({ type: "kc761-spectrum-card", name: "KC761 Spectrum", description: "Current and saved KC761 spectra" });
-  }
+  const metadata = {
+    type: "kc761-spectrum-card",
+    name: "KC761 Spectrum",
+    description: "Current and saved KC761 spectra",
+    documentationURL: CARD_DOCUMENTATION_URL,
+    preview: false,
+    getEntitySuggestion: (hass, entityId) => KC761SpectrumCard.getEntitySuggestion(hass, entityId),
+  };
+  const existing = cards.findIndex((card) => card.type === "kc761-spectrum-card");
+  if (existing < 0) cards.push(metadata);
+  else cards[existing] = { ...cards[existing], ...metadata };
 }
 
 registerKC761SpectrumCard();

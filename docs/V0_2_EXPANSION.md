@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.12`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距修复、summary 稳定高度和模块幂等注册修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.13`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、summary 稳定高度、模块幂等注册和原生 Lovelace 编辑器候选已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -112,11 +112,28 @@ Device Registry 使用：
 ```yaml
 type: custom:kc761-spectrum-card
 entity: sensor.<kc761_spectrum_entity>
+title: KC761 Spectrum
+x_axis: energy
 refresh_interval: 0
 y_axis: linear
+show_controls: true
+show_summary: true
+show_legend: true
+show_actions: true
+show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.12` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.13` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+
+### 6.0 原生 Lovelace 编辑器与可见性边界
+
+从 alpha.13 起，卡片提供 `getConfigForm()`：实体字段使用 Home Assistant 原生 entity selector，并按 `integration: kc761`、`domain: sensor` 过滤；标题、X/Y 轴、刷新间隔和内容开关使用内置 text/select/number/boolean 控件。刷新间隔只接受 `0` 或 `5`–`3600` 的整数；缺省字段按兼容默认值补齐，未知字段不会被 `setConfig()` 删除。`getEntitySuggestion()` 只对带 `config_entry_id`/`codec_profile` 身份且包含 0 或 2048 点结构化 `points` 的 KC761 谱图状态提出建议；卡片选择器首次打开时不再注入虚构的 `sensor.kc761_spectrum`。
+
+五个内容开关的作用范围如下：`show_controls` 控制通道、坐标、历史和 ROI 输入；`show_summary` 控制摘要网格；`show_legend` 控制图例；`show_actions` 控制刷新、保存、CSV 和清空按钮；`show_peak` 同时控制峰值摘要、峰值图例和 ECharts `markPoint`。这些开关只改变 DOM/ECharts 呈现，不改变数据、历史或协议请求。
+
+卡片不自行实现整卡条件编辑器。Home Assistant `hui-card-element-editor` 的标准编辑壳在支持的 Sections/仪表盘上下文提供 `config`、`visibility`、`layout` 三页；用户在“可见性”页设置的整卡条件与卡片内部 `show_*` 内容开关是两层不同语义。`getCardSize()` 在已渲染时按实际 `ha-card` 高度换算安全 Masonry 行数，未渲染时使用保守估算；`getGridOptions()` 仅声明 Sections 使用满宽和至少 6 列，不固定行数，也不暴露任意像素高度。
+
+Y 轴有两个持久化层级：YAML/编辑器显式改变 `y_axis` 时更新该实体的 configured baseline 并覆盖旧偏好；用户在卡片运行时切换线性/对数时只更新 selected preference。页面刷新且 configured baseline 未改变时恢复 selected preference；每个实体使用独立 localStorage 键，存储异常安全降级为配置值。切换 `entity` 会清理旧设备、entry、历史、数据、ECharts 实例和自动刷新计时器，迟到的旧 WebSocket 结果不会回写新实体。
 
 卡片提供：
 
@@ -245,6 +262,15 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - alpha.12 已部署到持久隔离测试栈；候选归档 SHA-256 为 `419feb1d4142bc20f7cd0b90baf5d8634f0efe6151d92e25c8ccd2ab40f57635`，远端 release/live 的 manifest、卡片和 ECharts SHA-256 分别一致为 `45a41468409a72206f2190c53b89535e769386a4f6b5ccdd54ca5656c7016048`、`d9b240204582c2f7b8daae53a8315c937334e57bcf615160421409286619099c`、`28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。HA/模拟器保持 running、restart count 为 0，两个静态资源 GET 为 `200 text/javascript`，入口仅含 alpha.12 URL；只读 API 显示 real `loaded`、42/42 active、0 unavailable，simulator `loaded`、30/30 active、0 unavailable，两个谱图均 2048 点。
 - alpha.12 部署后模拟器累计命令为 `0x52/0x53/0x54/0x55 = 22/161243/13199/20`，禁止写命令 `0x62/0x63/0x64/0x66 = 12/1/0/3`，较部署前只增加只读请求，`FORBIDDEN_LOGS=0` 且活动连接为 0；这不是对真实设备线速流量的替代证据。
 - 主任务在 HA fully ready 后完成浏览器复核：卡片真实渲染且 DOM 存在 `kc761-spectrum-card`；六个 summary cell 均为 `80px`，六个 value 区均为 `39px`，每个动态值的 `title`/`aria-label` 与完整文本一致。Data cursor 从 `CH 149 · 96.71 keV · 2147` 更新为 `CH 154 · 103.68 keV · 2171` 后，卡片高度始终为 `1217.484375px`（`delta=0`），浏览器 error/warning 日志为空；该项确认 alpha.12 的注册与 summary 高度修复已生效。
+
+### 8.9 `0.2.0-alpha.13` 原生编辑器与内容可见性候选
+
+- 卡片版本、集成 `VERSION`、manifest 和 HA extra-JS 查询参数统一提升为 alpha.13。`getConfigForm()` 使用 HA 内置表单 schema 提供 entity/title/x_axis/y_axis/refresh_interval 及五个 `show_*` 内容开关；`assertConfig` 与运行时 `validateConfig` 共用刷新、轴模式和布尔值约束。
+- `getStubConfig()` 不再产生虚构的 `sensor.kc761_spectrum`；`getEntitySuggestion()` 只对带 KC761 身份属性且为 0/2048 点结构的谱图状态推荐配置。缺实体卡实例显示可选实体提示，不在编辑器打开阶段抛出异常。
+- `show_controls/show_summary/show_legend/show_actions/show_peak` 只改变内容 DOM 或 `markPoint` 呈现；峰值隐藏不会修改数据或发起协议请求。整卡 visibility/layout 继续交给 HA 标准 `hui-card-element-editor`，卡片新增 `getGridOptions()` 只声明 Sections 的满宽/最少 6 列约束，并由 `getCardSize()` 根据实际渲染高度估算 Masonry 行数。
+- Y 轴 localStorage 改为 configured baseline + selected preference：显式编辑器配置覆盖旧偏好，运行时选择在 baseline 不变时跨刷新保留；entity 切换清理旧连接关联、历史、数据、计时器和 ECharts 实例，并用 generation 丢弃迟到结果。未知 YAML 字段在配置归一化时保留。
+- 当前 alpha.13 已完成本地门禁：项目虚拟环境 `pytest` 为 `47 passed, 3 skipped`（HA 运行时依赖、PATH Node 两项按环境跳过）；绑定 Node 24.19.0 的 `--check` 与 `tests/frontend_card_contract.mjs` 均通过，Python `compileall`、JSON 解析和 `git diff --check` 通过。候选已部署到测试 HA；浏览器复核确认当前 `HUI-SECTIONS-VIEW` 页面中的卡片真实渲染，DOM 存在 `kc761-spectrum-card`，显示 2048 点谱图控件，未出现 `Custom element not found`。这只证明卡片运行时加载，不替代标准编辑器三页或其它浏览器视觉门禁。
+- 浏览器自动化能够进入 `?edit=1` 并识别卡片菜单，但在继续打开卡片编辑器时多次超时；因此 Config 页字段、HA 原生整卡 Visibility 条件页、Sections 上下文 Layout 页目前均保留为人工门禁，不能把页面已渲染或静态 `getConfigForm()` 契约误记为三页已通过。预期的编辑器边界仍是：Config 页包含 entity/title/x_axis/y_axis/refresh_interval 与五个 `show_*` 内容开关；Visibility/Layout 由 HA 标准 `hui-card-element-editor` 提供，卡片不复制这两页。
 
 本地合并后继续测试的剩余门禁：
 

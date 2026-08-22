@@ -45,7 +45,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.12")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.13")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -119,6 +119,25 @@ class IntegrationStaticTests(unittest.TestCase):
             "wrap.clientLeft",
             "grid-auto-rows:80px",
             "height:80px",
+            "getConfigForm",
+            "getEntitySuggestion",
+            "getGridOptions",
+            'columns: "full"',
+            "getBoundingClientRect",
+            "Math.ceil(height / 50)",
+            "validateConfig",
+            "show_controls",
+            "show_summary",
+            "show_legend",
+            "show_actions",
+            "show_peak",
+            "documentationURL",
+            "preview: false",
+            "CARD_DOCUMENTATION_URL",
+            "_applyVisibility",
+            "_resetEntityRuntime",
+            "y-axis:configured",
+            "y-axis:selected",
             "_setSummaryValue",
             "aria-label",
             "title = text",
@@ -130,8 +149,11 @@ class IntegrationStaticTests(unittest.TestCase):
             self.assertIn(feature, frontend)
         for summary_id in ("acquired", "runtime", "total", "peak", "roi-total", "cursor-value"):
             self.assertIn(f'this._setSummaryValue("#{summary_id}"', frontend)
+        self.assertNotIn('entity: "sensor.kc761_spectrum"', frontend)
         self.assertNotIn("GRID.left", frontend)
         self.assertNotIn("GRID.right", frontend)
+        self.assertNotIn("min_rows", frontend)
+        self.assertNotIn("rows: 8", frontend)
         self.assertIn('renderer: "svg"', frontend)
         vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
         self.assertEqual(
