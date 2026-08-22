@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.9";
+const CARD_VERSION = "0.2.0-alpha.12";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 // First-paint fallback only.  After ECharts lays out the axes, the overlay is
@@ -122,7 +122,7 @@ class KC761SpectrumCard extends HTMLElement {
         .chart-cursor .caption{position:absolute;top:-25px;left:5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:currentColor;text-shadow:0 1px var(--card-background-color);pointer-events:none}
         #roi-start-cursor{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}#roi-end-cursor{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd})}#data-cursor{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}
         .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
-        .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:12px 0;font-size:13px}.summary div{padding:8px;background:var(--secondary-background-color);border-radius:6px}.summary b{display:block;font-size:15px;margin-top:3px}
+        .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));grid-auto-rows:80px;gap:8px;margin:12px 0;font-size:13px}.summary div{box-sizing:border-box;min-width:0;height:80px;padding:8px;background:var(--secondary-background-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:-webkit-box;min-width:0;height:2.6em;max-height:2.6em;overflow:hidden;text-overflow:ellipsis;overflow-wrap:anywhere;word-break:break-word;-webkit-box-orient:vertical;-webkit-line-clamp:2;font-size:15px;line-height:1.3;margin-top:3px}
         .status{min-height:20px;margin-top:8px;color:var(--secondary-text-color)}.status.error{color:var(--error-color)}.actions{margin-top:10px}.spacer{flex:1}
         .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}
       </style>
@@ -459,6 +459,18 @@ class KC761SpectrumCard extends HTMLElement {
     return [start, end];
   }
 
+  _setSummaryValue(selector, value) {
+    const element = this.shadowRoot.querySelector(selector);
+    if (!element) return;
+    const text = String(value);
+    element.textContent = text;
+    // The visible value is deliberately limited to two lines so one long
+    // cursor/peak value cannot resize the whole card.  Keep the full string
+    // available to hover and assistive technology.
+    element.title = text;
+    element.setAttribute("aria-label", text);
+  }
+
   _updateSummary() {
     const points = this._points();
     const data = this._data;
@@ -470,12 +482,12 @@ class KC761SpectrumCard extends HTMLElement {
       if (point[0] >= start && point[0] <= end) roiTotal += point[2];
     });
     const cursorPoint = this._pointForChannel(this._cursor.data) || points[0];
-    this.shadowRoot.querySelector("#acquired").textContent = new Date(data.acquired_at).toLocaleString();
-    this.shadowRoot.querySelector("#runtime").textContent = data.accumulation_seconds == null ? "Unknown" : `${data.accumulation_seconds} s`;
-    this.shadowRoot.querySelector("#total").textContent = Number(data.total_counts).toLocaleString();
-    this.shadowRoot.querySelector("#peak").textContent = `CH ${peak[0]} · ${peak[1].toFixed(2)} keV · ${peak[2]}`;
-    this.shadowRoot.querySelector("#roi-total").textContent = roiTotal.toLocaleString();
-    this.shadowRoot.querySelector("#cursor-value").textContent = `CH ${cursorPoint[0]} · ${cursorPoint[1].toFixed(2)} keV · ${cursorPoint[2]}`;
+    this._setSummaryValue("#acquired", new Date(data.acquired_at).toLocaleString());
+    this._setSummaryValue("#runtime", data.accumulation_seconds == null ? "Unknown" : `${data.accumulation_seconds} s`);
+    this._setSummaryValue("#total", Number(data.total_counts).toLocaleString());
+    this._setSummaryValue("#peak", `CH ${peak[0]} · ${peak[1].toFixed(2)} keV · ${peak[2]}`);
+    this._setSummaryValue("#roi-total", roiTotal.toLocaleString());
+    this._setSummaryValue("#cursor-value", `CH ${cursorPoint[0]} · ${cursorPoint[1].toFixed(2)} keV · ${cursorPoint[2]}`);
   }
 
   _option() {
@@ -685,10 +697,22 @@ class KC761SpectrumCard extends HTMLElement {
   }
 }
 
-if (!customElements.get("kc761-spectrum-card")) {
-  customElements.define("kc761-spectrum-card", KC761SpectrumCard);
+// Keep registration in one idempotent function.  HA can import the module more
+// than once during a frontend rebuild, and using globalThis avoids depending
+// on a module's lexical global bindings while the app is bootstrapping.
+function registerKC761SpectrumCard() {
+  const registry = globalThis.customElements;
+  if (registry && !registry.get("kc761-spectrum-card")) {
+    registry.define("kc761-spectrum-card", KC761SpectrumCard);
+  }
+
+  const hostWindow = globalThis.window;
+  if (!hostWindow) return;
+  const cards = Array.isArray(hostWindow.customCards) ? hostWindow.customCards : [];
+  if (hostWindow.customCards !== cards) hostWindow.customCards = cards;
+  if (!cards.some((card) => card.type === "kc761-spectrum-card")) {
+    cards.push({ type: "kc761-spectrum-card", name: "KC761 Spectrum", description: "Current and saved KC761 spectra" });
+  }
 }
-window.customCards = window.customCards || [];
-if (!window.customCards.some((card) => card.type === "kc761-spectrum-card")) {
-  window.customCards.push({ type: "kc761-spectrum-card", name: "KC761 Spectrum", description: "Current and saved KC761 spectra" });
-}
+
+registerKC761SpectrumCard();

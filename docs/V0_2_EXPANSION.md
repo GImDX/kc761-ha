@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.9`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升及左下角轴标签间距修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.12`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距修复、summary 稳定高度和模块幂等注册修复已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -116,7 +116,7 @@ refresh_interval: 0
 y_axis: linear
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.9` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会检查已定义的 Custom Element 和选择器条目，避免重复注册报错；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.12` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 卡片提供：
 
@@ -227,6 +227,24 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - alpha.9 候选包 SHA-256 为 `981b3976b26015e1e68324d20ff7cec3071c83f208d66aae77d98fbf30969e2d`，卡片文件 SHA-256 为 `7daf12e26c7838cbb4d0ba2cf6ff741ab79834c1da96d3dbc0805ebb8c90a9a2`，manifest 文件 SHA-256 为 `7ae34e5387a74587717fccaa5b3966f05d87ade8eb2d54dcac364cc30033d9c8`，ECharts 文件 SHA-256 仍为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`；测试栈入口仅包含 alpha.9 URL，卡片/ECharts/HA 根页面均 HTTP 200，两个条目 loaded、谱图均 2048 点且无 unavailable。
 - alpha.9 浏览器验收在 alpha.9 URL reload 后确认 `cardCount=1`、`SVG=true`、`Canvas=false`、所有 SVG text bbox `overlaps=[]`；ROI start/end delta 分别为 `-0.010894775390625px` 和 `-0.0026397705078125px`，vertical top/bottom 分别为 `0px` 和 `0.007843017578125px`。主题色为 curve `rgb(66,105,208)`、ROI `rgb(244,189,74)`、peak `rgb(108,197,176)`、data `rgb(164,99,242)`；log 模式跨 HA restart/reload 持久。`ArrowRight` 从 0 到 1 的实时更新已在 alpha.8 验证，alpha.9 映射代码未变。
 - alpha.9 重启后最近 15 分钟 HA/模拟器日志未发现 KC761/frontend/traceback/pending-task 异常；模拟器写命令累计值仍为 `0x62/0x63/0x64/0x66 = 12/1/0/3`，本轮部署与只读检查未增加写命令，禁止命令日志为 0。CUA 自动化无法稳定定位指针拖动目标，实际 pointer-drag UX 仍保留为人工检查项；不将其误记为自动化通过。
+
+### 8.7 `0.2.0-alpha.11` Summary 稳定高度修订
+
+- 六个 summary 单元统一使用固定 `80px` grid row/cell 和完整两行 value 区；按当前 label、margin、padding 和两行 line-height 需求预留足够空间，短值、长值、峰值和 Data cursor 文本不会改变卡片整体高度，也不依赖固定整个 `ha-card` 高度。
+- 可见值最多显示两行并安全换行/省略；每个动态值均通过统一 `_setSummaryValue` 设置 `title` 与 `aria-label`，完整文本仍可通过悬停和辅助技术访问，适配窄卡及暗/亮主题。
+- alpha.11 仅改变 summary 布局/可访问性和缓存版本，不改变协议、谱图坐标、游标、ROI、颜色或自动刷新行为；浏览器高度视觉验收由主任务执行，自动化尚未宣称通过。
+- alpha.10 的初始 `72px` 版本在代码审查中因两行值区理论需求约 `78.8px` 被淘汰，未作为最终候选；alpha.11 将 grid row/cell 同步提升为 `80px` 后重新打包部署。
+- alpha.11 候选包 SHA-256 为 `3d16b4b20ba192c807059c95023461dfb64b3018e67e9f9758c4c74c9545db9a`，卡片文件 SHA-256 为 `69fbfcc025f9b2b4c68a45220834b41757549f2a07784d332ecdd4a4d654cdb5`，manifest 文件 SHA-256 为 `2edca2af540c2e4a767aed5bcc1083acb27201de2d6ee56715fcc319d172d8ad`，ECharts 文件 SHA-256 仍为 `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`；测试栈入口仅包含 alpha.11 URL，卡片/ECharts/HA 根页面均 HTTP 200，两个条目 loaded、谱图均为 2048 点且无 unavailable，最近 15 分钟无相关日志异常。
+- alpha.11 的模拟器命令审计中 `0x62/0x63/0x64/0x66` 累计值仍为 `12/1/0/3`，本轮部署与只读检查未增加写命令，禁止命令日志为 0；这不是对真实设备线速流量的替代证据。
+
+### 8.8 `0.2.0-alpha.12` 卡片模块注册与缓存修订
+
+- alpha.11 用户页面显示“配置错误”且卡片未渲染，入口 HTML 已包含其额外 JavaScript URL；本地 Node 最小 DOM 桩未复现模块语法或顶层注册异常。结合 alpha.12 使用新 URL 后真实卡片已渲染的结果，“启动早期加载失败后被相同 URL 缓存”是目前最符合现象的候选根因，但尚未被单独证明，也不宣称为协议或 ECharts 逻辑错误。
+- alpha.12 提升集成/卡片版本查询参数以强制重新请求模块，并将 Custom Element 与选择器登记集中为 `registerKC761SpectrumCard()`：使用 `globalThis.customElements`、可重复导入保护和数组化 `window.customCards`，用于降低 HA 前端启动期间全局绑定/重复导入的风险；不能据此单独证明已解决某个特定启动时序问题。
+- 本地门禁使用无绝对路径的 `node --check custom_components/kc761/frontend/kc761-spectrum-card.js`；本机绑定 Node 24.19.0 执行通过。静态契约以标准库 `unittest` 实跑为 `6` 项、`5` 通过、Node PATH 项 `1` 跳过（PATH 未暴露绑定 Node；绝对路径不写入测试），并另以绑定 Node 完成语法门禁和最小注册/重复导入桩测试。
+- alpha.12 已部署到持久隔离测试栈；候选归档 SHA-256 为 `419feb1d4142bc20f7cd0b90baf5d8634f0efe6151d92e25c8ccd2ab40f57635`，远端 release/live 的 manifest、卡片和 ECharts SHA-256 分别一致为 `45a41468409a72206f2190c53b89535e769386a4f6b5ccdd54ca5656c7016048`、`d9b240204582c2f7b8daae53a8315c937334e57bcf615160421409286619099c`、`28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。HA/模拟器保持 running、restart count 为 0，两个静态资源 GET 为 `200 text/javascript`，入口仅含 alpha.12 URL；只读 API 显示 real `loaded`、42/42 active、0 unavailable，simulator `loaded`、30/30 active、0 unavailable，两个谱图均 2048 点。
+- alpha.12 部署后模拟器累计命令为 `0x52/0x53/0x54/0x55 = 22/161243/13199/20`，禁止写命令 `0x62/0x63/0x64/0x66 = 12/1/0/3`，较部署前只增加只读请求，`FORBIDDEN_LOGS=0` 且活动连接为 0；这不是对真实设备线速流量的替代证据。
+- 主任务在 HA fully ready 后完成浏览器复核：卡片真实渲染且 DOM 存在 `kc761-spectrum-card`；六个 summary cell 均为 `80px`，六个 value 区均为 `39px`，每个动态值的 `title`/`aria-label` 与完整文本一致。Data cursor 从 `CH 149 · 96.71 keV · 2147` 更新为 `CH 154 · 103.68 keV · 2171` 后，卡片高度始终为 `1217.484375px`（`delta=0`），浏览器 error/warning 日志为空；该项确认 alpha.12 的注册与 summary 高度修复已生效。
 
 本地合并后继续测试的剩余门禁：
 

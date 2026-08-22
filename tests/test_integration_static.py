@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -43,7 +45,7 @@ def json_shape(value):
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "0.2.0-alpha.9")
+        self.assertEqual(manifest["version"], "0.2.0-alpha.12")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -115,10 +117,19 @@ class IntegrationStaticTests(unittest.TestCase):
             "formatter: (value) =>",
             "chartElement.offsetLeft",
             "wrap.clientLeft",
-            'customElements.get("kc761-spectrum-card")',
-            'window.customCards.some((card) => card.type === "kc761-spectrum-card")',
+            "grid-auto-rows:80px",
+            "height:80px",
+            "_setSummaryValue",
+            "aria-label",
+            "title = text",
+            "-webkit-line-clamp:2",
+            "registerKC761SpectrumCard",
+            'globalThis.customElements',
+            'Array.isArray(hostWindow.customCards)',
         ):
             self.assertIn(feature, frontend)
+        for summary_id in ("acquired", "runtime", "total", "peak", "roi-total", "cursor-value"):
+            self.assertIn(f'this._setSummaryValue("#{summary_id}"', frontend)
         self.assertNotIn("GRID.left", frontend)
         self.assertNotIn("GRID.right", frontend)
         self.assertIn('renderer: "svg"', frontend)
@@ -162,3 +173,17 @@ class IntegrationStaticTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for value in forbidden:
                 self.assertNotIn(value, text, f"{value!r} leaked in {path.name}")
+
+    def test_frontend_javascript_syntax_when_node_is_available(self) -> None:
+        """Use the host Node executable as an optional, path-independent gate."""
+        node = shutil.which("node") or shutil.which("node.exe")
+        if node is None:
+            self.skipTest("Node.js is not available on PATH; run `node --check` in the release gate")
+        card = ROOT / "custom_components" / "kc761" / "frontend" / "kc761-spectrum-card.js"
+        result = subprocess.run(
+            [node, "--check", str(card)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)

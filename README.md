@@ -2,9 +2,11 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.9` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.9 保留 alpha.8 的缓存失效与谱图坐标修复，并将 Energy X 轴标签 margin 调整为 12，消除左下角 Y 轴最小刻度与 X 轴最小标签的 bbox 边缘重叠。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
+当前开发版本为 `0.2.0-alpha.12` 控制与谱图扩展：在已完成实机只读取证的 `0.1.0-rc.1` 基线上，增加 2048 道结构化谱图、A6 能量刻度、独立历史存档、CSV、自动注册的 ECharts SVG 谱图卡、设备信息实体、状态控制、设备校时和人工触发清空。alpha.12 保留 alpha.9 的缓存失效、谱图坐标和轴标签修复，并将六个 summary 单元统一为固定 80px grid/cell 与完整两行 value 区：短值与长值不会改变卡片高度，完整内容仍通过 title/aria-label 可访问；同时将卡片 Custom Element 与选择器注册集中为幂等的 `registerKC761SpectrumCard()`，用于降低 HA 启动期间重复导入或全局注册时序风险。游标使用 ECharts 实际 grid 的 `convertToPixel`/`convertFromPixel` 双向映射、实际 containing block 偏移和 resize 保持对齐；Y 轴标题水平放置、Energy 端点标签压缩，避免视觉重叠。alpha.6 的 reconfigure 连接所有权修复仍然保留：旧连接先关闭，候选失败时关闭候选并回滚旧端点。集成仍未向真实 KC761 发送 `0x62/0x63/0x66`，旧 RC 的实机与长期稳定性证据也不能自动继承为当前扩展的写入安全结论。详细范围和门禁见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)，历史证据见 [RC 验证记录](docs/RC_TEST_RESULTS.md)。
 
 ## 0.2 当前范围
+
+alpha.12 浏览器复核已确认谱图卡真实渲染并存在 `kc761-spectrum-card` DOM；六个 summary cell 均为 `80px`，六个 value 区均为 `39px`，动态值的 `title`/`aria-label` 与完整文本一致。Data cursor 从 `CH 149 · 96.71 keV · 2147` 更新到 `CH 154 · 103.68 keV · 2171` 后，卡片高度始终为 `1217.484375px`（`delta=0`），浏览器 error/warning 日志为空。该证据只覆盖 alpha.12 summary/注册修复，不替代其它谱图交互和真实设备门禁。
 
 - 集成域名规划为 `kc761`。
 - 首版传输仅支持局域网 TCP；设备作为 TCP 服务端，Home Assistant 主动连接。
