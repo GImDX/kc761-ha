@@ -30,6 +30,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     client = coordinator.client
     parser = getattr(client, "parser", None)
     last_frame = getattr(client, "last_frame", None)
+    transport_type = getattr(coordinator, "transport_type", "tcp")
+    if transport_type not in {"tcp", "ble"}:
+        transport_type = "tcp"
     compatibility_warnings: list[str] = []
     if info is not None and info.device_model not in MODEL_NAMES:
         compatibility_warnings.append(f"unknown_model:{info.device_model}")
@@ -66,6 +69,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "compatibility_warnings": compatibility_warnings,
         },
         "connection": {
+            "transport": transport_type,
             "connected": client.connected,
             "last_success": coordinator.last_success.isoformat() if coordinator.last_success else None,
             "consecutive_failures": coordinator.consecutive_failures,

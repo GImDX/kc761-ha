@@ -3,22 +3,39 @@
     "step": {
       "user": {
         "title": "Add KC761x radiation meter",
-        "description": "Connect to the KC761x TCP service on your local network.",
-        "data": {"host": "Host or IP address", "port": "TCP port"}
+        "description": "Connect to KC761x over local TCP or an explicit Bluetooth LE address. Automatic Bluetooth discovery is disabled until hardware advertisement evidence is available.",
+        "data": {
+          "transport": "Transport (TCP or Bluetooth LE)",
+          "host": "Host or IP address",
+          "port": "TCP port",
+          "ble_address": "Bluetooth LE address",
+          "ble_service_uuid": "BLE service UUID override (default is the verified device service)"
+        }
       },
       "reconfigure": {
         "title": "Reconfigure KC761x connection",
         "description": "The device ID returned by the new endpoint must match this entry.",
-        "data": {"host": "Host or IP address", "port": "TCP port"}
+        "data": {
+          "transport": "Transport (TCP or Bluetooth LE)",
+          "host": "Host or IP address",
+          "port": "TCP port",
+          "ble_address": "Bluetooth LE address",
+          "ble_service_uuid": "BLE service UUID override (default is the verified device service)"
+        }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect or decode the KC761x device.",
-      "device_mismatch": "The new endpoint returned a different device ID."
+      "cannot_connect": "Unable to connect or decode the KC761x device. For Bluetooth LE, verify the HA adapter can reach the address and supports MTU >= 185.",
+      "device_mismatch": "The new endpoint returned a different device ID.",
+      "invalid_transport": "Choose TCP or Bluetooth LE.",
+      "invalid_tcp_endpoint": "Enter a valid TCP host and port.",
+      "invalid_ble_address": "Enter a Bluetooth LE address that Home Assistant can resolve.",
+      "invalid_ble_service_uuid": "Enter a complete verified BLE service UUID override, or leave it blank to use the device default."
     },
     "abort": {
       "already_configured": "This KC761x device is already configured.",
-      "unknown": "The configuration entry was not found."
+      "unknown": "The configuration entry was not found.",
+      "reconfigure_successful": "The KC761x connection was updated."
     }
   },
   "options": {

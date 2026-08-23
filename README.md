@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.35`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
+当前开发版本为 `0.2.0-alpha.35`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；alpha.23 已整合一台授权 KC761 的 BLE 服务/GATT/只读协议证据：显式 BLE address 连接默认约束实测服务 UUID，兼容固件可显式覆盖，不启用跨型号自动发现；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
 
 alpha.31 延续 alpha.28 的暂态缺失配置保护，并将可选 `diagnostics: true` 测试诊断升级为 schema 4：普通生命周期事件仍保留有界环形记录，连续的 HA readiness 噪声会合并；错误事件按稳定脱敏签名去重，并另存于不会被普通事件挤出的有界 `failures` 环中。诊断会在当前浏览器 tab 的 `sessionStorage` 中脱敏保存，可记录窗口错误、未处理 rejection 以及递归发现的开放 Shadow DOM 中的 Lovelace `hui-error-card`。除卡片内 `Export diagnostics` 外，启用诊断后还会在页面 body 放置一个固定、可访问且不占布局空间的 `Export KC761 diagnostics` 按钮；点击时以 256 个 root、10000 个节点和约 100ms 为界限做一次深层快照，弥补持续 observer 的 root 上限，并只生成本地 JSON 下载。ResizeObserver 的布局/图表重绘统一延后到 requestAnimationFrame，避免同步 resize 触发循环；默认关闭时不写存储、不注册监听器、不显示按钮；不会上传实体、状态、点阵、设备 ID、主机或凭据。
 
@@ -23,7 +23,7 @@ alpha.14 修复 Sections 的“Automatic height”关闭后固定行高场景：
 alpha.14 已在测试 HA 的同一 `HUI-SECTIONS-VIEW` 固定行高编辑场景完成浏览器复核：`--row-size:8` 时卡片 rect 为 `503.997375px`，`HUI-CARD-EDIT-MODE` wrapper rect 同为 `503.997375px`（delta `0`）；内部 `ha-card` 同高，卡片 `overflow:hidden`、内部 `overflow:auto`，`clientHeight=502`、`scrollHeight=940`。修复前卡片高度为 `941.302px`，相对 `503.997px` wrapper 溢出约 `437px`。该复核覆盖 Automatic height 关闭的固定行高路径；Automatic height 开启的自然高度路径尚未完成浏览器验收。KC761 过滤后的浏览器错误/警告为空，但部署/重载时间点有一条无法归因于集成的通用 `Object` 错误，因此不宣称全局浏览器日志绝对无错误。
 
 - 集成域名规划为 `kc761`。
-- 首版传输仅支持局域网 TCP；设备作为 TCP 服务端，Home Assistant 主动连接。
+- TCP 设备作为服务端，Home Assistant 主动连接；BLE 通过显式地址和 GATT 特征匹配连接，不启用无标识自动发现。
 - 配置通过 Home Assistant Config Flow 完成，以设备返回的 `DEVICE_ID` 作为唯一标识。
 - 提供实时辐射数据、环境数据、完整设备信息和一个结构化谱图实体；累计剂量候选值仍不创建测量实体或长期统计。
 - 默认每 5 秒读取一次实时状态，每 60 秒读取一次设备信息。
@@ -31,7 +31,7 @@ alpha.14 已在测试 HA 的同一 `HUI-SECTIONS-VIEW` 固定行高编辑场景�
 - 读取命令扩展为 `0x52/0x53/0x54/0x55`；模拟器控制覆盖 `0x62/0x63/0x66`，校准写入 `0x64` 继续禁止。
 - 谱图的 2048 点数组仅保留在当前 HA state/WebSocket 和独立有界存档中，通过 `_unrecorded_attributes` 排除 Recorder；Recorder 只保留总计数和有界元数据。
 - 提供 select、switch、button 控制实体；破坏性清空在谱图卡中显示设备型号、完整 ID、通道和清空类别后要求确认。
-- BLE、串口、科创云、校准写入和区间谱不进入本分支范围。
+- 串口、科创云、校准写入和区间谱不进入本分支范围。BLE 仅提供显式地址连接：Config Flow 使用 HA Bluetooth manager 解析用户输入的地址，连接后默认限定已验证服务 UUID `59462f12-9543-9999-12c8-58b459a2712d` 并唯一匹配手册给出的 RX/TX 特征；兼容固件可显式覆盖服务 UUID，不启用跨型号自动 Bluetooth discovery。BLE MTU/通知丢包/补读/长期稳定性和跨固件服务一致性仍需真实设备门禁。
 
 ## 环境分工
 
@@ -101,7 +101,7 @@ tests/               # 纯协议测试与 asyncio 模拟器
 - 审查前提交的 GitHub Actions 已通过 Ruff、JSON、编译、32 项 pytest、98.81% branch coverage、Hassfest 和 HACS 9/9 checks；`0.2.0-alpha.3` 候选完成持久测试 HA 的迁移、Recorder、模拟器控制、卸载重载与重启生命周期门禁。随后发现 alpha.3 只提供卡片静态文件、没有注册前端模块；`0.2.0-alpha.4` 已修复自动加载，在固定镜像再次通过 54 项 pytest 和 96% branch coverage，并在实际测试页面确认 Custom Element 与唯一选择器条目均已注册。alpha.5 的固定 runner 和测试栈结果见下方 0.2 扩展门禁；当前扩展提交的官方 GitHub 检查仍待推送后重跑，软件检查与 2026-08-20 的实机逐帧证据分别记录，不能互相替代。
 - 模拟器允许验证 TCP 分片、粘包、重连、自动上传交错和畸形帧恢复；模拟结果不能替代实机 L 级证据。
 - 上述 0.1 RC 默认不创建完整谱图实体、不注册 service/action，也不会发送 `0x62`、`0x63`、`0x64`、`0x66`。0.2 分支新增接口的验证必须重新执行，不能引用这条历史只读断言作为通过证据。
-- 本设备已确认 A2/A5/A6、主动 A0 谱图片段、CPS、实时剂量当量率的小端 binary16/单位换算、设备时间、2048 道谱图、工厂能量刻度和电池低 7 位百分比，本轮实机验收通过。完整 AVG 字段恒为 0 已登记为 `KI-AVG-001`，按已知问题接受，不作为本轮实机验收失败；跨固件表示、累计量单位、自动上传开启态和 BLE UUID 仍保持 `hardware-unverified`。字段级边界见 [协议证据账本](docs/PROTOCOL_EVIDENCE.md#103-2026-08-20-五分钟透明流与-kcsdi-导出对齐脱敏)。
+- 本设备已确认 A2/A5/A6、主动 A0 谱图片段、CPS、实时剂量当量率的小端 binary16/单位换算、设备时间、2048 道谱图、工厂能量刻度和电池低 7 位百分比，本轮实机验收通过；另有一台授权 BLE 设备完成服务、RX/TX、通知和 `0x54`→`0x53` 只读探针。完整 AVG 字段恒为 0 已登记为 `KI-AVG-001`，按已知问题接受，不作为本轮实机验收失败；跨固件表示、累计量单位、自动上传开启态、跨固件 BLE 服务一致性和长期稳定性仍保持 `hardware-unverified`。字段级边界见 [协议证据账本](docs/PROTOCOL_EVIDENCE.md#103-2026-08-23-授权-ble-连接与协议探针-脱敏)。
 
 ## 外部设计依据
 

@@ -47,7 +47,7 @@ from .models import (
     StatusData,
     TransactionError,
 )
-from .transport import TcpTransport, TransportError
+from .transport import TcpTransport, Transport, TransportError
 
 PushCallback = Callable[[DecodedFrame], Awaitable[None] | None]
 TaskCreator = Callable[[Coroutine[Any, Any, None], str], asyncio.Task[None]]
@@ -100,13 +100,14 @@ def _asyncio_task_creator(coroutine: Coroutine[Any, Any, None], name: str) -> as
 
 
 class KC761Client:
-    """One TCP connection with SYNC-matched read transactions."""
+    """One byte-stream connection with SYNC-matched read transactions."""
 
     def __init__(
         self,
         host: str,
         port: int,
         *,
+        transport: Transport | None = None,
         request_timeout: float = REQUEST_TIMEOUT,
         on_push: PushCallback | None = None,
         task_creator: TaskCreator = _asyncio_task_creator,
@@ -116,7 +117,7 @@ class KC761Client:
         self.request_timeout = request_timeout
         self.on_push = on_push
         self.task_creator = task_creator
-        self.transport = TcpTransport(host, port)
+        self.transport: Transport = transport or TcpTransport(host, port)
         self.parser = FrameParser(max_frame_length=MAX_FRAME_LENGTH)
         self._reader_task: asyncio.Task[None] | None = None
         self._connection_lock = asyncio.Lock()

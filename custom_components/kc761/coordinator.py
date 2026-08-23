@@ -16,6 +16,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_BLE_ADDRESS,
+    CONF_BLE_SERVICE_UUID,
     CONF_INFO_INTERVAL,
     CONF_SPECTRUM_SAVE_ENABLED,
     CONF_SPECTRUM_SAVE_INTERVAL,
@@ -44,10 +46,14 @@ from .const import (
     MODEL_NAMES,
     RECONNECT_JITTER_MAX,
     RECONNECT_JITTER_MIN,
+    CONF_TRANSPORT,
+    TRANSPORT_BLE,
+    TRANSPORT_TCP,
 )
 from .protocol.client import KC761Client
 from .protocol.codec import CODEC_PROFILE, DecodedFrame, HARDWARE_VERIFIED
 from .protocol.models import CalibrationData, DeviceInfo, StatusData
+from .protocol.transport import BleTransport
 from .spectrum import SpectrumArchive, SpectrumSnapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,8 +88,13 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._hass = hass
         self.entry = entry
-        self.host = str(entry.data["host"])
-        self.port = int(entry.data["port"])
+        self.transport_type = str(entry.data.get(CONF_TRANSPORT, TRANSPORT_TCP))
+        if self.transport_type not in (TRANSPORT_TCP, TRANSPORT_BLE):
+            self.transport_type = TRANSPORT_TCP
+        self.host = str(entry.data.get("host", ""))
+        self.port = int(entry.data.get("port", 0) or 0)
+        self.ble_address = str(entry.data.get(CONF_BLE_ADDRESS, ""))
+        self.ble_service_uuid = str(entry.data.get(CONF_BLE_SERVICE_UUID, "")) or None
         self.expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
         self.status_interval = _bounded(
             entry.options.get(CONF_STATUS_INTERVAL, DEFAULT_STATUS_INTERVAL),
@@ -433,27 +444,58 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 _LOGGER.warning("Scheduled KC761 spectrum save failed: %s", type(err).__name__)
             await asyncio.sleep(self.spectrum_save_interval * 60)
 
-    async def async_reconfigure(self, host: str, port: int) -> None:
+    async def async_reconfigure(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        *,
+        transport: str | None = None,
+        ble_address: str | None = None,
+        ble_service_uuid: str | None = None,
+    ) -> None:
         """Atomically validate and replace the endpoint while preserving DEVICE_ID.
 
         The old client is closed before a candidate is constructed.  Failed
         candidates are closed before a new client for the old endpoint is
-        restored, so a single-entry device never has two active TCP sessions.
+        restored, so a single-entry device never has two active sessions.
         """
         async with self._write_lock:
             old_client = self.client
+            old_transport = self.transport_type
             old_host, old_port = self.host, self.port
+            old_ble_address, old_ble_service_uuid = self.ble_address, self.ble_service_uuid
             old_info = self._device_info
             old_info_at = self._last_info_at
 
+            candidate_transport = transport or self.transport_type
+            if candidate_transport not in (TRANSPORT_TCP, TRANSPORT_BLE):
+                raise ValueError("unsupported KC761 transport")
+            candidate_host = str(host or "")
+            candidate_port = int(port or 0)
+            candidate_ble_address = str(ble_address or "").strip()
+            candidate_ble_service_uuid = str(ble_service_uuid or "").strip() or None
+            if candidate_transport == TRANSPORT_TCP and (not candidate_host or not candidate_port):
+                raise ValueError("TCP reconfigure requires host and port")
+            if candidate_transport == TRANSPORT_BLE and not candidate_ble_address:
+                raise ValueError("BLE reconfigure requires an address")
+
             await old_client.async_close()
-            candidate = self._new_client(host, port, on_push=False)
+            candidate = self._new_client(
+                candidate_host,
+                candidate_port,
+                on_push=False,
+                transport_type=candidate_transport,
+                ble_address=candidate_ble_address,
+                ble_service_uuid=candidate_ble_service_uuid,
+                use_current_ble_service_uuid=False,
+            )
             try:
                 await candidate.async_connect()
                 info = await candidate.async_get_device_info()
                 if not isinstance(info, DeviceInfo):
                     raise UpdateFailed("KC761 returned no device information")
                 self._validate_device_info(info)
+                await candidate.async_get_status()
             except Exception as candidate_error:
                 await self._close_client_quietly(candidate)
                 try:
@@ -461,10 +503,23 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                         old_host,
                         old_port,
                         old_info,
+                        transport_type=old_transport,
+                        ble_address=old_ble_address,
+                        ble_service_uuid=old_ble_service_uuid,
+                        use_current_ble_service_uuid=False,
                     )
                 except Exception as restore_error:
+                    self.transport_type = old_transport
                     self.host, self.port = old_host, old_port
-                    self.client = self._new_client(old_host, old_port)
+                    self.ble_address, self.ble_service_uuid = old_ble_address, old_ble_service_uuid
+                    self.client = self._new_client(
+                        old_host,
+                        old_port,
+                        transport_type=old_transport,
+                        ble_address=old_ble_address,
+                        ble_service_uuid=old_ble_service_uuid,
+                        use_current_ble_service_uuid=False,
+                    )
                     self._device_info = old_info
                     self._last_info_at = old_info_at
                     _LOGGER.error(
@@ -473,14 +528,21 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                         type(restore_error).__name__,
                     )
                     raise ReconfigureRestoreError(candidate_error, restore_error) from candidate_error
+                self.transport_type = old_transport
                 self.host, self.port = old_host, old_port
+                self.ble_address, self.ble_service_uuid = old_ble_address, old_ble_service_uuid
                 self.client = restored
                 self._device_info = restored_info
                 self._last_info_at = restored_info_at
                 raise
 
             candidate.on_push = self._async_push
-            self.host, self.port = host, int(port)
+            self.transport_type = candidate_transport
+            self.host, self.port = candidate_host, candidate_port
+            self.ble_address, self.ble_service_uuid = (
+                candidate_ble_address,
+                candidate_ble_service_uuid,
+            )
             self.client = candidate
             self._device_info = info
             self._last_info_at = datetime.now(UTC)
@@ -492,9 +554,21 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         host: str,
         port: int,
         previous_info: DeviceInfo | None,
+        *,
+        transport_type: str | None = None,
+        ble_address: str | None = None,
+        ble_service_uuid: str | None = None,
+        use_current_ble_service_uuid: bool = True,
     ) -> tuple[KC761Client, DeviceInfo | None, datetime | None]:
         """Create and validate the one replacement client after a rollback."""
-        restored = self._new_client(host, port)
+        restored = self._new_client(
+            host,
+            port,
+            transport_type=transport_type,
+            ble_address=ble_address,
+            ble_service_uuid=ble_service_uuid,
+            use_current_ble_service_uuid=use_current_ble_service_uuid,
+        )
         try:
             await restored.async_connect()
             restored_info = previous_info
@@ -518,7 +592,36 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         except Exception as err:
             _LOGGER.debug("KC761 client close failed: %s", type(err).__name__)
 
-    def _new_client(self, host: str, port: int, *, on_push: bool = True) -> KC761Client:
+    def _new_client(
+        self,
+        host: str,
+        port: int,
+        *,
+        on_push: bool = True,
+        transport_type: str | None = None,
+        ble_address: str | None = None,
+        ble_service_uuid: str | None = None,
+        use_current_ble_service_uuid: bool = True,
+    ) -> KC761Client:
+        selected_transport = transport_type or self.transport_type
+        if selected_transport == TRANSPORT_BLE:
+            address = str(ble_address or self.ble_address).strip()
+            transport = BleTransport(
+                self._hass,
+                address,
+                service_uuid=(
+                    self.ble_service_uuid
+                    if use_current_ble_service_uuid and ble_service_uuid is None
+                    else ble_service_uuid
+                ),
+            )
+            return KC761Client(
+                address,
+                0,
+                transport=transport,
+                on_push=self._async_push if on_push else None,
+                task_creator=self._create_hass_task,
+            )
         return KC761Client(
             host,
             port,

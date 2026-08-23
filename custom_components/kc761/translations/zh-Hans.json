@@ -3,22 +3,39 @@
     "step": {
       "user": {
         "title": "添加 KC761x 辐射计",
-        "description": "连接局域网中的 KC761x TCP 服务。",
-        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+        "description": "通过局域网 TCP 或明确指定的 Bluetooth LE 地址连接 KC761x。在取得实机广播标识证据前不会启用蓝牙自动发现。",
+        "data": {
+          "transport": "传输方式（TCP 或 Bluetooth LE）",
+          "host": "主机或 IP 地址",
+          "port": "TCP 端口",
+          "ble_address": "Bluetooth LE 地址",
+          "ble_service_uuid": "BLE 服务 UUID 覆盖值（默认使用已验证设备服务）"
+        }
       },
       "reconfigure": {
         "title": "重新配置 KC761x 连接",
         "description": "新地址返回的设备 ID 必须与此配置条目一致。",
-        "data": {"host": "主机或 IP 地址", "port": "TCP 端口"}
+        "data": {
+          "transport": "传输方式（TCP 或 Bluetooth LE）",
+          "host": "主机或 IP 地址",
+          "port": "TCP 端口",
+          "ble_address": "Bluetooth LE 地址",
+          "ble_service_uuid": "BLE 服务 UUID 覆盖值（默认使用已验证设备服务）"
+        }
       }
     },
     "error": {
-      "cannot_connect": "无法连接或解析 KC761x 设备。",
-      "device_mismatch": "新地址返回了不同的设备 ID。"
+      "cannot_connect": "无法连接或解析 KC761x 设备。对于 Bluetooth LE，请确认 HA 适配器可以到达该地址，并支持 MTU >= 185。",
+      "device_mismatch": "新地址返回了不同的设备 ID。",
+      "invalid_transport": "请选择 TCP 或 Bluetooth LE。",
+      "invalid_tcp_endpoint": "请输入有效的 TCP 主机和端口。",
+      "invalid_ble_address": "请输入 Home Assistant 可以解析的 Bluetooth LE 地址。",
+      "invalid_ble_service_uuid": "请输入完整且已验证的 BLE 服务 UUID 覆盖值，留空则使用设备默认值。"
     },
     "abort": {
       "already_configured": "此 KC761x 设备已经配置。",
-      "unknown": "找不到配置条目。"
+      "unknown": "找不到配置条目。",
+      "reconfigure_successful": "KC761x 连接已更新。"
     }
   },
   "options": {

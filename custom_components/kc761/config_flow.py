@@ -12,6 +12,9 @@ from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
 
 from .const import (
+    BLE_VERIFIED_SERVICE_UUID,
+    CONF_BLE_ADDRESS,
+    CONF_BLE_SERVICE_UUID,
     CONF_CREATE_RAW_ENTITIES,
     CONF_INFO_INTERVAL,
     CONF_SPECTRUM_SAVE_ENABLED,
@@ -36,9 +39,17 @@ from .const import (
     MIN_SPECTRUM_SAVE_INTERVAL,
     MIN_STATUS_INTERVAL,
     MIN_TIME_SYNC_INTERVAL,
+    CONF_TRANSPORT,
+    SUPPORTED_TRANSPORTS,
+    TRANSPORT_BLE,
+    TRANSPORT_TCP,
 )
 from .coordinator import DeviceIdentityError, KC761Coordinator
+from .endpoint import Endpoint as _Endpoint
+from .endpoint import parse_endpoint as _parse_endpoint
+from .endpoint import replace_endpoint_data
 from .protocol.client import KC761Client
+from .protocol.transport import BleTransport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +57,7 @@ _LOGGER = logging.getLogger(__name__)
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
-    VERSION = 5
+    VERSION = 6
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is None:
@@ -54,26 +65,33 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self._async_validate_and_create(user_input)
 
     async def _async_validate_and_create(self, user_input: dict[str, Any]) -> ConfigFlowResult:
-        host = str(user_input[CONF_HOST]).strip()
-        port = int(user_input[CONF_PORT])
+        try:
+            endpoint = _parse_endpoint(user_input)
+        except ValueError as err:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_connection_schema(user_input),
+                errors={"base": str(err)},
+            )
         errors: dict[str, str] = {}
-        client = KC761Client(host, port)
+        client = self._new_flow_client(endpoint)
+        info = None
         try:
             await client.async_connect()
             info = await client.async_get_device_info()
             await client.async_get_status()
         except Exception:
             errors["base"] = "cannot_connect"
-            info = None
         finally:
             await client.async_close()
-        if info is None:
+        if info is None or not info.device_id:
+            errors.setdefault("base", "cannot_connect")
             return self.async_show_form(step_id="user", data_schema=_connection_schema(user_input), errors=errors)
         await self.async_set_unique_id(info.device_id)
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
             title=f"{info.model_name} {info.device_id[-4:]}",
-            data={CONF_HOST: host, CONF_PORT: port, "device_id": info.device_id},
+            data={**endpoint.as_data(), "device_id": info.device_id},
         )
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -82,14 +100,49 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="unknown")
         if user_input is None:
             return self.async_show_form(step_id="reconfigure", data_schema=_connection_schema(entry.data))
-        host = str(user_input[CONF_HOST]).strip()
-        port = int(user_input[CONF_PORT])
+        defaults = entry.data
+        if user_input.get(CONF_TRANSPORT) == TRANSPORT_BLE and CONF_BLE_SERVICE_UUID not in user_input:
+            # An explicit BLE reconfigure without an override uses the
+            # verified device service instead of inheriting a stale override.
+            defaults = {**defaults, CONF_BLE_SERVICE_UUID: BLE_VERIFIED_SERVICE_UUID}
+        try:
+            endpoint = _parse_endpoint(user_input, defaults=defaults)
+        except ValueError as err:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=_connection_schema(user_input),
+                errors={"base": str(err)},
+            )
+        expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
         try:
             coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
             if isinstance(coordinator, KC761Coordinator):
-                await coordinator.async_reconfigure(host, port)
+                # Preserve the old call shape for existing TCP entries and
+                # third-party test doubles; the extended form is used for
+                # BLE or an explicit transport switch.
+                if (
+                    endpoint.transport == TRANSPORT_TCP
+                    and CONF_TRANSPORT not in user_input
+                    and CONF_BLE_ADDRESS not in user_input
+                ):
+                    await coordinator.async_reconfigure(endpoint.host, endpoint.port)
+                else:
+                    await coordinator.async_reconfigure(
+                        endpoint.host,
+                        endpoint.port,
+                        transport=endpoint.transport,
+                        ble_address=endpoint.ble_address,
+                        ble_service_uuid=endpoint.ble_service_uuid,
+                    )
             else:
-                await self._async_validate_reconfigure_endpoint(host, port)
+                await self._async_validate_reconfigure_endpoint(
+                    endpoint.host,
+                    endpoint.port,
+                    transport=endpoint.transport,
+                    ble_address=endpoint.ble_address,
+                    ble_service_uuid=endpoint.ble_service_uuid,
+                    expected_device_id=expected_device_id,
+                )
         except DeviceIdentityError:
             return self.async_show_form(
                 step_id="reconfigure",
@@ -103,30 +156,55 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_schema=_connection_schema(user_input),
                 errors={"base": "cannot_connect"},
             )
-        return self.async_update_reload_and_abort(
-            entry,
-            data_updates={CONF_HOST: host, CONF_PORT: port},
-        )
+        updated_data = replace_endpoint_data(entry.data, endpoint)
+        self.hass.config_entries.async_update_entry(entry, data=updated_data)
+        return self.async_abort(reason="reconfigure_successful")
 
-    async def _async_validate_reconfigure_endpoint(self, host: str, port: int) -> None:
+    async def _async_validate_reconfigure_endpoint(
+        self,
+        host: str,
+        port: int,
+        *,
+        transport: str = TRANSPORT_TCP,
+        ble_address: str = "",
+        ble_service_uuid: str | None = None,
+        expected_device_id: str | None = None,
+    ) -> None:
         """Preflight an entry without a loaded coordinator.
 
         A setup-retry entry has no connection owner in ``hass.data``.  This
         temporary client is therefore safe and is always closed before the
         flow returns.
         """
-        client = KC761Client(host, port)
+        endpoint = _Endpoint(transport, host, port, ble_address, ble_service_uuid)
+        client = self._new_flow_client(endpoint)
         try:
             await client.async_connect()
             info = await client.async_get_device_info()
             if info is None:
                 raise ValueError("KC761 returned no device information")
-            entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-            expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
+            await client.async_get_status()
+            if expected_device_id is None:
+                entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+                expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
             if info.device_id != expected_device_id:
                 raise DeviceIdentityError("KC761 DEVICE_ID changed")
         finally:
             await client.async_close()
+
+    def _new_flow_client(self, endpoint: _Endpoint) -> KC761Client:
+        """Create a temporary client whose resources belong to this flow."""
+        if endpoint.transport == TRANSPORT_BLE:
+            return KC761Client(
+                endpoint.ble_address,
+                0,
+                transport=BleTransport(
+                    self.hass,
+                    endpoint.ble_address,
+                    service_uuid=endpoint.ble_service_uuid,
+                ),
+            )
+        return KC761Client(endpoint.host, endpoint.port)
 
     @staticmethod
     @callback
@@ -195,9 +273,18 @@ def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     defaults = defaults or {}
     return vol.Schema(
         {
-            vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
-            vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
+            vol.Optional(
+                CONF_TRANSPORT,
+                default=defaults.get(CONF_TRANSPORT, TRANSPORT_TCP),
+            ): vol.In(SUPPORTED_TRANSPORTS),
+            vol.Optional(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+            vol.Optional(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=65535)
             ),
+            vol.Optional(CONF_BLE_ADDRESS, default=defaults.get(CONF_BLE_ADDRESS, "")): str,
+            vol.Optional(
+                CONF_BLE_SERVICE_UUID,
+                default=defaults.get(CONF_BLE_SERVICE_UUID, BLE_VERIFIED_SERVICE_UUID),
+            ): str,
         }
     )

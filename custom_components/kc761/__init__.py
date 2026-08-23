@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
     er = None  # type: ignore[assignment]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
-CONFIG_ENTRY_VERSION = 5
+CONFIG_ENTRY_VERSION = 6
 
 _REMOVED_BINARY_SENSOR_KEYS = (
     "auto_upload_enabled",
@@ -154,6 +154,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     registry.async_remove(entity_id)
         if entry.version < 5:
             _migrate_sensor_registry(registry, entry, device_id)
+    # Entries created before BLE support intentionally keep their original
+    # host/port shape.  The coordinator treats a missing transport key as TCP,
+    # so this migration changes only the schema version and preserves old data
+    # exactly for rollback and downgrade safety.
     hass.config_entries.async_update_entry(
         entry,
         unique_id=device_id,

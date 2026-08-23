@@ -23,7 +23,7 @@
 
 - 不连接科创云，不实现云端 32 字节校验。
 - 不实现串口。官方上位机虽然显示“串口”选项，但编程手册没有提供串口接口定义。
-- 不实现 BLE。手册缺少服务 UUID，且还需要验证 HA 主机蓝牙能力、MTU 协商和通知丢包恢复。
+- 不实现 BLE 自动发现。当前 BLE 只允许显式地址配置；单台设备的服务证据不构成跨型号/跨固件广告 matcher，自动扫描不能安全识别设备。
 - 不自动修改设备时间、传感器选择、音量、灯光或自动上传状态。
 - 不写入校准参数，不清除谱图、剂量曲线或累计剂量。
 - 不把 1024/2048/4096 道完整谱图保存为普通实体状态或属性。
@@ -42,14 +42,14 @@
 | L - 实机确认 | 测试设备抓包、应答和读回已验证 | 正式解码、兼容性声明和受控写入 |
 | I - 架构推断 | 为实现完整性做出的保守设计 | 必须通过测试后才能提升为 L |
 
-当前资料以 M/U 为主；2026-08-20 实机证据已经将候选测试设备的 TCP 可达性、A2/A5/A6 与主动 A0 谱图结构、`BAG_LEN` 小端解释、实时 CPS、实时剂量当量率 binary16/缩放、设备时间、电池低 7 位、2048 道 Gamma 谱图和能量刻度提升为字段级 L 证据。全局 `hardware_verified=false` 不变：累计量跨固件单位、自动上传开启态、其它传感器/型号/固件、BLE UUID 和长期稳定性仍需 L 级证据。
+当前资料以 M/U 为主；2026-08-20 实机证据已经将候选测试设备的 TCP 可达性、A2/A5/A6 与主动 A0 谱图结构、`BAG_LEN` 小端解释、实时 CPS、实时剂量当量率 binary16/缩放、设备时间、电池低 7 位、2048 道 Gamma 谱图和能量刻度提升为字段级 L 证据；2026-08-23 又确认一台 BLE 设备的服务、RX/TX、通知和两条只读探针请求。全局 `hardware_verified=false` 不变：服务 UUID 的跨固件一致性、累计量跨固件单位、其它传感器/型号/固件、长时间稳定性和丢包补读仍需 L 级证据。
 
 ## 4. 总体结构
 
 ```mermaid
 flowchart LR
-    D["KC761x 设备\nTCP 服务端"]
-    T["TCP 传输与重连"]
+    D["KC761x 设备\nTCP 服务端 / BLE GATT 服务端"]
+    T["TCP/BLE 传输与重连"]
     F["增量帧解析器"]
     R["事务路由\nSYNC + FLAG"]
     P["协议模型与字段验证"]
@@ -68,7 +68,7 @@ flowchart LR
     C --> X
 ```
 
-每个配置条目对应一台物理辐射计和一条持久 TCP 连接。协议层不依赖 Home Assistant；Coordinator 独占连接生命周期和设备访问顺序；实体只从 Coordinator 的内存快照读取数据，不直接发起网络 I/O。
+每个配置条目对应一台物理辐射计和一条持久 TCP 或 BLE 连接。协议层不依赖 Home Assistant；Coordinator 独占连接生命周期和设备访问顺序；实体只从 Coordinator 的内存快照读取数据，不直接发起网络 I/O。
 
 ## 5. 仓库与模块边界
 
@@ -80,7 +80,7 @@ HACS 要求一个仓库只管理一个 `custom_components` 集成，且运行所
 | 编解码 | `protocol/codec.py` | 数值、位字段、命令和响应编解码 | 不做 socket I/O |
 | 帧解析 | `protocol/framing.py` | TCP 缓冲、长度校验、重同步、连续帧拆分 | 不解释 HA 实体语义 |
 | 客户端 | `protocol/client.py` | SYNC 分配、请求/应答匹配、推送路由、超时 | 不创建 HA 实体 |
-| 传输 | `protocol/transport.py` | TCP 连接、读写、关闭与重连 | 不持有业务状态 |
+| 传输 | `protocol/transport.py` | TCP/BLE 连接、读写、关闭与重连；BLE GATT 特征发现和有界通知队列 | 不持有业务状态，不启动独立 BLE 扫描器 |
 | 协调器 | `coordinator.py` | 轮询节奏、缓存、可用性、生命周期、写锁 | 不把大数组写入 HA state |
 | 配置 | `config_flow.py` | 连接预检、DEVICE_ID 唯一性、重新配置 | 不以 IP 作为 unique ID |
 | 平台 | `sensor.py` 等 | 实体描述与状态呈现 | 属性 getter 不做 I/O |
@@ -93,11 +93,15 @@ HACS 要求一个仓库只管理一个 `custom_components` 集成，且运行所
 | 传输 | 手册状态 | 首版决定 | 理由 |
 | --- | --- | --- | --- |
 | 局域网 TCP | 设备为服务端 | 支持 | 本地、无需云认证，官方上位机已有网络入口 |
-| BLE 5.0 GATT | 设备为服务端，类似 NUS | 延后 | 设备在线/广播状态尚未确认；已有阴性扫描结果不具备证明力，服务 UUID 仍缺少实测证据；还需验证 MTU、丢包和 HA 蓝牙 |
+| BLE 5.0 GATT | 设备为服务端 | 支持显式地址连接；自动发现延后 | 使用 HA Bluetooth manager 按用户地址解析 `BLEDevice`；连接后默认约束本设备实测服务 UUID，并唯一匹配 RX/TX 特征；兼容固件可显式覆盖 UUID；MTU、通知丢包和真实设备可发现性仍有跨固件门禁 |
 | 云 TCP | 设备为客户端 | 排除 | 明文、追加校验、自建云目前不支持 |
 | 串口 | 仅截图出现 | 排除 | 编程手册没有串口定义或参数 |
 
 网络 Config Flow 接收 `host` 和 `port`。截图显示端口 `7601`，且首轮隔离实机在该候选端口完成 ARP 门控和 TCP 只读应答；因此 7601 对该测试设备达到 L 级可达证据，但仍保持可编辑，不能宣称为所有型号/固件的固定端口。
+
+BLE Config Flow 接收用户明确提供的 `ble_address`；服务 UUID 默认使用本设备实测的 `59462f12-9543-9999-12c8-58b459a2712d`，兼容固件可填写另一个已验证的 `ble_service_uuid` 覆盖默认值。清单依赖 HA 的 `bluetooth_adapters`，由 HA 提供 Bluetooth 管理器及其 `bluetooth`/Bleak 依赖链；集成不自行固定或重复声明底层 BLE 依赖。连接时调用 HA 的 `bluetooth.async_ble_device_from_address(hass, address, connectable=True)`，不在集成内启动独立扫描器；再通过 `bleak_retry_connector.establish_connection` 与 `BleakClientWithServiceCache` 建立有界重试连接，每次尝试的连接超时至少为 10 秒，2 次尝试的总等待预算另行封顶并覆盖重试开销。枚举 GATT 服务，要求 RX `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` 和 TX `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` 各出现一次且属于同一服务。缺失、重复、服务不符或属性不符均拒绝连接。
+
+手册给出的 BLE MTU 门禁为：MTU 小于 185 时设备不会回应，MTU 至少 185 时使用 182 B 包档，MTU 至少 507 时使用 504 B 包档。Bleak 后端若报告大于 23 且小于 185 的 MTU，连接会给出可操作错误；BlueZ 常见的 23 占位值按“未知”处理，交由首个有界请求超时判断，避免误拒绝有效连接。通知进入固定容量队列，队列溢出立即使连接失败并由 Coordinator 的有界退避重连。
 
 ## 7. TCP 连接与帧解析
 
@@ -154,8 +158,8 @@ Coordinator 的 5 秒周期中只发一次实时状态请求，并在设备信�
 
 ### 9.1 首次配置
 
-1. 用户输入主机或域名、端口。
-2. 建立有界超时的 TCP 连接。
+1. 用户选择 TCP 或 Bluetooth LE。TCP 输入主机/域名和端口；BLE 输入 HA Bluetooth manager 可解析的 `ble_address`，默认使用本设备已验证服务 UUID，兼容固件可显式覆盖。
+2. 建立有界超时的 TCP 或 GATT 连接。BLE 不启动集成私有扫描器，而是复用 HA 共享 Bluetooth manager。
 3. 发送 `CMD_GET_DEVICE_INFO`，验证帧结构、支持的型号和非空 `DEVICE_ID`。
 4. 发送 `CMD_GET_STA`，验证状态包长度和基本数值合法性。
 5. 用设备返回的 `DEVICE_ID` 设置 Config Entry unique ID。
@@ -166,7 +170,7 @@ Coordinator 的 5 秒周期中只发一次实时状态请求，并在设备信�
 
 ### 9.2 重新配置
 
-重新配置仅允许修改主机和端口，并必须连接新地址、再次读取 `DEVICE_ID`、确认它与原配置条目一致后才更新并重新加载。这样可处理 DHCP 地址变化，同时避免把条目悄悄指向另一台辐射计。
+重新配置允许修改 TCP 主机/端口、BLE 地址、服务 UUID 覆盖值以及传输类型，并必须连接新端点、再次读取 `DEVICE_ID` 和状态、确认它与原配置条目一致后才更新并重新加载。这样可处理 DHCP 地址变化或经用户确认的 TCP/BLE 切换，同时避免把条目悄悄指向另一台辐射计。旧条目缺少 `transport` 时按 TCP 解释。
 
 ### 9.3 Options Flow
 

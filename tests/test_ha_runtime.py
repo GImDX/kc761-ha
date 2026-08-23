@@ -36,7 +36,14 @@ from custom_components.kc761 import select as select_module  # noqa: E402
 from custom_components.kc761 import sensor as sensor_module  # noqa: E402
 from custom_components.kc761 import switch as switch_module  # noqa: E402
 from custom_components.kc761 import websocket_api as websocket_module  # noqa: E402
-from custom_components.kc761.const import DOMAIN  # noqa: E402
+from custom_components.kc761.const import (  # noqa: E402
+    BLE_VERIFIED_SERVICE_UUID,
+    CONF_BLE_ADDRESS,
+    CONF_BLE_SERVICE_UUID,
+    CONF_TRANSPORT,
+    DOMAIN,
+    TRANSPORT_BLE,
+)
 from custom_components.kc761.protocol.codec import (  # noqa: E402
     build_calibration_frame,
     build_device_info_frame,
@@ -355,9 +362,9 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     hass.config_entries.async_update_entry.assert_called_once_with(
         migration_entry,
         unique_id="7601-0000-000001",
-        version=5,
+        version=6,
     )
-    migration_entry.version = 6
+    migration_entry.version = 7
     assert run(async_migrate_entry(hass, migration_entry)) is False
 
     raw_entry = make_entry(options={"create_raw_entities": True})
@@ -441,11 +448,46 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         reconfigure.hass = hass
         reconfigure.context = {"entry_id": entry.entry_id}
         reconfigure.async_show_form = MagicMock(return_value={"type": "form"})
-        reconfigure.async_update_reload_and_abort = MagicMock(return_value={"type": "abort"})
+        reconfigure.async_abort = MagicMock(return_value={"type": "abort"})
         assert (await reconfigure.async_step_reconfigure())["type"] == "form"
         with patch.object(config_flow_module, "KC761Client", Client):
             result = await reconfigure.async_step_reconfigure({"host": "new", "port": 7602})
         assert result["type"] == "abort"
+        reconfigure.async_abort.assert_called_once_with(reason="reconfigure_successful")
+        updated_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+        assert updated_data == {
+            "device_id": "7601-0000-000001",
+            "transport": "tcp",
+            "host": "new",
+            "port": 7602,
+        }
+        hass.config_entries.async_schedule_reload.assert_not_called()
+
+        entry.data = {
+            "device_id": "7601-0000-000001",
+            "transport": "tcp",
+            "host": "old",
+            "port": 7601,
+            "ble_address": "AA:BB:CC:DD:EE:FF",
+            "ble_service_uuid": "12345678-1234-5678-1234-567812345678",
+        }
+        ble_reconfigure = config_flow_module.KC761ConfigFlow()
+        ble_reconfigure.hass = hass
+        ble_reconfigure.context = {"entry_id": entry.entry_id}
+        ble_reconfigure.async_abort = MagicMock(return_value={"type": "abort"})
+        with patch.object(config_flow_module, "KC761Client", Client):
+            result = await ble_reconfigure.async_step_reconfigure(
+                {"transport": "ble", "ble_address": "11:22:33:44:55:66"}
+            )
+        assert result["type"] == "abort"
+        updated_ble_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+        assert updated_ble_data == {
+            "device_id": "7601-0000-000001",
+            "transport": "ble",
+            "ble_address": "11:22:33:44:55:66",
+            CONF_BLE_SERVICE_UUID: BLE_VERIFIED_SERVICE_UUID,
+        }
+        hass.config_entries.async_schedule_reload.assert_not_called()
 
         loaded_coordinator = object.__new__(coordinator_module.KC761Coordinator)
         loaded_coordinator.async_reconfigure = AsyncMock()
@@ -453,7 +495,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         loaded = config_flow_module.KC761ConfigFlow()
         loaded.hass = hass
         loaded.context = {"entry_id": entry.entry_id}
-        loaded.async_update_reload_and_abort = MagicMock(return_value={"type": "abort"})
+        loaded.async_abort = MagicMock(return_value={"type": "abort"})
         with patch.object(config_flow_module, "KC761Client") as temporary_client:
             result = await loaded.async_step_reconfigure({"host": "loaded", "port": 7604})
         assert result["type"] == "abort"
@@ -1119,6 +1161,39 @@ def test_coordinator_background_and_validation_edges() -> None:
     run(exercise())
 
 
+def test_coordinator_selects_ble_transport_and_closes_one_client() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        entry = make_entry()
+        entry.data = {
+            CONF_TRANSPORT: TRANSPORT_BLE,
+            CONF_BLE_ADDRESS: "AA:BB:CC:DD:EE:FF",
+            CONF_BLE_SERVICE_UUID: "12345678-1234-5678-1234-567812345678",
+            "device_id": "7601-0000-000001",
+        }
+        fake_client = FakeClient()
+        fake_transport = object()
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", new_callable=AsyncMock):
+                with patch.object(coordinator_module, "BleTransport", return_value=fake_transport) as ble:
+                    with patch.object(coordinator_module, "KC761Client", return_value=fake_client) as client:
+                        coordinator = coordinator_module.KC761Coordinator(hass, entry)
+
+                        ble.assert_called_once_with(
+                            hass,
+                            "AA:BB:CC:DD:EE:FF",
+                            service_uuid="12345678-1234-5678-1234-567812345678",
+                        )
+                        assert client.call_args.args == ("AA:BB:CC:DD:EE:FF", 0)
+                        assert client.call_args.kwargs["transport"] is fake_transport
+
+                await coordinator.async_shutdown()
+                await coordinator.async_shutdown()
+        assert fake_client.close_calls == 1
+
+    run(exercise())
+
+
 def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
     async def exercise() -> None:
         info = make_info((2, 8, 5))
@@ -1306,6 +1381,7 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.identity_mismatches = 1
         coordinator.retry_delay = 2.5
         coordinator.last_error = "TimeoutError"
+        coordinator.transport_type = "ble"
         entry.runtime_data = coordinator
         result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), entry)
         assert "host" not in str(result)
@@ -1316,6 +1392,7 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         assert result["connection"]["last_frame"]["flag"] == 0xA2
         assert result["connection"]["data_errors"] == 2
         assert result["connection"]["responses"] == 11
+        assert result["connection"]["transport"] == "ble"
         assert result["connection"]["identity_mismatches"] == 1
         assert result["framing"]["dropped_bytes"] == 7
 
