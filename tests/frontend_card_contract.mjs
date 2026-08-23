@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 class FakeNode {
   constructor(selector = "") {
     this.selector = selector;
+    this.localName = selector;
+    this.tagName = selector.toUpperCase();
     this.style = { setProperty() {} };
     this.classList = {
       values: new Set(),
@@ -24,10 +26,26 @@ class FakeNode {
     this.offsetLeft = 0;
     this.clientLeft = 1;
     this.listeners = new Map();
+    this.listenerCallbacks = new Map();
+    this.parentNode = null;
+    this.children = [];
+    this.isConnected = false;
+    this.textContent = "";
   }
 
-  addEventListener(type) { this.listeners.set(type, (this.listeners.get(type) || 0) + 1); }
-  removeEventListener() {}
+  addEventListener(type, callback) {
+    this.listeners.set(type, (this.listeners.get(type) || 0) + 1);
+    if (typeof callback === "function") this.listenerCallbacks.set(type, callback);
+  }
+  removeEventListener(type, callback) {
+    if (!this.listeners.has(type)) return;
+    this.listeners.set(type, Math.max(0, this.listeners.get(type) - 1));
+    if (!callback || this.listenerCallbacks.get(type) === callback) this.listenerCallbacks.delete(type);
+  }
+  click() {
+    this.clicked = true;
+    this.listenerCallbacks.get("click")?.({ currentTarget: this, target: this, type: "click" });
+  }
   listenerCount(type) { return this.listeners.get(type) || 0; }
   setPointerCapture() {}
   setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = String(value); }
@@ -35,7 +53,35 @@ class FakeNode {
   querySelector(selector) { return selector === ".caption" ? new FakeNode(selector) : new FakeNode(selector); }
   querySelectorAll() { return []; }
   replaceChildren(...items) { this.options = [...items]; }
-  append(...items) { this.options.push(...items); }
+  append(...items) {
+    this.options.push(...items);
+    items.forEach((item) => {
+      if (item && typeof item === "object") {
+        item.parentNode = this;
+        item.isConnected = true;
+        if (!this.children.includes(item)) this.children.push(item);
+      }
+    });
+  }
+  appendChild(item) {
+    this.append(item);
+    return item;
+  }
+  removeChild(item) {
+    this.children = this.children.filter((child) => child !== item);
+    this.options = this.options.filter((child) => child !== item);
+    if (item && typeof item === "object") {
+      item.parentNode = null;
+      item.isConnected = false;
+    }
+    return item;
+  }
+  remove() { this.parentNode?.removeChild?.(this); }
+  dispatchEvent(event) {
+    this.lastEvent = event;
+    this.dispatchCount = (this.dispatchCount || 0) + 1;
+    return true;
+  }
   getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight }; }
 }
 
@@ -80,17 +126,19 @@ globalThis.customElements = {
   define: (name, value) => registry.set(name, value),
 };
 const storage = new Map();
+let storageWrites = 0;
 const storageApi = {
   getItem: (key) => storage.get(key) ?? null,
-  setItem: (key, value) => storage.set(key, String(value)),
+  setItem: (key, value) => { storageWrites += 1; storage.set(key, String(value)); },
   removeItem: (key) => storage.delete(key),
 };
 globalThis.window = {
   customCards: [],
   sessionStorage: storageApi,
   localStorage: storageApi,
-  addEventListener() {},
-  removeEventListener() {},
+  _listenerCounts: new Map(),
+  addEventListener(type) { this._listenerCounts.set(type, (this._listenerCounts.get(type) || 0) + 1); },
+  removeEventListener(type) { this._listenerCounts.set(type, Math.max(0, (this._listenerCounts.get(type) || 0) - 1)); },
   setInterval: () => 1,
   clearInterval() {},
   confirm: () => false,
@@ -101,16 +149,30 @@ globalThis.window = {
 };
 const scheduledTimers = new Map();
 let nextTimerId = 0;
-globalThis.setTimeout = (callback) => {
+let fakeClock = 0;
+globalThis.setTimeout = (callback, delay = 0) => {
   const id = ++nextTimerId;
-  scheduledTimers.set(id, callback);
+  scheduledTimers.set(id, { callback, due: fakeClock + Math.max(0, Number(delay) || 0) });
   return id;
 };
 globalThis.clearTimeout = (id) => scheduledTimers.delete(id);
 const flushTimers = () => {
-  const callbacks = [...scheduledTimers.values()];
+  const callbacks = [...scheduledTimers.values()].map((entry) => entry.callback);
   scheduledTimers.clear();
   callbacks.forEach((callback) => callback());
+};
+const advanceTimers = (milliseconds) => {
+  fakeClock += milliseconds;
+  let guard = 0;
+  while (guard < 1000) {
+    const ready = [...scheduledTimers.entries()].filter(([, entry]) => entry.due <= fakeClock);
+    if (!ready.length) break;
+    ready.forEach(([id, entry]) => {
+      scheduledTimers.delete(id);
+      entry.callback();
+    });
+    guard += ready.length;
+  }
 };
 globalThis.CustomEvent = class {
   constructor(type, init = {}) {
@@ -120,8 +182,45 @@ globalThis.CustomEvent = class {
     this.composed = init.composed;
   }
 };
+const documentBody = new FakeNode("body");
+documentBody.isConnected = true;
+const preExistingCardHost = new FakeNode("hui-card");
+preExistingCardHost.config = { type: "custom:kc761-spectrum-card" };
+const preExistingErrorCard = new FakeNode("hui-error-card");
+preExistingErrorCard.textContent = "配置错误";
+preExistingCardHost.append(preExistingErrorCard);
+preExistingErrorCard.isConnected = false;
+const documentNodes = [preExistingCardHost, preExistingErrorCard];
 globalThis.document = {
+  body: documentBody,
   createElement: (selector) => new FakeNode(selector),
+  querySelectorAll: () => documentNodes,
+};
+const animationFrames = new Map();
+let nextAnimationFrame = 0;
+globalThis.requestAnimationFrame = (callback) => {
+  const id = ++nextAnimationFrame;
+  animationFrames.set(id, callback);
+  return id;
+};
+globalThis.cancelAnimationFrame = (id) => animationFrames.delete(id);
+const flushAnimationFrames = () => {
+  const callbacks = [...animationFrames.values()];
+  animationFrames.clear();
+  callbacks.forEach((callback) => callback(Date.now()));
+};
+globalThis.MutationObserver = class {
+  static instances = [];
+  constructor(callback) {
+    this.callback = callback;
+    this.observeCalls = [];
+    this.disconnectCalls = 0;
+    globalThis.MutationObserver.instances.push(this);
+  }
+
+  observe(target, options) { this.observeCalls.push({ target, options }); }
+  disconnect() { this.disconnectCalls += 1; }
+  trigger(records) { this.callback(records); }
 };
 globalThis.Option = class extends FakeNode {
   constructor(text, value) {
@@ -144,6 +243,70 @@ globalThis.ResizeObserver = class {
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
 
 await import(new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js", import.meta.url));
+const rebuildRegistry = window.__kc761SpectrumRebuildRegistry;
+const rebuildObserver = MutationObserver.instances.at(-1);
+assert.ok(rebuildRegistry.active, "late registration window remains active");
+assert.equal(preExistingErrorCard.dispatchCount || 0, 0, "a detached error card waits for insertion");
+advanceTimers(6000);
+assert.ok(rebuildRegistry.active, "window covers a six-second delayed error card");
+const nonKC761RebuildCard = new FakeNode("hui-error-card");
+nonKC761RebuildCard.config = { type: "markdown" };
+nonKC761RebuildCard.isConnected = true;
+const detachedRebuildCard = new FakeNode("hui-error-card");
+detachedRebuildCard.config = { type: "custom:kc761-spectrum-card" };
+detachedRebuildCard.isConnected = false;
+preExistingErrorCard.isConnected = true;
+rebuildObserver.trigger([{ addedNodes: [nonKC761RebuildCard, detachedRebuildCard, preExistingErrorCard] }]);
+assert.equal(nonKC761RebuildCard.dispatchCount || 0, 0, "non-KC761 error card is ignored");
+assert.equal(detachedRebuildCard.dispatchCount || 0, 0, "detached error card is ignored");
+assert.equal(preExistingErrorCard.dispatchCount, 1, "late registration rebuilds an attached KC761 error card once");
+assert.equal(preExistingErrorCard.lastEvent?.type, "ll-rebuild");
+assert.equal(preExistingErrorCard.lastEvent?.bubbles, true);
+assert.equal(preExistingErrorCard.lastEvent?.composed, true);
+assert.equal(rebuildRegistry.active, false, "successful rebuild cleans the bounded window");
+rebuildObserver.trigger([{ addedNodes: [preExistingErrorCard] }]);
+assert.equal(preExistingErrorCard.dispatchCount, 1, "a rebuilt error-card node is not retriggered");
+documentNodes.splice(0);
+
+// Targeted queries must find a KC761 error card after more than the old
+// alpha34 96-root budget, without spending the generic node budget first.
+const lateTargetCard = new FakeNode("hui-error-card");
+lateTargetCard.config = { type: "custom:kc761-spectrum-card" };
+lateTargetCard.isConnected = true;
+const lateRootHosts = Array.from({ length: 120 }, (_, index) => {
+  const host = new FakeNode(`late-root-host-${index}`);
+  host.isConnected = true;
+  const root = new FakeShadowRoot();
+  root.isConnected = true;
+  root.querySelectorAll = (selector) => selector === "hui-error-card" && index === 119 ? [lateTargetCard] : [];
+  host.shadowRoot = root;
+  return host;
+});
+documentNodes.push(...lateRootHosts);
+const targetedRegistry = window.__kc761SpectrumRebuildRegistry;
+targetedRegistry.active = true;
+targetedRegistry.cleanupReason = "";
+targetedRegistry.observedRoots = new Set([document]);
+targetedRegistry.observers = [rebuildObserver];
+targetedRegistry.scannedNodes = 0;
+targetedRegistry.scanRoots = 1;
+targetedRegistry.eventCount = 0;
+targetedRegistry.dispatchedCount = 0;
+targetedRegistry.targetQueryCount = 0;
+targetedRegistry.targetedQueryHit = false;
+targetedRegistry.candidateSeenButBlocked = false;
+targetedRegistry.budgetReason = "";
+targetedRegistry.truncated = false;
+rebuildObserver.trigger([{ addedNodes: lateRootHosts }]);
+assert.equal(lateTargetCard.dispatchCount, 1, "targeted query reaches a card after 96 roots");
+assert.equal(targetedRegistry.active, false, "targeted dispatch cleans the bounded window");
+assert.equal(targetedRegistry.cleanupReason, "dispatched");
+assert.equal(targetedRegistry.targetedQueryHit, true);
+assert.equal(targetedRegistry.candidateSeenButBlocked, false);
+assert.ok(targetedRegistry.scanRoots > 96 && targetedRegistry.scanRoots <= 160);
+assert.ok(targetedRegistry.targetQueryCount > 96 && targetedRegistry.targetQueryCount <= 256);
+documentNodes.splice(0);
+
 const Card = customElements.get("kc761-spectrum-card");
 assert.ok(Card);
 assert.equal(Card.getStubConfig().entity, undefined);
@@ -156,18 +319,19 @@ const collect = (schema) => schema.forEach((item) => {
   if (item.schema) collect(item.schema);
 });
 collect(form.schema);
-for (const name of ["entity", "title", "x_axis", "y_axis", "refresh_interval", "show_controls", "show_summary", "show_legend", "show_actions", "show_peak"]) {
+for (const name of ["entity", "title", "x_axis", "y_axis", "refresh_interval", "show_controls", "show_summary", "show_legend", "show_actions", "show_peak", "diagnostics"]) {
   assert.ok(schemaNames.includes(name), `missing form field ${name}`);
 }
 assert.doesNotThrow(() => form.assertConfig({ title: "picker placeholder" }));
 assert.throws(() => Card.validateConfig({ entity: "sensor.kc761_spectrum", refresh_interval: 4 }), /refresh_interval/);
 assert.throws(() => Card.validateConfig({ entity: "sensor.kc761_spectrum", y_axis: "sqrt" }), /y_axis/);
 assert.throws(() => Card.validateConfig({ entity: "sensor.kc761_spectrum", show_peak: "yes" }), /show_peak/);
+assert.throws(() => Card.validateConfig({ entity: "sensor.kc761_spectrum", diagnostics: "yes" }), /diagnostics/);
 
 const state = { attributes: { config_entry_id: "entry", codec_profile: "manual_v1_8_candidate", points: Array.from({ length: 2048 }, (_, i) => [i, i / 2, i]) } };
 const suggestion = Card.getEntitySuggestion({ states: { "sensor.real_spectrum": state } }, "sensor.real_spectrum");
 assert.deepEqual(Object.keys(suggestion), ["config"]);
-assert.deepEqual(Object.keys(suggestion.config).sort(), ["entity", "refresh_interval", "show_actions", "show_controls", "show_legend", "show_peak", "show_summary", "title", "type", "x_axis", "y_axis"].sort());
+assert.deepEqual(Object.keys(suggestion.config).sort(), ["diagnostics", "entity", "refresh_interval", "show_actions", "show_controls", "show_legend", "show_peak", "show_summary", "title", "type", "x_axis", "y_axis"].sort());
 assert.equal(suggestion.config.entity, "sensor.real_spectrum");
 assert.equal(Card.getEntitySuggestion({ states: { "sensor.other": { attributes: { points: [[0, 0, 1]] } } } }, "sensor.other"), null);
 
@@ -188,12 +352,238 @@ assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount(
 assert.equal(card.shadowRoot.querySelector("#reset-zoom").listenerCount("click"), 1);
 assert.equal(card.shadowRoot.querySelector("#reset-zoom").disabled, true);
 assert.match(card.shadowRoot.querySelector("#zoom-readout").getAttribute("aria-label"), /^View CH /);
+assert.equal(card.shadowRoot.querySelector("#roi-start-value").textContent, "Start CH 0");
+assert.equal(card.shadowRoot.querySelector("#roi-end-value").textContent, "End CH 2047");
+assert.equal(card.shadowRoot.querySelector("#roi-start-value").getAttribute("aria-label"), "Start channel 0");
+assert.equal(card.shadowRoot.querySelector("#roi-end-value").getAttribute("aria-label"), "End channel 2047");
 assert.equal(card.shadowRoot.querySelector("#controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
 assert.equal(card.shadowRoot.querySelector(".summary").hidden, false);
 assert.equal(card.shadowRoot.querySelector('[data-summary="peak"]').hidden, true);
 assert.equal(card.shadowRoot.querySelector('[data-legend="peak"]').hidden, true);
+
+// Diagnostics are opt-in, session-only, bounded, redacted, and must not add
+// storage writes or UI when disabled.
+const diagnosticsKey = "kc761-spectrum:diagnostics:v7";
+storage.delete(diagnosticsKey);
+storageWrites = 0;
+const diagnosticsOffCard = new Card();
+diagnosticsOffCard.setConfig({ entity: "sensor.diagnostics_off" });
+assert.equal(storageWrites, 0, "diagnostics off must not write session storage");
+assert.equal(diagnosticsOffCard.shadowRoot.querySelector("#export-diagnostics").hidden, true);
+
+const diagnosticsCard = new Card();
+diagnosticsCard.setConfig({ entity: "sensor.diagnostics_enabled", diagnostics: true });
+assert.equal(diagnosticsCard.shadowRoot.querySelector("#export-diagnostics").hidden, false);
+const diagnosticsRegistry = window.__kc761SpectrumDiagnosticsRegistry;
+assert.ok(diagnosticsRegistry.globalButton, "diagnostics installs a body-level export button");
+assert.equal(diagnosticsRegistry.globalButton.textContent, "Export KC761 diagnostics");
+assert.equal(window._listenerCounts.get("error"), 1, "diagnostics installs one window error listener");
+assert.equal(window._listenerCounts.get("unhandledrejection"), 1, "diagnostics installs one rejection listener");
+let diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+assert.equal(diagnosticsSnapshot.schema, 7);
+assert.equal(diagnosticsSnapshot.enabled, true);
+assert.deepEqual(Object.keys(diagnosticsSnapshot).sort(), ["coalesced_events", "dropped_events", "dropped_failures", "enabled", "events", "export_snapshot", "failures", "observer_stats", "redacted", "schema", "sequence", "version"].sort());
+assert.ok(diagnosticsSnapshot.events.some((event) => event.event === "set-config-valid"));
+assert.ok(diagnosticsSnapshot.events.every((event) => Number.isSafeInteger(event.page_session) && event.page_session > 0));
+assert.ok(Number.isSafeInteger(JSON.parse(storage.get(diagnosticsKey)).events.at(-1).page_session));
+diagnosticsCard._recordDiagnostic("registration-rebuild-dispatch", {
+  dispatched: true,
+  dispatch_succeeded: true,
+  dispatch_outcome: "dispatched",
+  found_at: "2026-08-24T00:00:00.000Z",
+  targeted_query_hit: true,
+  target_query_count: 121,
+  target_registry_defined: false,
+  truncated: false,
+});
+diagnosticsCard._recordDiagnostic("registration-rebuild-cleanup", {
+  cleanup_reason: "timeout",
+  budget_reason: "time",
+  candidate_seen_but_blocked: false,
+  truncated: true,
+  dispatched_count: 0,
+});
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+const rebuildDispatchEvent = diagnosticsSnapshot.events.find((event) => event.event === "registration-rebuild-dispatch");
+assert.equal(rebuildDispatchEvent.dispatched, true);
+assert.equal(rebuildDispatchEvent.dispatch_succeeded, true);
+assert.equal(rebuildDispatchEvent.dispatch_outcome, "dispatched");
+assert.equal(rebuildDispatchEvent.target_registry_defined, false);
+assert.equal(rebuildDispatchEvent.found_at, "2026-08-24T00:00:00.000Z");
+assert.equal(rebuildDispatchEvent.targeted_query_hit, true);
+assert.equal(rebuildDispatchEvent.target_query_count, 121);
+const rebuildCleanupEvent = diagnosticsSnapshot.events.find((event) => event.event === "registration-rebuild-cleanup");
+assert.equal(rebuildCleanupEvent.cleanup_reason, "timeout");
+assert.equal(rebuildCleanupEvent.budget_reason, "time");
+assert.equal(rebuildCleanupEvent.candidate_seen_but_blocked, false);
+assert.equal(rebuildCleanupEvent.truncated, true);
+diagnosticsCard._recordDiagnostic("hass-entry", { has_hass: true });
+diagnosticsCard._recordDiagnostic("hass-entry", { has_hass: true });
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+assert.ok(diagnosticsSnapshot.coalesced_events >= 1, "repeated readiness events are coalesced");
+assert.ok(diagnosticsSnapshot.events.some((event) => event.event === "hass-entry" && event.repeat >= 2));
+assert.equal(JSON.stringify(diagnosticsSnapshot).includes("sensor.diagnostics_enabled"), false);
+assert.equal(JSON.stringify(diagnosticsSnapshot).includes("points"), false);
+assert.equal(JSON.stringify(diagnosticsSnapshot).includes("192.168."), false);
+
+for (let index = 0; index < 120; index += 1) {
+  assert.throws(() => diagnosticsCard.setConfig("not-an-object"), /configuration must be an object/);
+}
+const recordRedactionFailure = () => diagnosticsCard._recordDiagnosticError("test-redaction", new Error('sensor.secret_spectrum at 192.168.8.127:7601 host=kc761.local token=secret "points":[1,2] device_id=abc'));
+recordRedactionFailure();
+recordRedactionFailure();
+for (let index = 0; index < 140; index += 1) diagnosticsCard._recordDiagnostic("normal-noise", { count: index });
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+assert.ok(diagnosticsSnapshot.events.length <= 100, "diagnostic events are ring-buffer bounded");
+assert.ok(diagnosticsSnapshot.failures.length <= 20, "diagnostic failures are sticky but bounded");
+assert.ok(diagnosticsSnapshot.failures.some((failure) => failure.event === "test-redaction"), "failure survives normal-event churn");
+assert.ok(diagnosticsSnapshot.failures.find((failure) => failure.event === "test-redaction")?.repeat >= 2, "identical failures are deduplicated");
+assert.ok(JSON.stringify(diagnosticsSnapshot).length <= 60000, "diagnostic payload is size bounded");
+const redactedText = JSON.stringify(diagnosticsSnapshot);
+assert.equal(redactedText.includes("sensor.secret_spectrum"), false);
+assert.equal(redactedText.includes("192.168.8.127"), false);
+assert.equal(redactedText.includes("kc761.local"), false);
+assert.equal(redactedText.includes("token=secret"), false);
+assert.equal(redactedText.includes("\"points\":[1,2]"), false);
+assert.equal(redactedText.includes("device_id=abc"), false);
+
+const errorCard = new FakeNode("hui-error-card");
+errorCard.textContent = "配置错误 sensor.hidden at 192.168.8.127 token=secret points=[1,2]";
+const activeObserver = globalThis.MutationObserver.instances.at(-1);
+assert.ok(activeObserver, "diagnostics installs an error-card observer");
+activeObserver.trigger([{ addedNodes: [errorCard] }]);
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+const observedFailure = diagnosticsSnapshot.failures.find((failure) => failure.event === "lovelace-error-card");
+assert.ok(observedFailure, "diagnostics records a Lovelace error card");
+assert.equal(observedFailure.config_type_is_kc761, "unknown");
+assert.equal(typeof observedFailure.node_path, "string");
+assert.ok([true, false, "unknown"].includes(observedFailure.resource_version_match));
+assert.equal(typeof observedFailure.custom_element_defined, "boolean");
+assert.equal(typeof observedFailure.module_evaluated, "boolean");
+assert.equal(typeof observedFailure.card_instances, "number");
+assert.equal(JSON.stringify(observedFailure).includes("sensor.hidden"), false);
+assert.equal(JSON.stringify(observedFailure).includes("192.168.8.127"), false);
+assert.equal(JSON.stringify(observedFailure).includes("token=secret"), false);
+assert.equal(JSON.stringify(observedFailure).includes("points=[1,2]"), false);
+
+const typedErrorCard = new FakeNode("hui-error-card");
+typedErrorCard.config = { type: "custom:kc761-spectrum-card" };
+typedErrorCard.textContent = "KC761 configuration error";
+activeObserver.trigger([{ addedNodes: [typedErrorCard] }]);
+activeObserver.trigger([{ addedNodes: [typedErrorCard] }]);
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+const typedFailures = diagnosticsSnapshot.failures.filter((failure) => failure.error_message?.includes("KC761 configuration error"));
+assert.equal(typedFailures.length, 1, "the same error-card DOM node is recorded once");
+assert.equal(typedFailures[0].config_type_is_kc761, true);
+
+const otherErrorCard = new FakeNode("hui-error-card");
+otherErrorCard.config = { type: "markdown" };
+otherErrorCard.textContent = "Other card configuration error";
+activeObserver.trigger([{ addedNodes: [otherErrorCard] }]);
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+const otherFailure = diagnosticsSnapshot.failures.find((failure) => failure.error_message?.includes("Other card configuration error"));
+assert.equal(otherFailure.config_type_is_kc761, false);
+
+const nestedErrorCard = new FakeNode("hui-error-card");
+nestedErrorCard.textContent = "nested configuration error sensor.nested_secret at 192.168.8.127";
+const nestedShadowRoot = new FakeNode("shadow-root");
+nestedShadowRoot.querySelectorAll = (selector) => selector === "hui-error-card, ha-card.error" || selector === "*" ? [nestedErrorCard] : [];
+const nestedShadowHost = new FakeNode("hui-view");
+nestedShadowHost.shadowRoot = nestedShadowRoot;
+activeObserver.trigger([{ addedNodes: [nestedShadowHost] }]);
+diagnosticsSnapshot = JSON.parse(storage.get(diagnosticsKey));
+const nestedFailure = diagnosticsSnapshot.failures.find((failure) => failure.error_message?.includes("nested configuration error"));
+assert.ok(nestedFailure, "diagnostics observes an error card in an open nested shadow root");
+assert.equal(JSON.stringify(nestedFailure).includes("sensor.nested_secret"), false);
+assert.ok(diagnosticsSnapshot.observer_stats.roots >= 2);
+
+// The continuous observer is intentionally capped.  A deep export must still
+// inspect a larger accessible tree at click time, while keeping the root and
+// node budgets bounded and redacting card text.
+const originalDocumentQuery = globalThis.document.querySelectorAll;
+const originalBodyQuery = globalThis.document.body.querySelectorAll;
+const deepHosts = Array.from({ length: 280 }, (_, index) => new FakeNode(`ha-host-${index}`));
+const deepErrorCard = new FakeNode("hui-error-card");
+deepErrorCard.textContent = "配置错误 sensor.deep_secret at 192.168.8.127 token=secret points=[1,2]";
+const deepShadowRoot = new FakeNode("shadow-root");
+deepShadowRoot.querySelectorAll = (selector) => selector === "*" || selector === "hui-error-card, ha-card.error" ? [deepErrorCard] : [];
+deepHosts[79].shadowRoot = deepShadowRoot;
+globalThis.document.querySelectorAll = (selector) => selector === "*" ? deepHosts : [];
+globalThis.document.body.querySelectorAll = globalThis.document.querySelectorAll;
+assert.equal(diagnosticsSnapshot.failures.some((failure) => failure.event === "lovelace-error-card-snapshot"), false);
+let deepExportedDiagnostics = "";
+const deepOriginalBlob = globalThis.Blob;
+const deepOriginalUrl = globalThis.URL;
+globalThis.Blob = class {
+  constructor(parts) { deepExportedDiagnostics = parts.join(""); }
+};
+globalThis.URL = { createObjectURL: () => "blob:deep", revokeObjectURL() {} };
+diagnosticsRegistry.globalButton.click();
+assert.match(deepExportedDiagnostics, /"schema": 7/);
+assert.match(deepExportedDiagnostics, /lovelace-error-card-snapshot/);
+assert.equal(deepExportedDiagnostics.includes("sensor.deep_secret"), false);
+assert.equal(deepExportedDiagnostics.includes("192.168.8.127"), false);
+assert.equal(deepExportedDiagnostics.includes("token=secret"), false);
+assert.equal(deepExportedDiagnostics.includes("points=[1,2]"), false);
+const deepPayload = JSON.parse(deepExportedDiagnostics);
+assert.ok(Number.isSafeInteger(deepPayload.page_session) && deepPayload.page_session > 0);
+assert.ok(deepPayload.diagnostics_context.resource_version_match === "unknown");
+assert.ok(deepPayload.export_snapshot.roots <= 256);
+assert.ok(deepPayload.export_snapshot.nodes <= 10000);
+assert.ok(deepPayload.export_snapshot.error_cards >= 1);
+globalThis.Blob = deepOriginalBlob;
+globalThis.URL = deepOriginalUrl;
+globalThis.document.querySelectorAll = originalDocumentQuery;
+globalThis.document.body.querySelectorAll = originalBodyQuery;
+
+let exportedDiagnostics = "";
+const originalBlob = globalThis.Blob;
+const originalUrl = globalThis.URL;
+globalThis.Blob = class {
+  constructor(parts) { exportedDiagnostics = parts.join(""); }
+};
+globalThis.URL = { createObjectURL: () => "blob:kc761", revokeObjectURL() {} };
+assert.doesNotThrow(() => diagnosticsCard._exportDiagnostics());
+assert.match(exportedDiagnostics, /"redacted": true/);
+assert.match(exportedDiagnostics, /"schema": 7/);
+assert.match(exportedDiagnostics, /"failures":/);
+assert.match(exportedDiagnostics, /"observer_stats":/);
+assert.match(exportedDiagnostics, /"diagnostics_context":/);
+assert.equal(exportedDiagnostics.includes("sensor.secret_spectrum"), false);
+globalThis.Blob = originalBlob;
+globalThis.URL = originalUrl;
+
+// A second enabled instance and a repeated module import share one pair of
+// global listeners; neither import nor reload can multiply them.
+const secondDiagnosticsCard = new Card();
+secondDiagnosticsCard.setConfig({ entity: "sensor.diagnostics_second", diagnostics: true });
+assert.equal(window._listenerCounts.get("error"), 1);
+await import(new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js?diagnostics-repeat=1", import.meta.url));
+assert.equal(window._listenerCounts.get("error"), 1);
+diagnosticsCard.disconnectedCallback();
+secondDiagnosticsCard.disconnectedCallback();
+assert.equal(window._listenerCounts.get("error"), 1, "diagnostics listeners survive card replacement while session flag is enabled");
+assert.equal(activeObserver.disconnectCalls, 0, "error-card observer survives card replacement");
+assert.ok(diagnosticsRegistry.globalButton, "body export button survives card replacement");
+secondDiagnosticsCard.setConfig({ entity: "sensor.diagnostics_second", diagnostics: false });
+assert.equal(window._listenerCounts.get("error"), 0, "explicit diagnostics false stops global listeners");
+assert.equal(activeObserver.disconnectCalls, 1, "explicit diagnostics false stops error-card observer");
+assert.equal(diagnosticsRegistry.globalButton, null, "explicit diagnostics false removes body export button");
+assert.ok(globalThis.MutationObserver.instances.some((observer) => observer.disconnectCalls === 1), "nested observers are cleaned");
+
+const originalSessionDescriptor = Object.getOwnPropertyDescriptor(globalThis.window, "sessionStorage");
+Object.defineProperty(globalThis.window, "sessionStorage", { configurable: true, get() { throw new Error("session storage unavailable"); } });
+assert.doesNotThrow(() => {
+  const blockedDiagnosticsCard = new Card();
+  blockedDiagnosticsCard.setConfig({ entity: "sensor.blocked_diagnostics", diagnostics: true });
+  blockedDiagnosticsCard._exportDiagnostics();
+  blockedDiagnosticsCard.disconnectedCallback();
+});
+Object.defineProperty(globalThis.window, "sessionStorage", originalSessionDescriptor);
+assert.equal(JSON.parse(storage.get(diagnosticsKey)).enabled, false, "disabled diagnostics must stop recording globally");
+
 card.setConfig({ entity: "sensor.real_spectrum", show_summary: false, show_legend: false, show_actions: false });
 assert.equal(card.shadowRoot.querySelector(".summary").hidden, true);
 assert.equal(card.shadowRoot.querySelector(".legend").hidden, true);
@@ -222,7 +612,45 @@ assert.equal(card.shadowRoot.querySelector("#roi-start")["aria-valuenow"], "0");
 assert.equal(card.shadowRoot.querySelector("#roi-end")["aria-valuenow"], "2047");
 card._setCursorChannel("roiStart", 321);
 assert.equal(card.shadowRoot.querySelector("#roi-start").value, "321");
-assert.equal(card.shadowRoot.querySelector("#roi-start-value").textContent, "321");
+assert.equal(card.shadowRoot.querySelector("#roi-start-value").textContent, "Start CH 321");
+
+// HA can assign hass before setConfig, and a dashboard refresh can briefly
+// expose a null/incomplete state object.  These transitions must show a
+// stable status instead of throwing through Lovelace's card-config wrapper.
+const hassBeforeConfig = new Card();
+assert.doesNotThrow(() => {
+  hassBeforeConfig.hass = { states: {} };
+  hassBeforeConfig.setConfig({ entity: "sensor.ordering_spectrum" });
+});
+const incompleteHassCard = new Card();
+incompleteHassCard.setConfig({ entity: "sensor.incomplete_spectrum" });
+assert.doesNotThrow(() => { incompleteHassCard.hass = null; });
+assert.equal(incompleteHassCard.shadowRoot.querySelector("#status").textContent, "Waiting for Home Assistant state");
+assert.doesNotThrow(() => { incompleteHassCard.hass = {}; });
+assert.equal(incompleteHassCard.shadowRoot.querySelector("#status").textContent, "Waiting for Home Assistant state");
+assert.doesNotThrow(() => { incompleteHassCard.hass = { states: null }; });
+assert.equal(incompleteHassCard.shadowRoot.querySelector("#status").textContent, "Waiting for Home Assistant state");
+assert.doesNotThrow(() => { incompleteHassCard.hass = { states: {} }; });
+assert.equal(incompleteHassCard.shadowRoot.querySelector("#status").textContent, "Entity not found: sensor.incomplete_spectrum");
+const recoveredState = { attributes: { config_entry_id: "entry-recovered", codec_profile: "manual_v1_8_candidate", points: [] } };
+assert.doesNotThrow(() => { incompleteHassCard.hass = { states: { "sensor.incomplete_spectrum": recoveredState } }; });
+assert.ok(incompleteHassCard._data, "a later complete state recovers the card after an incomplete hass update");
+const originalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis.window, "localStorage");
+Object.defineProperty(globalThis.window, "localStorage", { configurable: true, get() { throw new Error("storage unavailable"); } });
+assert.doesNotThrow(() => {
+  const storageRaceCard = new Card();
+  storageRaceCard.setConfig({ entity: "sensor.storage_race" });
+  storageRaceCard.hass = { states: {} };
+});
+Object.defineProperty(globalThis.window, "localStorage", originalStorageDescriptor);
+const multiInstanceCards = [new Card(), new Card()];
+assert.doesNotThrow(() => {
+  multiInstanceCards.forEach((instance, index) => {
+    instance.setConfig({ entity: `sensor.multi_${index}` });
+    instance.hass = { states: {} };
+    instance.connectedCallback();
+  });
+});
 
 const layoutCard = card.shadowRoot.querySelector("ha-card");
 layoutCard.clientHeight = 500;
@@ -369,9 +797,10 @@ zoomCard._onZoom({ batch: [{ start: 25, end: 75 }] });
 assert.deepEqual(zoomCard._zoom, { start: 25, end: 75 }, "ECharts datazoom events update card-local state");
 assert.equal(zoomCard._option().dataZoom[0].start, 25);
 assert.equal(zoomCard._option().dataZoom[1].end, 75);
-const preservedZoom = zoomCard._zoom;
+const preservedZoomChannels = zoomCard._zoomChannelRange();
 zoomCard._setData({ snapshot_id: "latest", source: 0, channel: 0, points: fullPoints.map((point) => [point[0], point[1], point[2] + 1]) });
-assert.deepEqual(zoomCard._zoom, preservedZoom, "same dataset identity preserves zoom on refresh");
+assert.deepEqual(zoomCard._zoomChannelRange(), preservedZoomChannels, "same live identity preserves zoom channels on refresh");
+assert.notDeepEqual(zoomCard._zoom, { start: 0, end: 100 }, "same live identity remains zoomed after refresh");
 zoomCard._setData({ snapshot_id: "saved-1", source: 0, channel: 0, points: fullPoints });
 assert.deepEqual(zoomCard._zoom, { start: 0, end: 100 }, "history identity change resets zoom");
 zoomCard._setZoomRange(50, 50);
@@ -385,6 +814,144 @@ zoomCard._setZoomRange(10, 60);
 zoomCard._resetZoom();
 assert.deepEqual(dispatches, [{ type: "dataZoom", dataZoomIndex: [0, 1], start: 0, end: 100 }]);
 assert.equal(zoomCard.shadowRoot.querySelector("#reset-zoom").disabled, true);
+
+// ROI, Data cursor and zoom are stored as channel coordinates in a
+// schema-versioned localStorage record.  Live captures deliberately use one
+// stable key even when the device gives each capture a new snapshot id.
+const persistentData = {
+  snapshot_id: "capture-1",
+  source: 0,
+  channel: "Gamma",
+  points: fullPoints,
+};
+const persistentCard = new Card();
+persistentCard.setConfig({ entity: "sensor.persist_spectrum" });
+persistentCard._setData(persistentData, { viewMode: "live" });
+const liveViewKey = persistentCard._viewStateKey;
+assert.match(liveViewKey, /^kc761-spectrum:view-state:v1:/);
+assert.match(liveViewKey, /sensor\.persist_spectrum/);
+storageWrites = 0;
+persistentCard._setCursorChannel("roiStart", 120);
+persistentCard._setCursorChannel("roiEnd", 880);
+persistentCard._setCursorChannel("data", 777);
+persistentCard._setZoomRange(12, 66);
+assert.equal(storageWrites, 0, "view writes are coalesced until the timer flushes");
+flushTimers();
+assert.equal(storageWrites, 1, "one timer flushes multiple ROI/data/zoom changes");
+const persistedView = JSON.parse(storage.get(liveViewKey));
+assert.equal(persistedView.schema, 1);
+assert.deepEqual(persistedView.roi, { start_channel: 120, end_channel: 880 });
+assert.equal(persistedView.data_cursor_channel, 777);
+assert.deepEqual(persistedView.zoom, { start_channel: 246, end_channel: 1351 });
+assert.equal(persistedView.mode, "live");
+
+const liveRange = persistentCard._zoomChannelRange();
+persistentCard._setData({ ...persistentData, snapshot_id: "capture-2", points: fullPoints.map((point) => [point[0], point[1], point[2] + 5]) }, { viewMode: "live" });
+assert.deepEqual(persistentCard._zoomChannelRange(), liveRange, "same live key preserves zoom across new snapshot content");
+assert.equal(persistentCard._cursor.roiStart, 120);
+assert.equal(persistentCard._cursor.data, 777);
+
+// A new card instance is the page-reload case.  It restores the live record
+// before drawing, and ignores the live snapshot id when computing its key.
+const reloadedCard = new Card();
+reloadedCard.setConfig({ entity: "sensor.persist_spectrum" });
+reloadedCard._setData({ ...persistentData, snapshot_id: "capture-3" }, { viewMode: "live" });
+assert.equal(reloadedCard._viewStateKey, liveViewKey);
+assert.equal(reloadedCard._cursor.roiStart, 120);
+assert.equal(reloadedCard._cursor.roiEnd, 880);
+assert.equal(reloadedCard._cursor.data, 777);
+assert.deepEqual(reloadedCard._zoomChannelRange(), liveRange, "page reload restores zoom channel boundaries");
+
+// Source/channel and entity keys are isolated, and switching back restores
+// the original live view instead of carrying values across channels.
+const isolatedCard = new Card();
+isolatedCard.setConfig({ entity: "sensor.persist_spectrum" });
+isolatedCard._setData({ ...persistentData, source: 1, channel: "Neutron" }, { viewMode: "live" });
+assert.notEqual(isolatedCard._viewStateKey, liveViewKey);
+assert.deepEqual(isolatedCard._cursor, { roiStart: 0, roiEnd: 2047, data: 0 });
+isolatedCard._setCursorChannel("roiStart", 9);
+isolatedCard._setCursorChannel("roiEnd", 19);
+isolatedCard._setZoomRange(40, 60);
+flushTimers();
+isolatedCard._setData({ ...persistentData, source: 0, channel: "Gamma" }, { viewMode: "live" });
+assert.equal(isolatedCard._cursor.roiStart, 120, "switching back restores the Gamma ROI");
+assert.equal(isolatedCard._cursor.data, 777, "switching back restores the Gamma data cursor");
+assert.deepEqual(isolatedCard._zoomChannelRange(), liveRange, "switching back restores the Gamma zoom");
+
+// Saved history has a stable record id and its own state; returning to live
+// and then to the same record restores the respective records.
+const historyData = { ...persistentData, snapshot_id: "saved-abc" };
+isolatedCard._setData(historyData, { viewMode: "history:saved-abc" });
+const historyViewKey = isolatedCard._viewStateKey;
+assert.notEqual(historyViewKey, liveViewKey);
+assert.deepEqual(isolatedCard._zoom, { start: 0, end: 100 });
+isolatedCard._setCursorChannel("roiStart", 900);
+isolatedCard._setCursorChannel("roiEnd", 1200);
+isolatedCard._setCursorChannel("data", 1100);
+isolatedCard._setZoomRange(70, 90);
+flushTimers();
+isolatedCard._setData({ ...persistentData, snapshot_id: "capture-4" }, { viewMode: "live" });
+assert.equal(isolatedCard._cursor.roiStart, 120);
+isolatedCard._setData(historyData, { viewMode: "history:saved-abc" });
+assert.equal(isolatedCard._cursor.roiStart, 900);
+assert.equal(isolatedCard._cursor.roiEnd, 1200);
+assert.equal(isolatedCard._cursor.data, 1100);
+assert.deepEqual(isolatedCard._zoomChannelRange(), [1433, 1842]);
+
+const otherEntityCard = new Card();
+otherEntityCard.setConfig({ entity: "sensor.other_persist_spectrum" });
+otherEntityCard._setData(persistentData, { viewMode: "live" });
+assert.deepEqual(otherEntityCard._cursor, { roiStart: 0, roiEnd: 2047, data: 0 }, "entity keys are isolated");
+otherEntityCard.setConfig({ entity: "sensor.persist_spectrum" });
+otherEntityCard._setData({ ...persistentData, snapshot_id: "capture-5" }, { viewMode: "live" });
+assert.equal(otherEntityCard._cursor.roiStart, 120, "switching entities back restores the original record");
+
+// Reset zoom is persisted immediately, so a fresh instance starts at the
+// full range even if a previous zoom record existed.
+isolatedCard._setData({ ...persistentData, snapshot_id: "capture-6" }, { viewMode: "live" });
+isolatedCard._setZoomRange(20, 40);
+isolatedCard._resetZoom();
+const resetView = JSON.parse(storage.get(liveViewKey));
+assert.deepEqual(resetView.zoom, { start_channel: 0, end_channel: 2047 });
+const resetCard = new Card();
+resetCard.setConfig({ entity: "sensor.persist_spectrum" });
+resetCard._setData({ ...persistentData, snapshot_id: "capture-7" }, { viewMode: "live" });
+assert.deepEqual(resetCard._zoom, { start: 0, end: 100 }, "reset zoom survives a new card instance");
+
+// Corrupt/old-schema records and a throwing Storage implementation are safe
+// no-ops; no getter or view-state path may turn storage failure into a throw.
+storage.set(liveViewKey, "{not-json");
+const corruptCard = new Card();
+corruptCard.setConfig({ entity: "sensor.persist_spectrum" });
+assert.doesNotThrow(() => corruptCard._setData({ ...persistentData, snapshot_id: "capture-8" }, { viewMode: "live" }));
+assert.deepEqual(corruptCard._cursor, { roiStart: 0, roiEnd: 2047, data: 0 });
+storage.set(liveViewKey, JSON.stringify({ schema: 99, roi: { start_channel: 900, end_channel: 1000 } }));
+const oldSchemaCard = new Card();
+oldSchemaCard.setConfig({ entity: "sensor.persist_spectrum" });
+oldSchemaCard._setData({ ...persistentData, snapshot_id: "capture-9" }, { viewMode: "live" });
+assert.deepEqual(oldSchemaCard._cursor, { roiStart: 0, roiEnd: 2047, data: 0 });
+const originalLocalStorage = globalThis.window.localStorage;
+globalThis.window.localStorage = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+const blockedStorageCard = new Card();
+blockedStorageCard.setConfig({ entity: "sensor.blocked_storage" });
+assert.doesNotThrow(() => {
+  blockedStorageCard._setData(persistentData, { viewMode: "live" });
+  blockedStorageCard._scheduleViewStatePersist({ flush: true });
+});
+globalThis.window.localStorage = originalLocalStorage;
+
+// A pending high-frequency datazoom is flushed on disconnect and its timer
+// is cleared, so a detached card cannot write later or leak a callback.
+const pendingCard = new Card();
+pendingCard.setConfig({ entity: "sensor.pending_storage" });
+pendingCard._setData(persistentData, { viewMode: "live" });
+storageWrites = 0;
+pendingCard._setZoomRange(30, 70);
+assert.equal(storageWrites, 0);
+pendingCard.disconnectedCallback();
+assert.equal(storageWrites, 1, "disconnect flushes pending view state");
+assert.equal(pendingCard._viewPersistTimer, null);
+assert.equal(pendingCard._viewPersistPending, false);
 
 const disposedChart = {
   offCalls: [],
@@ -485,8 +1052,76 @@ const lifecycle = new Card();
 lifecycle.setConfig({ entity: "sensor.lifecycle" });
 assert.ok(lifecycle._layoutResizeObserver);
 const layoutObserver = lifecycle._layoutResizeObserver;
+let compactUpdates = 0;
+lifecycle._updateCompactHeight = () => { compactUpdates += 1; };
+layoutObserver.trigger();
+layoutObserver.trigger();
+assert.notEqual(lifecycle._layoutResizeRaf, null, "layout observer schedules an animation frame");
+flushAnimationFrames();
+assert.equal(compactUpdates, 1, "layout resize notifications are coalesced");
+lifecycle._scheduleLayoutResize();
+assert.notEqual(lifecycle._layoutResizeRaf, null);
 lifecycle.disconnectedCallback();
 assert.equal(layoutObserver.disconnectCalls, 1);
 assert.equal(lifecycle._layoutResizeObserver, null);
+assert.equal(lifecycle._layoutResizeRaf, null, "disconnect cancels pending layout frame");
+
+let chartResizeCalls = 0;
+const resizeCard = Object.create(Card.prototype);
+resizeCard._detached = false;
+resizeCard._chart = { resize: () => { chartResizeCalls += 1; }, dispose() {} };
+resizeCard._chartResizeRaf = null;
+resizeCard._scheduleChartResize();
+resizeCard._scheduleChartResize();
+assert.notEqual(resizeCard._chartResizeRaf, null, "chart observer schedules an animation frame");
+flushAnimationFrames();
+assert.equal(chartResizeCalls, 1, "chart resize notifications are coalesced");
+resizeCard._scheduleChartResize();
+resizeCard._disposeChart();
+flushAnimationFrames();
+assert.equal(chartResizeCalls, 1, "disposed chart cannot resize from a late frame");
+
+// Reproduce the persisted Sections card config and the repeated construction
+// sequence used by a dashboard refresh.  This is the browser-side path that
+// HA wraps as a generic "配置错误" when setConfig/constructor throws.
+const dashboardConfig = {
+  entity: "sensor.kc761_2158_spectrum",
+  grid_options: { columns: "full", rows: "auto" },
+  refresh_interval: 60,
+  title: "KC761 Spectrum",
+  type: "custom:kc761-spectrum-card",
+  x_axis: "energy",
+  y_axis: "log",
+};
+const dashboardState = {
+  state: "0.13",
+  attributes: {
+    config_entry_id: "entry-dashboard",
+    codec_profile: "manual_v1_8_candidate",
+    points: Array.from({ length: 2048 }, (_, index) => [index, index * 2.5, index % 17]),
+  },
+};
+const missingConfigCard = new Card();
+assert.doesNotThrow(() => {
+  missingConfigCard.setConfig(undefined);
+  missingConfigCard.setConfig(null);
+  missingConfigCard.setConfig(dashboardConfig);
+}, "transient missing config must not become a Lovelace configuration error");
+assert.throws(
+  () => missingConfigCard.setConfig("not-an-object"),
+  /configuration must be an object/,
+  "malformed non-object config remains an explicit validation error",
+);
+for (let attempt = 0; attempt < 12; attempt += 1) {
+  const dashboardCard = new Card();
+  assert.doesNotThrow(() => {
+    dashboardCard.setConfig(dashboardConfig);
+    dashboardCard.connectedCallback();
+    dashboardCard.hass = { states: { "sensor.kc761_2158_spectrum": dashboardState } };
+    dashboardCard.disconnectedCallback();
+    dashboardCard.connectedCallback();
+    dashboardCard.setConfig(dashboardConfig);
+  }, "dashboard lifecycle attempt " + attempt);
+}
 
 console.log("frontend card contract: ok");

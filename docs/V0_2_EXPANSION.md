@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.24`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧和 Ctrl+滚轮 X 轴横向缩放已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.35`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -134,6 +134,8 @@ show_peak: true
 卡片不自行实现整卡条件编辑器。Home Assistant `hui-card-element-editor` 的标准编辑壳在支持的 Sections/仪表盘上下文提供 `config`、`visibility`、`layout` 三页；用户在“可见性”页设置的整卡条件与卡片内部 `show_*` 内容开关是两层不同语义。`getCardSize()` 固定返回确定性的 9 行估算，不读取渲染后高度，避免 HA Masonry 行数与卡片高度互相反馈；`getGridOptions()` 仅声明 Sections 使用满宽和至少 6 列，不固定行数，也不暴露任意像素高度。
 
 Y 轴有两个持久化层级：YAML/编辑器显式改变 `y_axis` 时更新该实体的 configured baseline 并覆盖旧偏好；用户在卡片运行时切换线性/对数时只更新 selected preference。页面刷新且 configured baseline 未改变时恢复 selected preference；每个实体使用独立 localStorage 键，存储异常安全降级为配置值。切换 `entity` 会清理旧设备、entry、历史、数据、ECharts 实例和自动刷新计时器，迟到的旧 WebSocket 结果不会回写新实体。
+
+alpha.25 另使用独立的 schema-versioned JSON localStorage 键持久化谱图视图状态。键至少包含实体、谱图 `channel`、`source` 和视图模式；实时模式固定为 `live`，不把每次自动/手动捕获生成的 snapshot id 放进键，历史模式使用稳定的 `snapshot_id`。每个键保存 ROI 起止通道、Data cursor 通道以及 zoom 的起止通道边界，因此同一实时谱图刷新、重绘、轴模式切换和页面重载不会重置视图；切换实体、通道或历史记录后，各自状态隔离，切回时恢复并按当前点数组钳制。交互写入采用合并节流，断开卡片前 flush；localStorage 不可用、JSON 损坏、schema 过期或数值越界时安全忽略/钳制，不触发网络请求。状态只属于当前浏览器站点和卡片配置档案，不会由 Home Assistant 同步；清除站点数据会回到默认全范围/游标起点。
 
 卡片提供：
 
@@ -336,7 +338,7 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 ### 8.18 `0.2.0-alpha.23` ECharts X 轴横向缩放
 
 - 谱图卡在同一 ECharts 实例中配置两个 `dataZoom`：一个可见 `slider` 位于图表内部底部保留区，另一个 `inside` 负责拖动/触控板交互；`inside.zoomOnMouseWheel` 固定为 `"ctrl"`，普通仪表盘滚轮不会被卡片抢占。两者均限定 `xAxisIndex: [0]`、`filterMode: "none"`，因此完整 2048 点数组仍用于 ROI 统计、自动峰值、数据游标、历史和 CSV。
-- 缩放状态是卡片本地状态，不写入 HA 配置或网络：同一实体/通道/历史数据集在自动刷新、重绘和 Y 轴切换时保留；实体切换、通道切换和历史快照切换通过数据集身份重置到 0–100%。少于 2048 点时按实际点数反算读数，最小跨度约 5 个通道（短至两点时退化为全范围）。
+- 缩放状态是卡片本地状态，不写入 HA 配置或网络：alpha.23/24 的内存态在同一实体/通道/历史数据集的自动刷新、重绘和 Y 轴切换时保留；alpha.25 进一步将 zoom 起止通道写入隔离的 localStorage 状态，页面重载和切换回同一数据集时也能恢复。实体、通道或历史快照没有对应记录时从 0–100% 开始；少于 2048 点时按实际点数反算读数，最小跨度约 5 个通道（短至两点时退化为全范围）。
 - 标题栏提供 `View CH a–b` 的 `role=status`/`aria-live` 读数和可访问 `Reset zoom` 按钮；重置只派发既有 ECharts `dataZoom` action，不产生协议调用。图内数据游标仍是完整 0–2047 范围的控制区 slider，缩放只影响视窗，不改游标数据。
 - `datazoom` listener 在每个 chart 实例创建时只绑定一次，在实体切换、断开和 dispose 前通过 `off` 移除；`ResizeObserver` 与 ECharts 实例沿用同一幂等销毁路径。图表底部从 28px 增加到 58px 的空间只属于 ECharts grid，卡片外层 `getCardSize()=9` 和固定行高 compact 链不变。
 - 本地前端契约覆盖 inside/slider 选项、Ctrl 滚轮、x-only/filter none、状态保持/数据集重置、短谱图最小跨度、重置按钮、无网络 getter 和 listener 清理；测试机浏览器的 slider/Ctrl-wheel 手势仍需在部署后由主任务人工验收。
@@ -345,6 +347,89 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 
 - alpha.23 的 inside dataZoom 初版修饰键设置与原生 History 不一致；为与 Home Assistant 原生 History 图表的交互约定一致，alpha.24 将唯一缩放修饰键改为 Ctrl。普通滚轮仍不触发缩放，visible slider、拖动、触控板和完整数据集语义不变。
 - 该修订同步 `CARD_VERSION`、集成 `VERSION`、manifest、卡片资源缓存 URL、运行时静态测试、前端契约和公开文档；无需变更协议层，也不会增加任何设备请求。
+
+### 8.20 `0.2.0-alpha.25` 谱图游标与横向缩放本地持久化
+
+- alpha.25 将 ROI 起止通道、Data cursor 通道和横向 zoom 起止通道纳入浏览器 `localStorage` 的 schema-versioned JSON；键隔离实体、谱图通道、`source` 和视图模式。实时谱图使用稳定的 `live` 模式键，不受设备每次捕获生成的新 snapshot id 影响；已保存谱图按稳定 `snapshot_id` 建立独立键。
+- 新卡片实例首次渲染或页面重载时恢复对应键；同一实时数据自动/手动刷新、重绘和 X/Y 轴切换保留状态；实体、source、channel 或 history 切换先 flush 当前键，再读取目标键，切回时恢复各自 ROI、Data cursor 和 zoom。当前点数变化时通道坐标和 zoom 会钳制到可用范围，短谱图不会产生 NaN 或越界。
+- ROI/Data slider 和 ECharts `datazoom` 交互写入使用一个合并节流 timer；`disconnectedCallback`、实体/数据集切换前会 flush 并清理 timer，chart listener 数量不变。`Reset zoom` 立即保存全范围。存储被浏览器策略阻止、JSON 损坏、schema 不匹配或数值非法时安全回退，不发起任何 HA WebSocket/设备请求。
+- 该状态是浏览器站点本地偏好，不写 HA 配置、不进入 Recorder、不会在设备或多个浏览器之间同步；清除站点数据、隐私模式禁用存储或更换浏览器会回到默认 ROI `0–2047`、Data cursor `0` 和 zoom `0–100%`。alpha.25 的本地契约覆盖 round-trip、页面重载新实例、同 live 刷新保持、实体/source/history 隔离、切回恢复、reset 持久化、损坏/异常存储、写入合并和断开 flush；固定测试栈/浏览器复核作为后续门禁记录。
+
+### 8.21 `0.2.0-alpha.26` 刷新初始化、ROI 文案与图内边框
+
+- alpha.26 为 `set hass()` 增加初始化顺序防护：HA 尚未提供对象、`states` 缺失或状态对象在刷新中暂时不可读时，卡片停止轮询并显示稳定的 `Waiting for Home Assistant state`，不让 `hass.states[...]` 的 TypeError 穿透 Lovelace 卡片配置包装；状态对象恢复后仍走原有严格的 KC761 谱图实体校验，真正缺少实体继续显示 `Entity not found: ...`。
+- 契约覆盖 hass-before-config、config-before-hass、null/incomplete hass、空 states、localStorage getter 异常和多次初始化；localStorage 失败仍安全降级，不改变协议请求或网络 getter 行为。该修复针对可复现的初始化异常，不把暂时 unavailable 或普通实体误报为配置有效。
+- ROI 摘要从裸的 `245 – 1549` 改为紧凑、可读并可访问的 `Start CH 245 · End CH 1549`，两个端点保留独立 `title`/`aria-label`，不会依赖额外换行改变卡片高度。
+- 移除 `.chart-wrap` 的外层视觉 border；HA `ha-card` 的外边框、ECharts axisLine、splitLine、ROI 高亮、数据游标、peak 和内部 zoom slider 保持不变。浏览器资源/高度/刷新次数及视觉边界仍需测试机部署后的人工门禁确认。
+
+### 8.22 `0.2.0-alpha.28` 暂态缺失卡片配置保护
+
+- 浏览器控制在本轮不可用（`agent.browsers.list()` 返回空），因此没有把用户当前错误卡片的 shadow DOM/console stack 写成已观测事实。测试机只读核对的 Lovelace 卡片配置是合法对象：`sensor.kc761_2158_spectrum`、`refresh_interval: 60`、`x_axis: energy`、`y_axis: log`、`grid_options.rows: auto`；alpha.26 资源为 HTTP 200 `text/javascript`，HA 与模拟器保持运行，最近日志无新的 KC761/frontend/exception 行。
+- 本地最小 DOM harness 在 alpha.26 精确复现了一个同步错误入口：`new Card().setConfig(undefined)` 和 `setConfig(null)` 都抛出 `Error("KC761 spectrum card configuration must be an object")`。这证明 Lovelace 若在重建窗口传入暂态缺失配置，会把该异常包装为“配置错误”；但由于浏览器 stack 不可取得，本轮不宣称这已经单独证明了用户当前页面的唯一根因。
+- alpha.28 只对 `null`/`undefined` 配置显示 `Waiting for card configuration` 并等待下一次有效 `setConfig`；字符串、数组、非法 entity/字段仍通过 `validateConfig` 抛出明确错误，不用宽泛 catch 隐藏真正的坏配置。新增测试覆盖真实保存配置的 12 次构造/连接/断开/重连、暂态缺失配置恢复和非法非对象配置仍报错。
+- alpha.28 的暂态保护已进入新的测试候选；浏览器连续刷新、错误卡片 stack、真实页面注册/资源时序仍是人工门禁。不得把本地 harness 通过或远端 HTTP 200 当成浏览器根因已证实。
+
+### 8.23 alpha.28 可选测试诊断（默认关闭）
+
+- 在卡片编辑器的 `Diagnostics` / `Test diagnostics` 开关，或 YAML 中加入 `diagnostics: true` 后，卡片才会在浏览器当前 tab 的 `sessionStorage` 开启诊断。它保存 schema 版本化的最多 100 条、约 60 KB 上限的环形事件；页面刷新/模块重新评估可继续追加，关闭 tab 后由浏览器清除。默认关闭时不写诊断存储、不注册全局监听器，也不显示导出按钮。
+- 记录仅限模块评估、Custom Element 幂等注册、构造/连接生命周期、配置入口/有效性、HA 状态就绪、绘制 generation、ECharts 动态导入和过滤到 KC761 源的窗口错误/未处理 rejection。事件只保留时间、序号、版本、安全布尔/计数及脱敏错误名/消息/栈；不写实体 ID、状态值、点阵、DEVICE_ID、host、token 或完整配置。存储不可用、JSON 损坏或配额不足时静默降级，不改变卡片配置校验与协议行为。
+- 开启后标题栏出现 `Export diagnostics`。点击只在本地生成一个下载 JSON，包含 `schema`、卡片版本、`redacted: true` 和事件；不自动上传。导出前后仍应检查内容不含实体、host、点阵、设备 ID 或凭据。该诊断仅用于用户主动提供的测试证据，不是稳定版默认遥测。
+- alpha.28 本地门禁为 `48 passed, 3 skipped`，Ruff、compileall、JSON、git diff check、Bundled Node syntax 和前端 contract 均通过；候选包 SHA-256 为 `9240406240d2bf78e26658a3943a9fc59d7b5a56cc50f113a89571af60352975`。测试栈部署后 manifest/card/ECharts release 与 live 哈希一致、HA 根页及两个静态资源均为 HTTP 200，两个容器保持 running/restart=0；本次部署后观察窗口模拟器命令计数为 `0x52/0x53/0x54/0x55/0x62/0x63/0x64/0x66 = 0`，未执行真实设备探针。浏览器开启诊断、连续刷新和下载 JSON 仍由用户手动完成。
+
+### 8.24 `0.2.0-alpha.29` 诊断 schema 2：错误证据独立保留
+
+- 用户提供的 alpha.28 导出文件有效（20,170 字节，SHA-256 `bfb345733429948feb6b8abc906e777fb4234164700d2efe53eadf30e64f654d`），但只包含最近 100 条正常事件：没有 failure、window error、unhandled rejection 或 Lovelace error-card 事件，不能确认“配置错误”的根因。该文件未发现 entity、host/IP、token/secret、device_id、entry_id 或 points 泄漏。
+- alpha.29 将诊断存储升级为 schema 2，并使用新的 sessionStorage key。普通 `events` 仍最多 100 条；连续且 readiness signature 相同的 `hass-entry`/`hass-readiness` 合并为一条并记录 `repeat`、`last_timestamp`、`coalesced_events`。配置、窗口、rejection、初始化、绘制、动态导入、导出和 Lovelace `hui-error-card` 失败独立写入最多 20 条 `failures`，同时导出 `dropped_events`/`dropped_failures` 计数。
+- 诊断启用后，全局错误/rejection 监听器与 MutationObserver 不因最后一个 KC761 卡片暂时断开而移除；它们会观察新增或已有的 `hui-error-card`/`ha-card.error`，只保存脱敏标题/文本和安全错误摘要。用户在错误卡出现后应只刷新到第一次成功的谱图卡，再点击 `Export diagnostics` 导出；不要在错误现场反复操作或执行写命令。明确关闭 `diagnostics` 后才停止监听、observer 与诊断写入。
+- 诊断仍默认关闭、仅当前 tab sessionStorage、本地下载、无网络传输；存储异常/损坏/配额不足时安全降级，不改变卡片配置校验和协议行为。alpha.29 的本地回归覆盖 schema 2、normal/failure 分离、噪声合并、错误卡观察、断开后 sticky 监听、显式关闭清理、重复模块导入、脱敏和无存储环境。
+- alpha.29 本地候选归档 SHA-256 为 `ed4c64e36ffebecda35d4d2dc60ea8ef1c7c3ce6e88ee3fd6ed2b4e318ce4dfb`；测试机 staging、release、live 的归档/组件哈希一致，manifest/card/ECharts 文件哈希分别为 `16be2eb7ec1e16a7a7c0952aec11a24a10cb25454fba83f252b37214a89f16c3`、`904aa52993b42984506c200d69779527750bf1819b2d6de001b5bc839b1cc72b`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`。部署 release 为 `/home/pi/Codes/kc761-ha-test/releases/v02-alpha29-diagnostics-20260823-1`，备份目录为 `/home/pi/Codes/kc761-ha-test/backups/pre-v02-alpha29-diagnostics-20260823-1-20260823T155029Z`；HA 与模拟器运行且 restart=0，两个静态资源 HTTP 200，部署窗口没有目标 `.127:7601` socket 或禁止命令。
+
+### 8.25 `0.2.0-alpha.30` ResizeObserver 与 schema 3 诊断候选
+
+- 用户提供的 alpha.29 schema 2 诊断文件有效（24,234 字节，SHA-256 `a7db5f795f38f5a8699f14940f9069ae3f73a98cef9b3781b30ba45948715a9a`）：保留 20 条 failure 中全部为 `window-error`，安全消息均为 `ResizeObserver loop completed with undelivered notifications.`；另有 16 条 failure 被容量淘汰，未出现 `setConfig`、draw、动态导入、rejection 或 Lovelace error-card 证据。因此它确认了浏览器存在 ResizeObserver 循环错误，但不能把该错误写成“配置错误”的已证根因。
+- alpha.30 将布局 ResizeObserver 与 ECharts ResizeObserver 的同步回调改为每个实例最多一个 requestAnimationFrame 调度；回调检查 detached/disposed，断开和 dispose 会取消尚未执行的 frame，避免在 ResizeObserver 通知期间同步改变布局或调用 `chart.resize()`。现有 compact-height、Sections 固定行高和 ECharts SVG 行为保持不变。
+- 诊断升级为 schema 3：failure 使用 event、错误名、脱敏消息和首个安全源码帧去重，重复记录增加 `repeat`、`first_timestamp`、`last_timestamp`，不会让同一 ResizeObserver 噪声挤出其它 failure；导出增加 `observer_stats`。diagnostics 开启时递归观察 document 及可访问的开放 Shadow DOM，限制最多 32 个 root、每次最多 2000 个扫描节点，并发现/去重嵌套 `hui-error-card`/`ha-card.error`；显式关闭仍会清理所有 observer/listener。默认关闭仍为零存储、零全局监听器、零额外扫描。
+- alpha.30 的本地门禁为 `48 passed, 3 skipped`，Ruff、compileall、JSON、git diff check、Bundled Node syntax 和前端 contract 均通过。候选归档 SHA-256 为 `07563c98f184c1d530ec086cd021dbc698a8ac5c8cee84dc38ca417136da8d2e`；测试机 release 为 `/home/pi/Codes/kc761-ha-test/releases/v02-alpha30-resize-diagnostics-20260824-1`，部署前备份为 `/home/pi/Codes/kc761-ha-test/backups/pre-v02-alpha30-resize-diagnostics-20260824-1-20260823T162753Z`。release/live 的 manifest、卡片和 ECharts 哈希分别为 `ba32efbcde8d1141c2d44c79d31e56283b258de6244db993d2dfe452b21a2614`、`d85ae1d5b67292349eda4b533ff6f1243440e9760be4444c2fc7ce58c9375b9b`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`，两套路径一致；HA 根页及 alpha.30 卡片/ECharts 资源均 HTTP 200 `text/javascript`，HA 与模拟器 running/restart=0，未发现到真实 `.127:7601` 的 socket 或残留探针进程。
+- 部署窗口模拟器命令计数 `0x52/0x53/0x54/0x55/0x62/0x63/0x64/0x66 = 0`，未执行真实设备探针。为下一次用户复现，已在测试机通过 HA WebSocket `logger/log_level` 以 `persistence=none` 临时启用 `custom_components.kc761`、`homeassistant.components.frontend` 和 `homeassistant.components.lovelace` 的 `DEBUG`，激活时间为 `2026-08-23T16:31:59.2368950Z`；启用前 `logger/log_info` 显示对应 integration effective level 均为 30（WARNING）。证据收集后回滚方式是对同三个 module 发送 `level=WARNING, persistence=none`，不得改动 YAML 或 `.storage`。
+- alpha.30 的本地契约覆盖 failure 洪泛后唯一错误仍保留、稳定签名合并、正常事件 coalescing、嵌套开放 Shadow DOM error-card、observer 统计、模块重复导入、断开后 sticky 监听、显式关闭清理、RAF 调度/取消、脱敏与无存储环境。浏览器用户手动开启 diagnostics、复现刷新并导出 schema 3 仍是后续门禁；本候选不宣称已证明“配置错误”的唯一根因。
+
+### 8.26 `0.2.0-alpha.31` 诊断 schema 4：全局深层快照按钮
+
+- alpha.30 的 schema 3 诊断受到持续 Shadow DOM observer 最多 32 个 root 的有界限制。alpha.31 保留该低开销持续 observer，并将导出升级为 schema 4：页面启用 `diagnostics: true` 后创建一个 body 级固定 `Export KC761 diagnostics` 按钮。它不属于任何卡片 shadow root，卡片暂时断开或被 `hui-error-card` 替换时仍可用；明确关闭 diagnostics 才移除按钮、observer 和全局 listener。
+- 点击全局按钮会在本地导出前执行一次有界深层扫描，优先遍历 `hui-*`、`ha-*` 和 `home-assistant*` 节点及可访问的 open Shadow DOM，最多 256 个 root、10000 个节点、约 100ms。扫描只保存脱敏的 `hui-error-card`/`ha-card.error` 标题、文本和安全错误摘要，并记录 `lovelace-error-card-snapshot` 与 `export_snapshot` 统计；相同快照去重，closed/cross-origin root 和 DOM 异常安全跳过。导出还包含有限的 `diagnostics_context`（Custom Element 是否定义、模块是否评估、卡片实例计数和 schema），不含实体、状态、配置、URL、主机、设备 ID、token 或点阵。
+- 默认 diagnostics 关闭时无 body 按钮、无扫描、无 sessionStorage 写入和无全局监听器；sessionStorage 不可用时安全降级，不让导出诊断改变配置错误语义。该文件仍只在本地下载，用户需在错误卡可见时直接点击全局按钮并提供导出文件；alpha.31 不宣称已经证明“配置错误”的业务根因。
+- alpha.31 固定 HA 2026.7.4 ARM64 runner 通过 `56 passed, 2 skipped`，branch coverage `96%`（总计 1967 statements、494 branches），达到 95% 门禁；两个 skip 是镜像内无 PATH Node，已由开发机绑定 Node 单独通过 `--check` 和 frontend contract。runner 报告的两个 warning 来自 HA 自身的 aiohttp 弃用提示及只读工作目录的 pytest cache，不是 KC761 异常。开发机当前旧 `.venv` 指向已不存在的 Python 3.13，未将本机 Ruff/pytest 缺失误报为通过；本轮 Ruff 未运行，须由后续可用工具补门禁。
+- alpha.31 候选归档 SHA-256 为 `6e71ff507a6b3365c67895cd34126f824a6ba3f1b948fce286f90b55448fe12e`；测试机 release 为 `/home/pi/Codes/kc761-ha-test/releases/v02-alpha31-deep-diagnostics-20260824-2`，部署前备份为 `/home/pi/Codes/kc761-ha-test/backups/pre-v02-alpha31-deep-diagnostics-20260824-2-20260823T174307Z`。本机/远端包一致；release/live 的 manifest、卡片和 ECharts 哈希分别为 `c37cc5e9d78a35016eb5ba31962d3a3be79090f5e026ca1e2abfe96aa973e765`、`85bf3b02d2eafe25d976403c0294154c1bcfd20001835056d68d799abc58a244`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`，两套路径一致；HA 根页及 alpha.31 卡片/ECharts 资源均 HTTP 200 `text/javascript`，两个容器 running/restart=0。部署前后宿主与 HA namespace 均未发现真实 `.127:7601` socket；模拟器部署窗口命令计数 `0x52/0x53/0x54/0x55/0x62/0x63/0x64/0x66 = 0`，日志仅有预期集成未认证及 protocol profile WARNING，无 KC761 traceback/error/pending task。
+- 用户下一步应在实际错误卡可见时直接点击 body 级 `Export KC761 diagnostics`；本轮不自动化刷新或浏览器点击，不把资源 HTTP 200、静态 contract 或 runner 通过写成真实 schema 4 导出已取得，也不宣称“配置错误”的业务根因已确认。
+
+### 8.27 `0.2.0-alpha.32` 诊断 schema 5：错误卡归属关联
+
+- alpha.31 的两份导出已经捕获到 `LovelaceErrorCard`，但普通 sessionStorage 事件仍混合了多次页面刷新，且全局深层扫描无法判断错误卡是否就是 KC761。测试机 `dashboard-kc761` 的目标 view 只包含一个 `grid`，其中只有一个 `custom:kc761-spectrum-card` 和一个原生 heading，因此错误卡与 KC761 的归属达到高置信，但具体底层异常仍未证明。
+- alpha.32 为每条事件和 failure 增加短生命周期数值 `page_session`，同一页面内 cache-busted 模块重复加载共享该标识；页面刷新递增，不形成用户或设备指纹。readiness/failure 去重均限制在同一 page session，导出另含当前 page session，避免把历史注册事件误解为当前状态。
+- 错误卡 failure 仅增加安全字段：`config_type_is_kc761` 为 `true`、`false` 或 `unknown`；不保存原始 config type。`node_path` 只含有限深度的元素标签和兄弟索引；同时记录当前 `custom_element_defined`、`module_evaluated`、`card_instances` 和 `resource_version_match`。原始 error name/message/stack 仍经过既有 host/entity/token/points 脱敏和长度限制。
+- 诊断仍使用 WeakSet 与深度遍历的节点集合避免同一 DOM 节点重复记录；`hui-error-card` 与外层 `ha-card.error` 作为不同节点时仍可分别保留，便于识别嵌套结构。默认关闭时不创建 page marker、不写 sessionStorage、不增加监听器或扫描。
+- alpha.32 已完成本地门禁和测试机部署；两份导出确认错误卡归属 KC761，但原始异常只有通用“配置错误”且 stack 不可用，因此在 alpha.33 前不把资源/模块加载时序升级为已确认业务根因，也不实施页面刷新或宽泛自动重试。
+
+### 8.28 `0.2.0-alpha.33`：延迟注册后的错误卡重建保护
+
+- alpha32 两份导出确认错误卡属于 `custom:kc761-spectrum-card`，失败页没有 `constructor`、`set-config` 或 `connected` 事件，且模块随后完成注册；这与 Home Assistant [`create-element-base.ts`](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/create-element/create-element-base.ts) 在自定义元素未定义时先创建隐藏 `hui-error-card`、再等待 `customElements.whenDefined(tag)` 发送 `ll-rebuild` 的路径一致。官方已有 issue [#19202](https://github.com/home-assistant/frontend/issues/19202) 记录错误卡元素尚未接入 DOM 时 `ll-rebuild` 无法向上冒泡的同类竞态；因此 alpha33 在自身注册完成后做一次有限、最多 4 帧的 Shadow Root 扫描，对已接入且归属 KC761 的错误卡发送一次 `ll-rebuild`。不刷新页面，不放宽 `validateConfig`，不启动重试循环。
+- 扫描最多 64 个可访问 root、4000 个节点；同一 Window 内用 WeakSet 防止同一 DOM 节点重复派发；扫描只在模块注册时运行，诊断关闭时不写入 sessionStorage。若卡片仍未加载或底层错误仍无法恢复，仍保留 HA 原生错误卡，不掩盖实际配置问题。
+- alpha33 新增前端契约：模块晚到且已有 KC761 错误卡时只派发一次 `ll-rebuild`，事件必须 `bubbles=true`、`composed=true`。Node syntax/contract、Ruff、`56 passed, 2 skipped`、分支覆盖率 `95.81%`、compileall、5 个 JSON 和 `git diff --check` 均通过。
+- alpha33 已部署到持久 ARM64 测试栈：候选包 SHA-256 为 `b40773efb5048b2ec0289287d0e8a18bfa09462b9c0a6d6c04677d44c35eb0c8`，本地/远端一致；release/live 的 manifest、卡片和 ECharts SHA-256 分别为 `9b72a77f77187431d0e3864523c3a03032ebbebc621d6224f755d1e7bd914d55`、`02a5aca20e43124ca22256f44eedb65a0a7ca9e89a240702cd44c117926979f7`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`；两静态资源 HTTP 200，HA 与模拟器容器 running/restart=0，未观察到真实设备 socket、探针残留或新增模拟器协议命令（含禁止写命令均 0）。
+
+### 8.29 `0.2.0-alpha.34`：延迟错误卡插入观察窗口
+
+- 三份 alpha33 导出均确认新鲜错误卡在 alpha33 最后一次扫描后约 2.87–5.34 秒才出现；因此 alpha34 将注册后的 4 帧扫描改为最多 9 秒的有界观察窗口。窗口监听 document 和有限的 open Shadow Root，覆盖后续节点插入与新增 root，并设置 root、node、mutation 和派发预算；完成一次派发、超时、预算耗尽或页面卸载时统一断开 observer、清理 timer。
+- 仅对已连接且 `config_type_is_kc761=true` 的外层 `hui-error-card` 派发一次 `ll-rebuild`，内部 `ha-card.error` 不重复处理。schema 6 仅记录脱敏的 `found_at`、`dispatch_outcome`、`dispatched`、`truncated`、`cleanup_reason` 和 `target_registry_defined` 等有限字段，不保存原始 type、entity、配置、状态、URL、主机或设备信息。
+- alpha34 的自动化门禁覆盖迟到错误卡、非 KC761 卡、重复节点、断开节点、窗口超时与预算清理；浏览器仍需用户在错误卡出现时手动导出 schema 6 诊断并确认卡片是否恢复。
+- alpha34 已部署到持久 ARM64 测试栈：候选包 SHA-256 为 `08bd8544228a2019554cb7b326aee3730abb9e67499cc99e3aa25f9d11abceb0`，本地/远端 staging 一致；release/live 的 manifest、卡片和 ECharts SHA-256 分别为 `4932fae6bb641cdaab0d9f2edd965d3423993e831087e1be08820298234a6242`、`782309cb5a5209b16df88485ea0542448462887bd5f530a6bb3e7e2bb4877659`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`。HA 根路径和两静态资源均 HTTP 200，HA 与模拟器容器 running/restart=0，未观察到真实设备 socket、探针残留或新增模拟器协议命令（含禁止写命令均 0）。
+
+### 8.30 `0.2.0-alpha.35`：定向错误卡查询与有限 root 余量
+
+- alpha34 诊断确认页面约有 112 个可访问 root；rebuild 在 96 个 root 处预算耗尽，未命中已存在的 KC761 `hui-error-card`。alpha35 将 schema 提升为 7，在每个已接入 document/open Shadow Root 上先执行 `hui-error-card` 定向查询，再进行通用节点遍历；定向查询与通用节点计数分离，root 上限提升为有证据的 160，目标查询上限为 256。
+- 只对已连接且 `config_type_is_kc761=true` 的外层错误卡派发一次 `ll-rebuild`；非 KC761、断开或未知配置只记录脱敏的 `candidate_seen_but_blocked`，不派发。保留 Window `WeakSet`、9 秒硬超时、最大派发数、MutationObserver/pagehide 清理和目标 Window registry 检查。
+- schema 7 新增的诊断字段仅为 `targeted_query_hit`、`candidate_seen_but_blocked`、`budget_reason`、`dispatch_outcome` 等布尔/枚举/计数，不保存 type、entity、host、URL、状态或设备信息。前端合同新增超过 96 roots 且目标在末端的回归；待测试机用户手动确认迟到错误卡是否恢复。
+- alpha35 已部署到持久 ARM64 测试栈：候选包 SHA-256 为 `7e3db3ee6746a0424139b05f75da476db0933453b45758eba5d6c9fb11c8040f`，本地/远端 staging 一致；release/live 的 manifest、卡片和 ECharts SHA-256 分别为 `b70015d167b8f4ca6e959cb2dd7de7722144cad7b07a05baaf192ff9d4e1e2d7`、`bbb2dbf0daec1064e6ff4e20c3c225bbdd02d2e33f05ecaaaadcd9d710c2c8e2`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`；HA 根路径和两静态资源 HTTP 200，HA 与模拟器 running/restart=0，未观察到真实设备 socket、探针残留或新增模拟器协议命令（含禁止写命令均 0）。
 
 本地合并后继续测试的剩余门禁：
 

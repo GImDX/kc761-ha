@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.24";
+const CARD_VERSION = "0.2.0-alpha.35";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -11,6 +11,7 @@ const DEFAULT_CARD_CONFIG = Object.freeze({
   show_legend: true,
   show_actions: true,
   show_peak: true,
+  diagnostics: false,
 });
 const CARD_CONTENT_VISIBILITY_KEYS = Object.freeze([
   "show_controls",
@@ -26,6 +27,34 @@ const EDIT_HANDOFF_GRACE_MS = 150;
 const EDIT_HANDOFF_MAX_RETRIES = 20;
 const EDIT_HANDOFF_REGISTRY_KEY = "__kc761SpectrumEditHandoffRegistry";
 const ZOOM_DEFAULT = Object.freeze({ start: 0, end: 100 });
+const VIEW_STATE_SCHEMA_VERSION = 1;
+const VIEW_STATE_STORAGE_PREFIX = `kc761-spectrum:view-state:v${VIEW_STATE_SCHEMA_VERSION}:`;
+const VIEW_STATE_PERSIST_DELAY_MS = 120;
+const DIAGNOSTICS_SCHEMA_VERSION = 7;
+const DIAGNOSTICS_STORAGE_KEY = "kc761-spectrum:diagnostics:v7";
+const DIAGNOSTICS_PAGE_SESSION_KEY = "__kc761SpectrumDiagnosticsPageSession";
+const DIAGNOSTICS_PAGE_COUNTER_KEY = "kc761-spectrum:diagnostics-page-counter:v1";
+const DIAGNOSTICS_MAX_EVENTS = 100;
+const DIAGNOSTICS_MAX_FAILURES = 20;
+const DIAGNOSTICS_MAX_CHARS = 60000;
+const DIAGNOSTICS_MAX_OBSERVER_ROOTS = 32;
+const DIAGNOSTICS_MAX_SCAN_NODES = 2000;
+const DIAGNOSTICS_MAX_DEEP_ROOTS = 256;
+const DIAGNOSTICS_MAX_DEEP_NODES = 10000;
+const DIAGNOSTICS_DEEP_BUDGET_MS = 100;
+const DIAGNOSTICS_REGISTRY_KEY = "__kc761SpectrumDiagnosticsRegistry";
+const DIAGNOSTICS_MODULE_EVALUATED_KEY = "__kc761SpectrumDiagnosticsModuleEvaluated";
+const REBUILD_REGISTRY_KEY = "__kc761SpectrumRebuildRegistry";
+const REBUILD_WINDOW_MS = 9000;
+// Alpha34 evidence showed about 112 accessible roots in the test dashboard;
+// keep a finite margin while ensuring the targeted error-card query runs
+// before the generic node walk for every root we attach.
+const REBUILD_MAX_ROOTS = 160;
+const REBUILD_MAX_NODES = 8000;
+const REBUILD_MAX_EVENTS = 128;
+const REBUILD_MAX_DISPATCHES = 8;
+const REBUILD_MAX_TARGET_QUERIES = 256;
+const REBUILD_SCAN_DELAYS_MS = Object.freeze([250, 750, 1500, 3000, 5500, 8000]);
 const COLOR_FALLBACKS = {
   curve: "#4fc3f7",
   roiStart: "#00acc1",
@@ -50,6 +79,1208 @@ function canonicalConfigValue(value) {
 function editorHandoffStorage() {
   const hostWindow = globalThis.window;
   return hostWindow?.sessionStorage || hostWindow?.localStorage || null;
+}
+
+function spectrumViewStateStorage() {
+  try {
+    return globalThis.window?.localStorage || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function diagnosticsSessionStorage() {
+  try {
+    return globalThis.window?.sessionStorage || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+// This is a short-lived numeric page marker, not a user/device fingerprint.
+// It is allocated only after diagnostics are enabled and is shared by all
+// cache-busted module evaluations in the same Window.  A new page reload gets
+// the next number, allowing sessionStorage events from different pages to be
+// separated without persisting an identifying value.
+function diagnosticsPageSession() {
+  try {
+    const hostWindow = globalThis.window;
+    if (Number.isSafeInteger(hostWindow?.[DIAGNOSTICS_PAGE_SESSION_KEY])) {
+      return hostWindow[DIAGNOSTICS_PAGE_SESSION_KEY];
+    }
+    const storage = diagnosticsSessionStorage();
+    if (!storage) return 0;
+    const previous = Number.parseInt(storage.getItem(DIAGNOSTICS_PAGE_COUNTER_KEY) || "0", 10);
+    const next = Number.isSafeInteger(previous) && previous >= 0 ? previous + 1 : 1;
+    storage.setItem(DIAGNOSTICS_PAGE_COUNTER_KEY, String(next));
+    if (hostWindow) hostWindow[DIAGNOSTICS_PAGE_SESSION_KEY] = next;
+    return next;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+function sanitizeDiagnosticText(value) {
+  return String(value ?? "")
+    .replace(/https?:\/\/[^\s)]+/gi, "[redacted-url]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, "[redacted-host]")
+    .replace(/\bsensor\.[a-z0-9_]+\b/gi, "[redacted-entity]")
+    .replace(/\b(?:token|password|secret|device[_ -]?id|entry[_ -]?id)\s*[=:]\s*[^\s,;]+/gi, "redacted=[redacted]")
+    .replace(/(["']?host["']?\s*[=:]\s*)(?!\[redacted[^\]]*\])[^\s,;}\]]+/gi, "$1[redacted]")
+    .replace(/(["']?points?["']?\s*[=:]\s*)(?!\[redacted[^\]]*\])[^\s;}]+/gi, "$1[redacted]")
+    .replace(/[?#][^\s)]*/g, "[redacted-query]")
+    .slice(0, 240);
+}
+
+function sanitizeDiagnosticStack(stack) {
+  return String(stack ?? "")
+    .split("\n")
+    .slice(0, 6)
+    .map((line) => sanitizeDiagnosticText(line).trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 1000);
+}
+
+function diagnosticsEmptySnapshot(enabled = false) {
+  return {
+    schema: DIAGNOSTICS_SCHEMA_VERSION,
+    version: CARD_VERSION,
+    redacted: true,
+    enabled: Boolean(enabled),
+    sequence: 0,
+    events: [],
+    failures: [],
+    dropped_events: 0,
+    dropped_failures: 0,
+    coalesced_events: 0,
+    observer_stats: { roots: 0, scans: 0, dropped_roots: 0, scan_truncated: 0 },
+    export_snapshot: { runs: 0, roots: 0, nodes: 0, dropped_roots: 0, dropped_nodes: 0, budget_exceeded: 0, error_cards: 0, last_timestamp: "" },
+  };
+}
+
+const DIAGNOSTICS_BOOLEAN_KEYS = Object.freeze([
+  "has_config", "has_hass", "has_states", "state_object", "state_present", "valid_spectrum",
+  "diagnostics_enabled", "already_defined", "defined", "has_entity", "has_refresh_interval",
+  "has_y_axis", "has_type", "enabled", "observed_error_card", "deep_snapshot",
+  "custom_element_defined", "module_evaluated", "dispatched", "dispatch_succeeded", "truncated",
+  "target_registry_defined", "targeted_query_hit", "candidate_seen_but_blocked",
+]);
+const DIAGNOSTICS_NUMBER_KEYS = Object.freeze([
+  "generation", "count", "repeat", "last_sequence", "page_session", "card_instances",
+  "scan_nodes", "scan_roots", "event_count", "dispatched_count", "target_query_count",
+]);
+const DIAGNOSTICS_TRI_STATE_KEYS = Object.freeze([
+  "config_type_is_kc761", "resource_version_match",
+]);
+const DIAGNOSTICS_TEXT_KEYS = Object.freeze(["node_path", "found_at"]);
+const DIAGNOSTICS_ENUMS = Object.freeze({
+  dispatch_outcome: new Set(["dispatched", "skipped", "error"]),
+  cleanup_reason: new Set(["dispatched", "timeout", "budget", "unload", "replaced", "unsupported"]),
+  budget_reason: new Set(["roots", "nodes", "events", "dispatches", "target_queries", "time"]),
+  candidate_block_reason: new Set(["detached", "non_kc761", "unknown", "registry_undefined", "unsupported"]),
+});
+
+function diagnosticsNormalizeEvent(event, index) {
+  if (!event || typeof event !== "object") return null;
+  const safe = {
+    timestamp: sanitizeDiagnosticText(event.timestamp).slice(0, 40),
+    sequence: Number.isSafeInteger(event.sequence) ? event.sequence : index + 1,
+    version: CARD_VERSION,
+    event: sanitizeDiagnosticText(event.event).slice(0, 80),
+  };
+  DIAGNOSTICS_BOOLEAN_KEYS.forEach((key) => {
+    if (typeof event[key] === "boolean") safe[key] = event[key];
+  });
+  DIAGNOSTICS_NUMBER_KEYS.forEach((key) => {
+    if (Number.isFinite(event[key])) safe[key] = Number(event[key]);
+  });
+  DIAGNOSTICS_TRI_STATE_KEYS.forEach((key) => {
+    if (event[key] === true || event[key] === false || event[key] === "unknown") safe[key] = event[key];
+  });
+  if (event.config_type_is_kc761 === true || event.config_type_is_kc761 === false || event.config_type_is_kc761 === "unknown") {
+    safe.config_type_is_kc761 = event.config_type_is_kc761;
+  }
+  if (event.resource_version_match === true || event.resource_version_match === false || event.resource_version_match === "unknown") {
+    safe.resource_version_match = event.resource_version_match;
+  }
+  DIAGNOSTICS_TEXT_KEYS.forEach((key) => {
+    if (typeof event[key] === "string") safe[key] = sanitizeDiagnosticText(event[key]).slice(0, 180);
+  });
+  Object.entries(DIAGNOSTICS_ENUMS).forEach(([key, values]) => {
+    if (values.has(event[key])) safe[key] = event[key];
+  });
+  if (event.first_timestamp) safe.first_timestamp = sanitizeDiagnosticText(event.first_timestamp).slice(0, 40);
+  if (event.last_timestamp) safe.last_timestamp = sanitizeDiagnosticText(event.last_timestamp).slice(0, 40);
+  return safe;
+}
+
+function diagnosticsNormalizeFailure(failure, index) {
+  const safe = diagnosticsNormalizeEvent(failure, index);
+  if (!safe) return null;
+  if (failure.error_name) safe.error_name = sanitizeDiagnosticText(failure.error_name).slice(0, 100);
+  if (failure.error_message) safe.error_message = sanitizeDiagnosticText(failure.error_message);
+  if (failure.stack) safe.stack = sanitizeDiagnosticStack(failure.stack);
+  return safe;
+}
+
+function diagnosticsReadSnapshot(storage = diagnosticsSessionStorage()) {
+  if (!storage) return diagnosticsEmptySnapshot(false);
+  try {
+    const raw = storage.getItem(DIAGNOSTICS_STORAGE_KEY);
+    if (!raw) return diagnosticsEmptySnapshot(false);
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.schema !== DIAGNOSTICS_SCHEMA_VERSION || !Array.isArray(parsed.events) || !Array.isArray(parsed.failures)) {
+      return diagnosticsEmptySnapshot(false);
+    }
+    const events = parsed.events.slice(-DIAGNOSTICS_MAX_EVENTS).map(diagnosticsNormalizeEvent).filter(Boolean);
+    const failures = parsed.failures.slice(-DIAGNOSTICS_MAX_FAILURES).map(diagnosticsNormalizeFailure).filter(Boolean);
+    return {
+      schema: DIAGNOSTICS_SCHEMA_VERSION,
+      version: CARD_VERSION,
+      redacted: true,
+      enabled: parsed.enabled === true,
+      sequence: Number.isSafeInteger(parsed.sequence) ? parsed.sequence : events.length + failures.length,
+      events,
+      failures,
+      dropped_events: Number.isFinite(parsed.dropped_events) ? Math.max(0, Number(parsed.dropped_events)) : 0,
+      dropped_failures: Number.isFinite(parsed.dropped_failures) ? Math.max(0, Number(parsed.dropped_failures)) : 0,
+      coalesced_events: Number.isFinite(parsed.coalesced_events) ? Math.max(0, Number(parsed.coalesced_events)) : 0,
+      observer_stats: {
+        roots: Number.isFinite(parsed.observer_stats?.roots) ? Math.max(0, Number(parsed.observer_stats.roots)) : 0,
+        scans: Number.isFinite(parsed.observer_stats?.scans) ? Math.max(0, Number(parsed.observer_stats.scans)) : 0,
+        dropped_roots: Number.isFinite(parsed.observer_stats?.dropped_roots) ? Math.max(0, Number(parsed.observer_stats.dropped_roots)) : 0,
+        scan_truncated: Number.isFinite(parsed.observer_stats?.scan_truncated) ? Math.max(0, Number(parsed.observer_stats.scan_truncated)) : 0,
+      },
+      export_snapshot: {
+        runs: Number.isFinite(parsed.export_snapshot?.runs) ? Math.max(0, Number(parsed.export_snapshot.runs)) : 0,
+        roots: Number.isFinite(parsed.export_snapshot?.roots) ? Math.max(0, Number(parsed.export_snapshot.roots)) : 0,
+        nodes: Number.isFinite(parsed.export_snapshot?.nodes) ? Math.max(0, Number(parsed.export_snapshot.nodes)) : 0,
+        dropped_roots: Number.isFinite(parsed.export_snapshot?.dropped_roots) ? Math.max(0, Number(parsed.export_snapshot.dropped_roots)) : 0,
+        dropped_nodes: Number.isFinite(parsed.export_snapshot?.dropped_nodes) ? Math.max(0, Number(parsed.export_snapshot.dropped_nodes)) : 0,
+        budget_exceeded: Number.isFinite(parsed.export_snapshot?.budget_exceeded) ? Math.max(0, Number(parsed.export_snapshot.budget_exceeded)) : 0,
+        error_cards: Number.isFinite(parsed.export_snapshot?.error_cards) ? Math.max(0, Number(parsed.export_snapshot.error_cards)) : 0,
+        last_timestamp: sanitizeDiagnosticText(parsed.export_snapshot?.last_timestamp).slice(0, 40),
+      },
+    };
+  } catch (_error) {
+    return diagnosticsEmptySnapshot(false);
+  }
+}
+
+function diagnosticsTrim(snapshot) {
+  snapshot.events = Array.isArray(snapshot.events) ? snapshot.events : [];
+  snapshot.failures = Array.isArray(snapshot.failures) ? snapshot.failures : [];
+  while (snapshot.events.length > DIAGNOSTICS_MAX_EVENTS) {
+    snapshot.events.splice(0, 1);
+    snapshot.dropped_events += 1;
+  }
+  while (snapshot.failures.length > DIAGNOSTICS_MAX_FAILURES) {
+    snapshot.failures.splice(0, 1);
+    snapshot.dropped_failures += 1;
+  }
+  while (JSON.stringify(snapshot).length > DIAGNOSTICS_MAX_CHARS && snapshot.events.length) {
+    snapshot.events.splice(0, 1);
+    snapshot.dropped_events += 1;
+  }
+  while (JSON.stringify(snapshot).length > DIAGNOSTICS_MAX_CHARS && snapshot.failures.length) {
+    snapshot.failures.splice(0, 1);
+    snapshot.dropped_failures += 1;
+  }
+  return snapshot;
+}
+
+function diagnosticsWriteSnapshot(snapshot, storage = diagnosticsSessionStorage()) {
+  if (!storage) return false;
+  try {
+    storage.setItem(DIAGNOSTICS_STORAGE_KEY, JSON.stringify(diagnosticsTrim(snapshot)));
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function diagnosticsSafeFields(fields = {}) {
+  const safe = {};
+  DIAGNOSTICS_BOOLEAN_KEYS.forEach((key) => {
+    if (typeof fields[key] === "boolean") safe[key] = fields[key];
+  });
+  DIAGNOSTICS_NUMBER_KEYS.forEach((key) => {
+    if (Number.isFinite(fields[key])) safe[key] = Number(fields[key]);
+  });
+  DIAGNOSTICS_TRI_STATE_KEYS.forEach((key) => {
+    if (typeof fields[key] === "boolean" || fields[key] === "string" && fields[key] === "unknown") safe[key] = fields[key];
+  });
+  DIAGNOSTICS_TEXT_KEYS.forEach((key) => {
+    if (typeof fields[key] === "string") safe[key] = sanitizeDiagnosticText(fields[key]).slice(0, 180);
+  });
+  Object.entries(DIAGNOSTICS_ENUMS).forEach(([key, values]) => {
+    if (values.has(fields[key])) safe[key] = fields[key];
+  });
+  if (fields.config_type_is_kc761 === true || fields.config_type_is_kc761 === false || fields.config_type_is_kc761 === "unknown") {
+    safe.config_type_is_kc761 = fields.config_type_is_kc761;
+  }
+  if (fields.resource_version_match === true || fields.resource_version_match === false || fields.resource_version_match === "unknown") {
+    safe.resource_version_match = fields.resource_version_match;
+  }
+  return safe;
+}
+
+function diagnosticsSameReadinessSignature(left, right, event) {
+  if (!left || left.event !== event || !["hass-entry", "hass-readiness"].includes(event)) return false;
+  if (left.page_session !== right.page_session) return false;
+  return DIAGNOSTICS_BOOLEAN_KEYS.every((key) => (left[key] === undefined ? right[key] === undefined : left[key] === right[key]));
+}
+
+function diagnosticsRecord(event, fields = {}) {
+  const storage = diagnosticsSessionStorage();
+  if (!storage) return false;
+  const snapshot = diagnosticsReadSnapshot(storage);
+  if (snapshot.enabled !== true) return false;
+  snapshot.sequence += 1;
+  const record = {
+    timestamp: new Date().toISOString(),
+    sequence: snapshot.sequence,
+    version: CARD_VERSION,
+    event: sanitizeDiagnosticText(event).slice(0, 80),
+    page_session: diagnosticsPageSession(),
+    ...diagnosticsSafeFields(fields),
+  };
+  const previous = snapshot.events[snapshot.events.length - 1];
+  if (diagnosticsSameReadinessSignature(previous, record, record.event)) {
+    previous.repeat = (Number.isFinite(previous.repeat) ? previous.repeat : 1) + 1;
+    previous.last_sequence = record.sequence;
+    previous.last_timestamp = record.timestamp;
+    snapshot.coalesced_events += 1;
+  } else {
+    snapshot.events.push(record);
+  }
+  return diagnosticsWriteSnapshot(snapshot, storage);
+}
+
+function diagnosticsFailureSource(stack) {
+  const sources = String(stack ?? "").split("\n").map((line) => {
+    const match = line.match(/([^/\\\s()]+\.(?:js|mjs|ts|py)):(\d+)/);
+    return match ? `${match[1]}:${match[2]}` : "";
+  }).filter(Boolean);
+  // The first frame identifies the operation; deeper caller frames vary on
+  // repeated lifecycle notifications and must not defeat failure coalescing.
+  return sources.slice(0, 1).join(";").slice(0, 160);
+}
+
+function diagnosticsFailureSignature(record) {
+  return [
+    record?.page_session,
+    record?.event,
+    record?.error_name,
+    record?.error_message,
+    diagnosticsFailureSource(record?.stack),
+  ].map((value) => sanitizeDiagnosticText(value)).join("|").slice(0, 700);
+}
+
+function diagnosticsRecordFailure(event, error = null, fields = {}) {
+  const storage = diagnosticsSessionStorage();
+  if (!storage) return false;
+  const snapshot = diagnosticsReadSnapshot(storage);
+  if (snapshot.enabled !== true) return false;
+  snapshot.sequence += 1;
+  const record = {
+    timestamp: new Date().toISOString(),
+    sequence: snapshot.sequence,
+    version: CARD_VERSION,
+    event: sanitizeDiagnosticText(event).slice(0, 80),
+    page_session: diagnosticsPageSession(),
+    ...diagnosticsSafeFields(fields),
+  };
+  if (error) {
+    record.error_name = sanitizeDiagnosticText(error.name || "Error").slice(0, 100);
+    record.error_message = sanitizeDiagnosticText(error.message || error).slice(0, 240);
+    record.stack = sanitizeDiagnosticStack(error.stack);
+  }
+  record.first_timestamp = record.timestamp;
+  record.last_timestamp = record.timestamp;
+  record.repeat = 1;
+  const signature = diagnosticsFailureSignature(record);
+  const existing = snapshot.failures.find((failure) => diagnosticsFailureSignature(failure) === signature);
+  if (existing) {
+    existing.repeat = (Number.isFinite(existing.repeat) ? existing.repeat : 1) + 1;
+    existing.last_sequence = record.sequence;
+    existing.last_timestamp = record.timestamp;
+  } else {
+    snapshot.failures.push(record);
+  }
+  return diagnosticsWriteSnapshot(snapshot, storage);
+}
+
+function diagnosticsRecordError(event, error) {
+  return diagnosticsRecordFailure(event, error);
+}
+
+function diagnosticsSetEnabled(enabled) {
+  const storage = diagnosticsSessionStorage();
+  if (!storage) return false;
+  const snapshot = diagnosticsReadSnapshot(storage);
+  snapshot.enabled = Boolean(enabled);
+  if (!diagnosticsWriteSnapshot(snapshot, storage)) return false;
+  if (enabled) {
+    diagnosticsEnsureGlobal();
+    diagnosticsRecord("diagnostics-enabled", { enabled: true });
+  } else {
+    diagnosticsStopGlobal();
+  }
+  return true;
+}
+
+function diagnosticsExportPayload() {
+  const snapshot = diagnosticsReadSnapshot();
+  const registry = diagnosticsListenerRegistry();
+  return {
+    schema: DIAGNOSTICS_SCHEMA_VERSION,
+    version: CARD_VERSION,
+    redacted: true,
+    enabled: snapshot.enabled === true,
+    events: snapshot.events,
+    failures: snapshot.failures,
+    dropped_events: snapshot.dropped_events,
+    dropped_failures: snapshot.dropped_failures,
+    coalesced_events: snapshot.coalesced_events,
+    page_session: diagnosticsPageSession(),
+    observer_stats: registry?.observerStats || snapshot.observer_stats,
+    export_snapshot: registry?.exportSnapshot || snapshot.export_snapshot,
+    diagnostics_context: diagnosticsContext(registry),
+  };
+}
+
+function diagnosticsContext(registry = diagnosticsListenerRegistry()) {
+  let customElementDefined = false;
+  try {
+    customElementDefined = Boolean(globalThis.customElements?.get?.("kc761-spectrum-card"));
+  } catch (_error) {
+    customElementDefined = false;
+  }
+  let moduleEvaluated = Boolean(registry?.moduleEvaluated);
+  try {
+    moduleEvaluated = moduleEvaluated || globalThis.window?.[DIAGNOSTICS_MODULE_EVALUATED_KEY] === true;
+  } catch (_error) {
+    // A restricted window must not break export.
+  }
+  return {
+    custom_element_defined: customElementDefined,
+    module_evaluated: moduleEvaluated,
+    card_instances: Number(registry?.cards?.size) || 0,
+    resource_version_match: diagnosticsResourceVersionMatch(),
+    page_session: diagnosticsPageSession(),
+    diagnostics_schema: DIAGNOSTICS_SCHEMA_VERSION,
+  };
+}
+
+function diagnosticsListenerRegistry() {
+  try {
+    const hostWindow = globalThis.window;
+    if (!hostWindow) return null;
+    if (!hostWindow[DIAGNOSTICS_REGISTRY_KEY] || typeof hostWindow[DIAGNOSTICS_REGISTRY_KEY] !== "object") {
+      hostWindow[DIAGNOSTICS_REGISTRY_KEY] = {
+        cards: new Set(), installed: false, observer: null, observers: new Map(), observedRoots: new Set(),
+        errorCards: new WeakSet(), observerStats: { roots: 0, scans: 0, dropped_roots: 0, scan_truncated: 0 },
+        exportSnapshot: { runs: 0, roots: 0, nodes: 0, dropped_roots: 0, dropped_nodes: 0, budget_exceeded: 0, error_cards: 0, last_timestamp: "" },
+        globalButton: null, globalButtonHandler: null, bodyReadyListener: null, moduleEvaluated: false,
+        onError: null, onRejection: null,
+      };
+    }
+    const registry = hostWindow[DIAGNOSTICS_REGISTRY_KEY];
+    if (!(registry.cards instanceof Set)) registry.cards = new Set();
+    if (!(registry.errorCards instanceof WeakSet)) registry.errorCards = new WeakSet();
+    if (!(registry.observers instanceof Map)) registry.observers = new Map();
+    if (!(registry.observedRoots instanceof Set)) registry.observedRoots = new Set();
+    if (!registry.observerStats || typeof registry.observerStats !== "object") registry.observerStats = { roots: 0, scans: 0, dropped_roots: 0, scan_truncated: 0 };
+    if (!registry.exportSnapshot || typeof registry.exportSnapshot !== "object") registry.exportSnapshot = diagnosticsEmptySnapshot(false).export_snapshot;
+    if (!("globalButton" in registry)) registry.globalButton = null;
+    if (!("globalButtonHandler" in registry)) registry.globalButtonHandler = null;
+    if (!("bodyReadyListener" in registry)) registry.bodyReadyListener = null;
+    if (!("moduleEvaluated" in registry)) registry.moduleEvaluated = false;
+    if (!("observer" in registry)) registry.observer = null;
+    return registry;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function diagnosticsSourceText(event) {
+  const reason = event?.reason;
+  return [event?.filename, event?.message, reason?.message, reason?.stack].filter(Boolean).join(" ");
+}
+
+function diagnosticsNodeTag(node) {
+  try {
+    return String(node?.localName || node?.tagName || "").toLowerCase();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function diagnosticsConfigTypeMatch(node) {
+  const seen = new Set();
+  let current = node;
+  for (let depth = 0; current && depth < 8 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    try {
+      const candidates = [current.config, current.error?.config, current.errorDetails?.config];
+      for (const config of candidates) {
+        if (config && typeof config === "object" && typeof config.type === "string") {
+          return config.type === "custom:kc761-spectrum-card";
+        }
+      }
+      current = current.parentElement || current.parentNode?.host || current.parentNode || null;
+    } catch (_error) {
+      return "unknown";
+    }
+  }
+  return "unknown";
+}
+
+function rebuildTargetWindow(node) {
+  try {
+    return node?.ownerDocument?.defaultView || globalThis.window || globalThis;
+  } catch (_error) {
+    return globalThis.window || globalThis;
+  }
+}
+
+function rebuildTargetRegistryDefined(node) {
+  try {
+    const targetWindow = rebuildTargetWindow(node);
+    return Boolean(targetWindow?.customElements?.get?.("kc761-spectrum-card"));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function spectrumRebuildRegistry() {
+  try {
+    const hostWindow = globalThis.window;
+    if (!hostWindow) return null;
+    const current = hostWindow[REBUILD_REGISTRY_KEY];
+    if (!current || typeof current !== "object" || current.version !== CARD_VERSION) {
+      hostWindow[REBUILD_REGISTRY_KEY] = {
+        version: CARD_VERSION,
+        cards: new WeakSet(),
+        active: false,
+        started: false,
+        observedRoots: new Set(),
+        observers: [],
+        timers: [],
+        pagehideListener: null,
+        scannedNodes: 0,
+        scanRoots: 0,
+        eventCount: 0,
+        dispatchedCount: 0,
+        targetQueryCount: 0,
+        targetedQueryHit: false,
+        candidateSeenButBlocked: false,
+        budgetReason: "",
+        truncated: false,
+        deadline: 0,
+        cleanupReason: "",
+      };
+    }
+    const registry = hostWindow[REBUILD_REGISTRY_KEY];
+    if (!(registry.cards instanceof WeakSet)) registry.cards = new WeakSet();
+    if (!(registry.observedRoots instanceof Set)) registry.observedRoots = new Set();
+    if (!Array.isArray(registry.observers)) registry.observers = [];
+    if (!Array.isArray(registry.timers)) registry.timers = [];
+    return registry;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function rebuildCleanup(registry, reason) {
+  if (!registry || (!registry.active && registry.cleanupReason)) return;
+  registry.active = false;
+  registry.cleanupReason = reason;
+  registry.timers.forEach((timer) => {
+    try { clearTimeout(timer); } catch (_error) { /* restricted timer */ }
+  });
+  registry.timers = [];
+  registry.observers.forEach((observer) => {
+    try { observer.disconnect?.(); } catch (_error) { /* restricted observer */ }
+  });
+  registry.observers = [];
+  const hostWindow = globalThis.window;
+  if (registry.pagehideListener && hostWindow?.removeEventListener) {
+    try { hostWindow.removeEventListener("pagehide", registry.pagehideListener); } catch (_error) { /* restricted window */ }
+  }
+  registry.pagehideListener = null;
+  diagnosticsRecord("registration-rebuild-cleanup", {
+    cleanup_reason: reason,
+    budget_reason: registry.budgetReason,
+    dispatched_count: registry.dispatchedCount,
+    scan_nodes: registry.scannedNodes,
+    scan_roots: registry.scanRoots,
+    target_query_count: registry.targetQueryCount,
+    targeted_query_hit: registry.targetedQueryHit,
+    candidate_seen_but_blocked: registry.candidateSeenButBlocked,
+    truncated: registry.truncated,
+  });
+}
+
+function rebuildDispatchErrorCard(registry, node, targeted = false) {
+  if (!registry?.active || !node || registry.cards.has(node)) return false;
+  if (diagnosticsNodeTag(node) !== "hui-error-card" || diagnosticsConfigTypeMatch(node) !== true) return false;
+  if (node.isConnected === false) return false;
+  if (registry.dispatchedCount >= REBUILD_MAX_DISPATCHES) {
+    registry.truncated = true;
+    registry.budgetReason = "dispatches";
+    rebuildCleanup(registry, "budget");
+    return false;
+  }
+  const foundAt = new Date().toISOString();
+  const targetWindow = rebuildTargetWindow(node);
+  const targetRegistryDefined = rebuildTargetRegistryDefined(node);
+  try {
+    const EventConstructor = targetWindow?.Event || globalThis.Event;
+    if (typeof EventConstructor !== "function" || typeof node.dispatchEvent !== "function") {
+      diagnosticsRecord("registration-rebuild-dispatch", {
+        cleanup_reason: "unsupported",
+        dispatch_outcome: "skipped",
+        found_at: foundAt,
+        targeted_query_hit: targeted,
+        target_registry_defined: targetRegistryDefined,
+      });
+      return false;
+    }
+    const result = node.dispatchEvent(new EventConstructor("ll-rebuild", { bubbles: true, composed: true }));
+    registry.cards.add(node);
+    registry.dispatchedCount += 1;
+    diagnosticsRecord("registration-rebuild-dispatch", {
+      dispatched: true,
+      dispatch_succeeded: result !== false,
+      dispatch_outcome: "dispatched",
+      found_at: foundAt,
+      targeted_query_hit: targeted,
+      target_registry_defined: targetRegistryDefined,
+      dispatched_count: registry.dispatchedCount,
+    });
+    rebuildCleanup(registry, "dispatched");
+    return true;
+  } catch (_error) {
+    diagnosticsRecord("registration-rebuild-dispatch", {
+      dispatch_outcome: "error",
+      found_at: foundAt,
+      targeted_query_hit: targeted,
+      target_registry_defined: targetRegistryDefined,
+    });
+    return false;
+  }
+}
+
+function rebuildRecordBlockedCandidate(registry, node, reason) {
+  registry.candidateSeenButBlocked = true;
+  diagnosticsRecord("registration-rebuild-candidate", {
+    candidate_seen_but_blocked: true,
+    candidate_block_reason: reason,
+    target_registry_defined: rebuildTargetRegistryDefined(node),
+    target_query_count: registry.targetQueryCount,
+    targeted_query_hit: registry.targetedQueryHit,
+  });
+}
+
+function rebuildQueryErrorCards(registry, root) {
+  if (!registry?.active || !root) return false;
+  if (registry.targetQueryCount >= REBUILD_MAX_TARGET_QUERIES) {
+    registry.truncated = true;
+    registry.budgetReason = "target_queries";
+    rebuildCleanup(registry, "budget");
+    return false;
+  }
+  registry.targetQueryCount += 1;
+  const candidates = [];
+  try {
+    if (diagnosticsNodeTag(root) === "hui-error-card") candidates.push(root);
+    root.querySelectorAll?.("hui-error-card")?.forEach?.((node) => candidates.push(node));
+  } catch (_error) {
+    return false;
+  }
+  const seen = new Set();
+  for (const node of candidates) {
+    if (!registry.active || !node || seen.has(node) || registry.cards.has(node)) continue;
+    seen.add(node);
+    if (diagnosticsNodeTag(node) !== "hui-error-card") continue;
+    if (node.isConnected === false) {
+      rebuildRecordBlockedCandidate(registry, node, "detached");
+      continue;
+    }
+    const configMatch = diagnosticsConfigTypeMatch(node);
+    if (configMatch !== true) {
+      rebuildRecordBlockedCandidate(registry, node, configMatch === false ? "non_kc761" : "unknown");
+      continue;
+    }
+    registry.targetedQueryHit = true;
+    if (rebuildDispatchErrorCard(registry, node, true)) return true;
+  }
+  return false;
+}
+
+function rebuildObserveRoot(registry, root) {
+  if (!registry?.active || !root || registry.observedRoots.has(root)) return false;
+  if (registry.observedRoots.size >= REBUILD_MAX_ROOTS) {
+    registry.truncated = true;
+    registry.budgetReason = "roots";
+    rebuildCleanup(registry, "budget");
+    return false;
+  }
+  registry.observedRoots.add(root);
+  registry.scanRoots = registry.observedRoots.size;
+  const targetWindow = rebuildTargetWindow(root);
+  const Observer = targetWindow?.MutationObserver || globalThis.MutationObserver;
+  if (typeof Observer !== "function") return true;
+  try {
+    const observer = new Observer((records) => {
+      if (!registry.active) return;
+      registry.eventCount += records.length;
+      if (registry.eventCount > REBUILD_MAX_EVENTS) {
+        registry.truncated = true;
+        registry.budgetReason = "events";
+        rebuildCleanup(registry, "budget");
+        return;
+      }
+      records.forEach((record) => {
+        if (!registry.active) return;
+        Array.from(record?.addedNodes || []).forEach((node) => rebuildScanNode(registry, node));
+      });
+      if (registry.active) {
+        diagnosticsRecord("registration-rebuild-scan", {
+          dispatched_count: registry.dispatchedCount,
+          event_count: registry.eventCount,
+          scan_nodes: registry.scannedNodes,
+          scan_roots: registry.scanRoots,
+          truncated: registry.truncated,
+        });
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    registry.observers.push(observer);
+  } catch (_error) {
+    // A restricted root can still be covered by the bounded timer scans.
+  }
+  return true;
+}
+
+function rebuildScanNode(registry, node) {
+  if (!registry?.active || !node) return false;
+  if (Date.now() > registry.deadline) {
+    registry.budgetReason = "time";
+    rebuildCleanup(registry, "timeout");
+    return false;
+  }
+  if (registry.scannedNodes >= REBUILD_MAX_NODES) {
+    registry.truncated = true;
+    registry.budgetReason = "nodes";
+    rebuildCleanup(registry, "budget");
+    return false;
+  }
+  registry.scannedNodes += 1;
+  try {
+    if (node.shadowRoot) {
+      rebuildObserveRoot(registry, node.shadowRoot);
+      rebuildScanRoot(registry, node.shadowRoot, false);
+    }
+    return rebuildDispatchErrorCard(registry, node);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function rebuildScanRoot(registry, root, recordScan = true) {
+  if (!registry?.active || !root) return false;
+  if (Date.now() > registry.deadline) {
+    registry.budgetReason = "time";
+    rebuildCleanup(registry, "timeout");
+    return false;
+  }
+  // Query the target tag before building the generic node list.  The alpha34
+  // failure occurred because the broad walk exhausted the root budget before
+  // it reached a late Shadow Root containing hui-error-card.
+  if (rebuildQueryErrorCards(registry, root)) return true;
+  const nodes = [];
+  try {
+    if (diagnosticsNodeTag(root) === "hui-error-card") nodes.push(root);
+    root.querySelectorAll?.("*")?.forEach?.((node) => nodes.push(node));
+  } catch (_error) {
+    return false;
+  }
+  for (const node of nodes) {
+    if (!registry.active || rebuildScanNode(registry, node)) break;
+  }
+  if (recordScan && registry.active) {
+    diagnosticsRecord("registration-rebuild-scan", {
+      dispatched_count: registry.dispatchedCount,
+      scan_nodes: registry.scannedNodes,
+      scan_roots: registry.scanRoots,
+      truncated: registry.truncated,
+    });
+  }
+  return registry.dispatchedCount > 0;
+}
+
+function scheduleKC761ErrorCardRebuild() {
+  const registry = spectrumRebuildRegistry();
+  const documentRoot = globalThis.document || globalThis.window?.document;
+  if (!registry || !documentRoot || registry.started) return;
+  registry.started = true;
+  registry.active = true;
+  registry.deadline = Date.now() + REBUILD_WINDOW_MS;
+  const hostWindow = globalThis.window;
+  registry.pagehideListener = () => rebuildCleanup(registry, "unload");
+  try { hostWindow?.addEventListener?.("pagehide", registry.pagehideListener, { once: true }); } catch (_error) { /* restricted window */ }
+  rebuildObserveRoot(registry, documentRoot);
+  rebuildScanRoot(registry, documentRoot);
+  if (!registry.active) return;
+  REBUILD_SCAN_DELAYS_MS.forEach((delay) => {
+    registry.timers.push(setTimeout(() => {
+      if (registry.active) rebuildScanRoot(registry, documentRoot);
+    }, delay));
+  });
+  registry.timers.push(setTimeout(() => {
+    if (registry.active) rebuildCleanup(registry, "timeout");
+  }, REBUILD_WINDOW_MS));
+}
+
+function diagnosticsNodePath(node) {
+  const parts = [];
+  const seen = new Set();
+  let current = node;
+  for (let depth = 0; current && depth < 8 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const tag = diagnosticsNodeTag(current) || "node";
+    let index = 0;
+    try {
+      const parent = current.parentElement || current.parentNode?.host || current.parentNode;
+      const siblings = parent?.children || parent?.childNodes;
+      if (siblings && typeof siblings.length === "number") {
+        for (let siblingIndex = 0; siblingIndex < siblings.length; siblingIndex += 1) {
+          if (siblings[siblingIndex] === current) {
+            index = siblingIndex;
+            break;
+          }
+        }
+      }
+      current = parent || null;
+    } catch (_error) {
+      current = null;
+    }
+    parts.splice(0, 0, `${tag}[${index}]`);
+  }
+  return parts.join(">").slice(0, 180) || "unknown";
+}
+
+function diagnosticsResourceVersionMatch() {
+  let resourceSeen = false;
+  try {
+    const entries = globalThis.performance?.getEntriesByType?.("resource") || [];
+    for (const entry of entries) {
+      const resourceName = String(entry?.name || "");
+      if (!/kc761-spectrum-card\.js(?:\?|$)/i.test(resourceName)) continue;
+      resourceSeen = true;
+      if (resourceName.includes(`v=${encodeURIComponent(CARD_VERSION)}`) || resourceName.includes(CARD_VERSION)) return true;
+    }
+  } catch (_error) {
+    return "unknown";
+  }
+  return resourceSeen ? false : "unknown";
+}
+
+function diagnosticsIsErrorCard(node) {
+  const tag = diagnosticsNodeTag(node);
+  if (tag === "hui-error-card") return true;
+  if (tag !== "ha-card") return false;
+  try {
+    return Boolean(node.classList?.contains?.("error")) || /(?:^|\s)error(?:\s|$)/i.test(String(node.className || ""));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function diagnosticsNodeText(node) {
+  try {
+    const rootText = node?.shadowRoot?.textContent || node?.textContent || node?.getAttribute?.("title") || "";
+    return sanitizeDiagnosticText(rootText).slice(0, 240);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function diagnosticsNodeError(node, text) {
+  let exposed = null;
+  try {
+    exposed = node?.error || node?.errorDetails || null;
+  } catch (_error) {
+    exposed = null;
+  }
+  return {
+    name: sanitizeDiagnosticText(exposed?.name || "LovelaceErrorCard").slice(0, 100),
+    message: text || "Lovelace error card detected",
+    stack: sanitizeDiagnosticStack(exposed?.stack),
+  };
+}
+
+function diagnosticsErrorCardFields(node) {
+  const context = diagnosticsContext();
+  return {
+    config_type_is_kc761: diagnosticsConfigTypeMatch(node) ?? "unknown",
+    node_path: diagnosticsNodePath(node),
+    custom_element_defined: context.custom_element_defined,
+    module_evaluated: context.module_evaluated,
+    card_instances: context.card_instances,
+    resource_version_match: context.resource_version_match ?? "unknown",
+  };
+}
+
+function diagnosticsInspectErrorCard(node, registry = diagnosticsListenerRegistry()) {
+  if (!registry || !node || !diagnosticsIsErrorCard(node) || registry.errorCards.has(node)) return;
+  registry.errorCards.add(node);
+  diagnosticsRecordFailure("lovelace-error-card", diagnosticsNodeError(node, diagnosticsNodeText(node)), {
+    observed_error_card: true,
+    ...diagnosticsErrorCardFields(node),
+  });
+}
+
+function diagnosticsScanErrorCards(root, registry = diagnosticsListenerRegistry()) {
+  if (!root || !registry) return;
+  registry.observerStats.scans += 1;
+  diagnosticsInspectErrorCard(root, registry);
+  try {
+    const shadowRoot = root?.shadowRoot;
+    if (shadowRoot) diagnosticsObserveRoot(registry, shadowRoot);
+  } catch (_error) {
+    // Closed or restricted shadow roots are intentionally ignored.
+  }
+  const nodes = [];
+  try {
+    root.querySelectorAll?.("hui-error-card, ha-card.error")?.forEach((node) => nodes.push(node));
+    root.querySelectorAll?.("*")?.forEach((node) => nodes.push(node));
+  } catch (_error) {
+    // Restricted DOM implementations may not support selectors.
+  }
+  const unique = new Set();
+  for (const node of nodes) {
+    if (unique.size >= DIAGNOSTICS_MAX_SCAN_NODES) {
+      registry.observerStats.scan_truncated += 1;
+      break;
+    }
+    if (unique.has(node)) continue;
+    unique.add(node);
+    diagnosticsInspectErrorCard(node, registry);
+    try {
+      const shadowRoot = node?.shadowRoot;
+      if (shadowRoot) diagnosticsObserveRoot(registry, shadowRoot);
+    } catch (_error) {
+      // Closed or restricted shadow roots are intentionally ignored.
+    }
+  }
+}
+
+function diagnosticsPersistObserverStats(registry) {
+  const storage = diagnosticsSessionStorage();
+  if (!storage || !registry?.observerStats) return;
+  const snapshot = diagnosticsReadSnapshot(storage);
+  snapshot.observer_stats = { ...registry.observerStats };
+  diagnosticsWriteSnapshot(snapshot, storage);
+}
+
+function diagnosticsDeepNow() {
+  try {
+    const value = globalThis.performance?.now?.();
+    if (Number.isFinite(value)) return value;
+  } catch (_error) {
+    // Fall back to the wall clock in restricted browser shells.
+  }
+  return Date.now();
+}
+
+function diagnosticsDeepPriority(node) {
+  const tag = diagnosticsNodeTag(node);
+  return /^(?:hui-|ha-|home-assistant)/i.test(tag) ? 0 : 1;
+}
+
+function diagnosticsDeepSnapshot(registry = diagnosticsListenerRegistry()) {
+  const started = diagnosticsDeepNow();
+  const deadline = started + DIAGNOSTICS_DEEP_BUDGET_MS;
+  const roots = [];
+  const seenRoots = new Set();
+  const seenNodes = new Set();
+  const errors = new Map();
+  const result = {
+    runs: Number(registry?.exportSnapshot?.runs) + 1 || 1,
+    roots: 0,
+    nodes: 0,
+    dropped_roots: 0,
+    dropped_nodes: 0,
+    budget_exceeded: 0,
+    error_cards: 0,
+    last_timestamp: new Date().toISOString(),
+  };
+  const enqueueRoot = (root) => {
+    if (!root || seenRoots.has(root)) return;
+    if (seenRoots.size + roots.length >= DIAGNOSTICS_MAX_DEEP_ROOTS) {
+      result.dropped_roots += 1;
+      return;
+    }
+    roots.push(root);
+  };
+  const enqueueShadowRoot = (node) => {
+    try {
+      if (node?.shadowRoot) enqueueRoot(node.shadowRoot);
+    } catch (_error) {
+      // Closed or restricted shadow roots are intentionally skipped.
+    }
+  };
+  const visit = (node) => {
+    if (!node || seenNodes.has(node)) return;
+    if (result.nodes >= DIAGNOSTICS_MAX_DEEP_NODES) {
+      result.dropped_nodes += 1;
+      return;
+    }
+    seenNodes.add(node);
+    result.nodes += 1;
+    if (diagnosticsIsErrorCard(node)) {
+      const error = diagnosticsNodeError(node, diagnosticsNodeText(node));
+      const fields = diagnosticsErrorCardFields(node);
+      const signature = [error.name, error.message, error.stack, fields.config_type_is_kc761, fields.node_path].join("|");
+      if (!errors.has(signature)) errors.set(signature, { error, node, fields });
+    }
+    enqueueShadowRoot(node);
+  };
+  const documentRoot = globalThis.document || globalThis.window?.document;
+  enqueueRoot(documentRoot);
+  while (roots.length) {
+    if (diagnosticsDeepNow() > deadline) {
+      result.budget_exceeded = 1;
+      break;
+    }
+    const root = roots.splice(0, 1)[0];
+    if (!root || seenRoots.has(root)) continue;
+    seenRoots.add(root);
+    result.roots += 1;
+    visit(root);
+    let nodes = [];
+    try {
+      root.querySelectorAll?.("*")?.forEach?.((node) => nodes.push(node));
+    } catch (_error) {
+      nodes = [];
+    }
+    nodes.sort((left, right) => diagnosticsDeepPriority(left) - diagnosticsDeepPriority(right));
+    for (const node of nodes) {
+      if (diagnosticsDeepNow() > deadline) {
+        result.budget_exceeded = 1;
+        break;
+      }
+      visit(node);
+      if (result.nodes >= DIAGNOSTICS_MAX_DEEP_NODES) break;
+    }
+    if (result.nodes >= DIAGNOSTICS_MAX_DEEP_NODES) {
+      result.dropped_nodes += 1;
+      break;
+    }
+  }
+  result.error_cards = errors.size;
+  if (registry) registry.exportSnapshot = result;
+  for (const { error, fields } of errors.values()) {
+    diagnosticsRecordFailure("lovelace-error-card-snapshot", error, {
+      observed_error_card: true,
+      deep_snapshot: true,
+      ...fields,
+    });
+  }
+  const storage = diagnosticsSessionStorage();
+  if (storage) {
+    const snapshot = diagnosticsReadSnapshot(storage);
+    snapshot.export_snapshot = { ...result };
+    diagnosticsWriteSnapshot(snapshot, storage);
+  }
+  return result;
+}
+
+function diagnosticsDownload() {
+  const snapshot = diagnosticsReadSnapshot();
+  if (snapshot.enabled !== true) return false;
+  try {
+    diagnosticsDeepSnapshot();
+    const payload = JSON.stringify(diagnosticsExportPayload(), null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = globalThis.URL?.createObjectURL?.(blob);
+    if (!url) throw new Error("Diagnostic download is unavailable");
+    const documentRoot = globalThis.document || globalThis.window?.document;
+    const link = documentRoot?.createElement?.("a");
+    if (!link) throw new Error("Diagnostic download is unavailable");
+    link.href = url;
+    link.download = `kc761-diagnostics-${Date.now()}.json`;
+    link.click?.();
+    globalThis.URL?.revokeObjectURL?.(url);
+    diagnosticsRecord("diagnostics-exported");
+    return true;
+  } catch (error) {
+    diagnosticsRecordError("diagnostics-export-failure", error);
+    return false;
+  }
+}
+
+function diagnosticsRemoveGlobalButton(registry = diagnosticsListenerRegistry()) {
+  if (!registry) return;
+  try {
+    const documentRoot = globalThis.document || globalThis.window?.document;
+    if (registry.bodyReadyListener) documentRoot?.removeEventListener?.("DOMContentLoaded", registry.bodyReadyListener);
+    if (registry.globalButton && registry.globalButtonHandler) registry.globalButton.removeEventListener?.("click", registry.globalButtonHandler);
+    if (registry.globalButton?.remove) registry.globalButton.remove();
+    else if (registry.globalButton?.parentNode?.removeChild) registry.globalButton.parentNode.removeChild(registry.globalButton);
+  } catch (_error) {
+    // Browser teardown must never turn diagnostics cleanup into a card error.
+  }
+  registry.globalButton = null;
+  registry.globalButtonHandler = null;
+  registry.bodyReadyListener = null;
+}
+
+function diagnosticsInstallGlobalButton(registry = diagnosticsListenerRegistry()) {
+  if (!registry || diagnosticsReadSnapshot().enabled !== true) return;
+  try {
+    const documentRoot = globalThis.document || globalThis.window?.document;
+    const body = documentRoot?.body;
+    if (!body) {
+      if (!registry.bodyReadyListener && documentRoot?.addEventListener) {
+        registry.bodyReadyListener = () => {
+          registry.bodyReadyListener = null;
+          diagnosticsInstallGlobalButton(registry);
+        };
+        documentRoot.addEventListener("DOMContentLoaded", registry.bodyReadyListener, { once: true });
+      }
+      return;
+    }
+    if (registry.globalButton && (registry.globalButton.isConnected || registry.globalButton.parentNode)) return;
+    const button = documentRoot.createElement("button");
+    button.type = "button";
+    button.textContent = "Export KC761 diagnostics";
+    button.title = "Download redacted KC761 diagnostics after scanning open Shadow DOM";
+    button.setAttribute("aria-label", "Export KC761 diagnostics");
+    button.style.position = "fixed";
+    button.style.right = "12px";
+    button.style.bottom = "12px";
+    button.style.zIndex = "2147483647";
+    button.style.padding = "6px 10px";
+    button.style.borderRadius = "6px";
+    button.style.border = "1px solid var(--divider-color, #777)";
+    button.style.background = "var(--card-background-color, #222)";
+    button.style.color = "var(--primary-text-color, #fff)";
+    button.style.font = "12px sans-serif";
+    const handler = () => diagnosticsDownload();
+    button.addEventListener("click", handler);
+    if (body.appendChild) body.appendChild(button);
+    else body.append?.(button);
+    registry.globalButton = button;
+    registry.globalButtonHandler = handler;
+  } catch (_error) {
+    // A restricted document or storage shell must not affect card setup.
+  }
+}
+
+function diagnosticsObserveRoot(registry, root) {
+  if (!registry || !root || registry.observedRoots.has(root)) return;
+  const hostWindow = globalThis.window;
+  const Observer = hostWindow?.MutationObserver || globalThis.MutationObserver;
+  if (typeof Observer !== "function" || registry.observedRoots.size >= DIAGNOSTICS_MAX_OBSERVER_ROOTS) {
+    if (registry.observedRoots.size >= DIAGNOSTICS_MAX_OBSERVER_ROOTS) registry.observerStats.dropped_roots += 1;
+    return;
+  }
+  try {
+    const observer = new Observer((records) => {
+      if (diagnosticsReadSnapshot().enabled !== true) return;
+      records?.forEach?.((record) => record?.addedNodes?.forEach?.((node) => diagnosticsScanErrorCards(node, registry)));
+      diagnosticsScanErrorCards(root, registry);
+      diagnosticsPersistObserverStats(registry);
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    registry.observedRoots.add(root);
+    registry.observers.set(root, observer);
+    registry.observerStats.roots = registry.observedRoots.size;
+    if (!registry.observer) registry.observer = observer;
+    diagnosticsScanErrorCards(root, registry);
+    diagnosticsPersistObserverStats(registry);
+  } catch (_error) {
+    // Restricted or closed roots are ignored without affecting card setup.
+  }
+}
+
+function diagnosticsInstallObserver(registry) {
+  const hostWindow = globalThis.window;
+  const documentRoot = globalThis.document || hostWindow?.document;
+  if (!documentRoot) return;
+  diagnosticsObserveRoot(registry, documentRoot);
+}
+
+function diagnosticsEnsureGlobal() {
+  const registry = diagnosticsListenerRegistry();
+  if (!registry || diagnosticsReadSnapshot().enabled !== true) return false;
+  const hostWindow = globalThis.window;
+  if (!registry.installed) {
+    if (!hostWindow?.addEventListener) return false;
+    registry.onError = (event) => {
+      if (/kc761/i.test(diagnosticsSourceText(event))) diagnosticsRecordError("window-error", event.error || event);
+    };
+    registry.onRejection = (event) => {
+      if (/kc761/i.test(diagnosticsSourceText(event))) diagnosticsRecordError("unhandled-rejection", event.reason || event);
+    };
+    try {
+      hostWindow.addEventListener("error", registry.onError, true);
+      hostWindow.addEventListener("unhandledrejection", registry.onRejection, true);
+      registry.installed = true;
+    } catch (_error) {
+      registry.onError = null;
+      registry.onRejection = null;
+    }
+  }
+  diagnosticsInstallObserver(registry);
+  diagnosticsInstallGlobalButton(registry);
+  return registry.installed || Boolean(registry.observer);
+}
+
+function diagnosticsStopGlobal() {
+  const registry = diagnosticsListenerRegistry();
+  if (!registry) return;
+  diagnosticsRemoveGlobalButton(registry);
+  try {
+    if (registry.installed) {
+      globalThis.window?.removeEventListener?.("error", registry.onError, true);
+      globalThis.window?.removeEventListener?.("unhandledrejection", registry.onRejection, true);
+    }
+    registry.observers?.forEach?.((observer) => observer?.disconnect?.());
+  } catch (_error) {
+    // Listener/observer cleanup is best effort in restricted host shells.
+  }
+  registry.cards.clear();
+  registry.installed = false;
+  registry.observer = null;
+  registry.observers = new Map();
+  registry.observedRoots = new Set();
+  registry.observerStats = { roots: 0, scans: 0, dropped_roots: 0, scan_truncated: 0 };
+  registry.exportSnapshot = diagnosticsEmptySnapshot(false).export_snapshot;
+  registry.errorCards = new WeakSet();
+  registry.onError = null;
+  registry.onRejection = null;
+}
+
+function diagnosticsAttachCard(card) {
+  const registry = diagnosticsListenerRegistry();
+  if (!registry) return;
+  registry.cards.add(card);
+  diagnosticsEnsureGlobal();
+}
+
+function diagnosticsDetachCard(card) {
+  const registry = diagnosticsListenerRegistry();
+  if (!registry) return;
+  registry.cards.delete(card);
+  // Global diagnostics remain installed while the session flag is enabled so
+  // a transient card replacement or a HA error card cannot erase evidence.
 }
 
 function editorHandoffRegistry() {
@@ -86,6 +1317,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._echartsPromise = null;
     this._resizeObserver = null;
     this._layoutResizeObserver = null;
+    this._layoutResizeRaf = null;
+    this._chartResizeRaf = null;
     this._refreshTimer = null;
     this._busyState = false;
     this._entityGeneration = 0;
@@ -100,6 +1333,12 @@ class KC761SpectrumCard extends HTMLElement {
     this._zoom = { ...ZOOM_DEFAULT };
     this._zoomDatasetKey = null;
     this._zoomHandler = null;
+    this._dataMode = "live";
+    this._viewStateKey = null;
+    this._viewPersistTimer = null;
+    this._viewPersistPending = false;
+    this._diagnosticsEnabled = false;
+    diagnosticsRecord("constructor");
   }
 
   static getStubConfig() {
@@ -156,6 +1395,8 @@ class KC761SpectrumCard extends HTMLElement {
       if (next[key] === undefined) next[key] = true;
       if (typeof next[key] !== "boolean") throw new Error(`${key} must be true or false`);
     });
+    if (next.diagnostics === undefined) next.diagnostics = DEFAULT_CARD_CONFIG.diagnostics;
+    if (typeof next.diagnostics !== "boolean") throw new Error("diagnostics must be true or false");
     return next;
   }
 
@@ -188,6 +1429,13 @@ class KC761SpectrumCard extends HTMLElement {
           flatten: true,
           schema: CARD_CONTENT_VISIBILITY_KEYS.map((name) => ({ name, default: true, selector: { boolean: {} } })),
         },
+        {
+          name: "diagnostics",
+          title: "Diagnostics",
+          type: "expandable",
+          flatten: true,
+          schema: [{ name: "diagnostics", default: false, selector: { boolean: {} } }],
+        },
       ],
       computeLabel: (schema) => ({
         entity: "Spectrum entity",
@@ -200,8 +1448,13 @@ class KC761SpectrumCard extends HTMLElement {
         show_legend: "Show legend",
         show_actions: "Show actions",
         show_peak: "Show peak",
+        diagnostics: "Test diagnostics",
       })[schema.name] || schema.name,
-      computeHelper: (schema) => schema.name === "refresh_interval" ? "0 disables automatic capture; enabled values are 5–3600 seconds." : undefined,
+      computeHelper: (schema) => {
+        if (schema.name === "refresh_interval") return "0 disables automatic capture; enabled values are 5–3600 seconds.";
+        if (schema.name === "diagnostics") return "Redacted session-only lifecycle logging; use Export diagnostics to download.";
+        return undefined;
+      },
       assertConfig: (config) => KC761SpectrumCard.validateConfig(config, { allowMissingEntity: true }),
     };
   }
@@ -217,13 +1470,69 @@ class KC761SpectrumCard extends HTMLElement {
     this._applyPresentationMode();
   }
 
+  _setDiagnosticsEnabled(enabled, explicitlyConfigured = false) {
+    const next = Boolean(enabled);
+    if (next === this._diagnosticsEnabled) {
+      if (next) {
+        diagnosticsSetEnabled(true);
+        diagnosticsAttachCard(this);
+      } else if (explicitlyConfigured) {
+        diagnosticsSetEnabled(false);
+      }
+      this._applyDiagnosticsVisibility();
+      return;
+    }
+    if (next) {
+      this._diagnosticsEnabled = true;
+      diagnosticsSetEnabled(true);
+      diagnosticsAttachCard(this);
+    } else {
+      diagnosticsDetachCard(this);
+      this._diagnosticsEnabled = false;
+      if (explicitlyConfigured) diagnosticsSetEnabled(false);
+    }
+    this._applyDiagnosticsVisibility();
+  }
+
+  _recordDiagnostic(event, fields = {}) {
+    return diagnosticsRecord(event, fields);
+  }
+
+  _recordDiagnosticError(event, error) {
+    return diagnosticsRecordError(event, error);
+  }
+
   setConfig(config) {
+    diagnosticsRecord("set-config-entry", { has_config: config !== null && config !== undefined });
+    // Lovelace can briefly hand a recreated card no config while the
+    // dashboard state is being assembled.  Treat only null/undefined as that
+    // transient lifecycle state; malformed objects and invalid field values
+    // still go through validateConfig and must remain visible errors.
+    if (config === null || config === undefined) {
+      diagnosticsRecord("set-config-missing");
+      if (this._config && this._rendered) this._setStatus("Waiting for card configuration");
+      return;
+    }
     const previous = this._config;
-    const normalized = KC761SpectrumCard.validateConfig(config);
+    let normalized;
+    try {
+      normalized = KC761SpectrumCard.validateConfig(config);
+    } catch (error) {
+      diagnosticsRecordError("set-config-invalid", error);
+      throw error;
+    }
     const entityChanged = previous?.entity !== normalized.entity;
     const yAxisProvided = Object.prototype.hasOwnProperty.call(config || {}, "y_axis");
     if (entityChanged) this._resetEntityRuntime();
     this._config = normalized;
+    const diagnosticsExplicitlyConfigured = Object.prototype.hasOwnProperty.call(config, "diagnostics");
+    this._setDiagnosticsEnabled(normalized.diagnostics, diagnosticsExplicitlyConfigured);
+    diagnosticsRecord("set-config-valid", {
+      has_entity: Boolean(normalized.entity),
+      has_refresh_interval: Object.prototype.hasOwnProperty.call(config, "refresh_interval"),
+      has_y_axis: Object.prototype.hasOwnProperty.call(config, "y_axis"),
+      diagnostics_enabled: normalized.diagnostics,
+    });
     this._refreshColors();
     this._setYAxis(this._initialYAxis(normalized.y_axis, yAxisProvided));
     this._renderBase();
@@ -235,6 +1544,11 @@ class KC761SpectrumCard extends HTMLElement {
 
   connectedCallback() {
     this._detached = false;
+    diagnosticsRecord("connected");
+    if (this._diagnosticsEnabled) {
+      diagnosticsSetEnabled(true);
+      diagnosticsAttachCard(this);
+    }
     this._ensureLayoutObserver();
     this._applyPresentationMode();
     this._syncAutoRefresh();
@@ -242,18 +1556,30 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    diagnosticsRecord("disconnected");
     this._detached = true;
     this._drawToken += 1;
+    this._flushViewState();
     this._stopAutoRefresh();
     this._clearEditorHandoffRetry();
     this._unregisterEditorHandoffCandidate();
     this._disposeChart();
     if (this._layoutResizeObserver) this._layoutResizeObserver.disconnect();
     this._layoutResizeObserver = null;
+    this._cancelLayoutResize();
+    if (this._diagnosticsEnabled) {
+      diagnosticsDetachCard(this);
+    }
   }
 
   set hass(hass) {
-    const previous = this._hass?.states?.[this._config?.entity];
+    diagnosticsRecord("hass-entry", { has_hass: Boolean(hass) });
+    let previous = null;
+    try {
+      previous = this._hass?.states?.[this._config?.entity];
+    } catch (_error) {
+      // HA can replace the state object while a dashboard is reloading.
+    }
     this._hass = hass;
     if (!this._config) return;
     this._refreshColors();
@@ -264,13 +1590,45 @@ class KC761SpectrumCard extends HTMLElement {
       this._setStatus("Select a KC761 spectrum entity");
       return;
     }
-    const current = hass.states[this._config.entity];
+    let states = null;
+    try {
+      states = hass?.states;
+    } catch (_error) {
+      states = null;
+    }
+    if (!states || typeof states !== "object") {
+      diagnosticsRecord("hass-readiness", { has_states: false, state_object: false });
+      this._entryId = null;
+      this._device = null;
+      this._stopAutoRefresh();
+      this._setStatus("Waiting for Home Assistant state");
+      return;
+    }
+    let current = null;
+    try {
+      current = states[this._config.entity];
+    } catch (_error) {
+      this._entryId = null;
+      this._device = null;
+      this._stopAutoRefresh();
+      this._setStatus("Waiting for Home Assistant state");
+      return;
+    }
     if (!current) {
+      diagnosticsRecord("hass-readiness", { has_states: true, state_object: true, state_present: false });
       this._setStatus(`Entity not found: ${this._config.entity}`, true);
       this._stopAutoRefresh();
       return;
     }
-    if (!KC761SpectrumCard.isSpectrumEntityState(current)) {
+    let validSpectrum = false;
+    try {
+      validSpectrum = KC761SpectrumCard.isSpectrumEntityState(current);
+    } catch (error) {
+      diagnosticsRecordError("hass-state-read-failure", error);
+      throw error;
+    }
+    diagnosticsRecord("hass-readiness", { has_states: true, state_object: true, state_present: true, valid_spectrum: validSpectrum });
+    if (!validSpectrum) {
       if (current.state === "unavailable") {
         // HA may omit all extra attributes while an entity is unavailable.
         // Keep strict KC761 validation for every usable state, but do not
@@ -289,7 +1647,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._entryId = current.attributes.config_entry_id;
     const historySelect = this.shadowRoot.querySelector("#history");
     if ((!historySelect || historySelect.value === "latest") && (current !== previous || !this._data)) {
-      this._setData(this._fromEntity(current));
+      this._setData(this._fromEntity(current), { viewMode: "live" });
       this._updateSummary();
       this._draw();
     }
@@ -314,6 +1672,7 @@ class KC761SpectrumCard extends HTMLElement {
       this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
       this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
       this._applyVisibility();
+      this._applyDiagnosticsVisibility();
       this._ensureLayoutObserver();
       this._applyPresentationMode();
       return;
@@ -326,7 +1685,7 @@ class KC761SpectrumCard extends HTMLElement {
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
         button{cursor:pointer}button.danger{color:var(--error-color)}button:disabled{opacity:.45;cursor:not-allowed}
-        .chart-wrap{position:relative;margin-top:8px;height:370px;flex:0 1 370px;min-height:220px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
+        .chart-wrap{position:relative;margin-top:8px;height:370px;flex:0 1 370px;min-height:220px;border-radius:6px;background:var(--card-background-color);overflow:hidden}
         #chart{width:100%;height:100%}
         .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
         .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:58px;gap:6px;margin:8px 0;font-size:12px}.summary div{box-sizing:border-box;min-width:0;height:58px;padding:6px 8px;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:block;min-width:0;height:1.3em;max-height:1.3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.3;margin-top:2px}
@@ -336,7 +1695,7 @@ class KC761SpectrumCard extends HTMLElement {
         ha-card.compact-height .chart-wrap{height:240px;flex-basis:240px;min-height:200px}ha-card.compact-height .summary{grid-auto-rows:52px}ha-card.compact-height .summary div{height:52px;padding:5px 7px}ha-card.compact-height .summary b{font-size:13px}ha-card.compact-height .actions{margin-top:6px}ha-card.compact-height select,ha-card.compact-height input,ha-card.compact-height button{padding:5px 7px}
       </style>
       <ha-card>
-        <div class="header"><h2 id="title"></h2><div class="zoom-meta"><span id="zoom-readout" class="zoom-readout" role="status" aria-live="polite">View CH 0–2047</span><button id="reset-zoom" class="reset-zoom" type="button" disabled>Reset zoom</button></div><button id="configure" class="configure" type="button">Configure</button></div>
+        <div class="header"><h2 id="title"></h2><div class="zoom-meta"><span id="zoom-readout" class="zoom-readout" role="status" aria-live="polite">View CH 0–2047</span><button id="reset-zoom" class="reset-zoom" type="button" disabled>Reset zoom</button></div><button id="export-diagnostics" class="configure" type="button" hidden>Export diagnostics</button><button id="configure" class="configure" type="button">Configure</button></div>
         <div id="controls">
           <div id="editor-controls" class="toolbar editor-only">
             <label>Channel<select id="source"></select></label>
@@ -344,7 +1703,7 @@ class KC761SpectrumCard extends HTMLElement {
             <label>Y axis<select id="yaxis"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></label>
             <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
           </div>
-          <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">0</span><span aria-hidden="true">–</span><span id="roi-end-value">2047</span></div></div>
+          <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">Start CH 0</span><span aria-hidden="true">·</span><span id="roi-end-value">End CH 2047</span></div></div>
           </div>
           <div class="data-slider-row"><label class="data-slider-label">Data cursor<div class="data-slider" role="group" aria-label="Data cursor channel"><div class="data-slider-track"></div><input id="data-cursor-slider" type="range" min="0" max="2047" step="1" value="0" role="slider" aria-label="Data cursor channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0" aria-valuetext="Channel 0"><div class="data-values"><span id="data-cursor-channel">CH 0</span><span id="data-cursor-readout">—</span></div></div></label></div>
           <div class="help">Use the ROI handles to select a range and the Data cursor slider to inspect a point. The chart line is an indicator only.</div>
@@ -369,7 +1728,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
     this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
     this.shadowRoot.querySelector("#xaxis").addEventListener("change", () => this._draw());
-    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture({ resetZoom: true }));
+    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture());
     this.shadowRoot.querySelector("#yaxis").addEventListener("change", (event) => {
       this._setYAxis(event.target.value);
       this._persistYAxis();
@@ -383,14 +1742,30 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#capture").addEventListener("click", () => this._capture());
     this.shadowRoot.querySelector("#save").addEventListener("click", () => this._save());
     this.shadowRoot.querySelector("#csv").addEventListener("click", () => this._csv());
+    this.shadowRoot.querySelector("#export-diagnostics").addEventListener("click", () => this._exportDiagnostics());
     this.shadowRoot.querySelector("#configure").addEventListener("click", () => this._openEditor());
     this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => button.addEventListener("click", () => this._clear(button.dataset.clear)));
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._updateZoomReadout();
     this._applyVisibility();
+    this._applyDiagnosticsVisibility();
     this._ensureLayoutObserver();
     this._applyPresentationMode();
+  }
+
+  _applyDiagnosticsVisibility() {
+    const button = this.shadowRoot?.querySelector("#export-diagnostics");
+    if (button) {
+      button.hidden = !this._diagnosticsEnabled;
+      button.title = "Download redacted KC761 card diagnostics";
+      button.setAttribute("aria-label", "Export redacted diagnostics");
+    }
+  }
+
+  _exportDiagnostics() {
+    if (!this._diagnosticsEnabled) return;
+    if (!diagnosticsDownload()) this._setStatus("Diagnostics export failed", true);
   }
 
   _applyPresentationMode() {
@@ -416,8 +1791,24 @@ class KC761SpectrumCard extends HTMLElement {
     if (!card) return;
     this._updateCompactHeight();
     if (this._layoutResizeObserver || typeof ResizeObserver !== "function") return;
-    this._layoutResizeObserver = new ResizeObserver(() => this._updateCompactHeight());
+    this._layoutResizeObserver = new ResizeObserver(() => this._scheduleLayoutResize());
     this._layoutResizeObserver.observe(card);
+  }
+
+  _scheduleLayoutResize() {
+    if (this._detached || this._layoutResizeRaf !== null) return;
+    const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    this._layoutResizeRaf = request(() => {
+      this._layoutResizeRaf = null;
+      if (!this._detached) this._updateCompactHeight();
+    });
+  }
+
+  _cancelLayoutResize() {
+    if (this._layoutResizeRaf === null) return;
+    const cancel = globalThis.cancelAnimationFrame || ((id) => clearTimeout(id));
+    cancel(this._layoutResizeRaf);
+    this._layoutResizeRaf = null;
   }
 
   _updateCompactHeight() {
@@ -451,6 +1842,7 @@ class KC761SpectrumCard extends HTMLElement {
   _resetEntityRuntime() {
     this._entityGeneration = (this._entityGeneration || 0) + 1;
     this._drawToken += 1;
+    this._flushViewState();
     this._stopAutoRefresh();
     this._device = null;
     this._entryId = null;
@@ -459,6 +1851,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
     this._zoomDatasetKey = null;
+    this._dataMode = "live";
+    this._viewStateKey = null;
     this._disposeChart();
     if (!this._rendered) return;
     const source = this.shadowRoot.querySelector("#source");
@@ -669,8 +2063,16 @@ class KC761SpectrumCard extends HTMLElement {
       endInput.value = String(end);
       endInput.setAttribute("aria-valuenow", String(end));
     }
-    if (startValue) startValue.textContent = String(start);
-    if (endValue) endValue.textContent = String(end);
+    if (startValue) {
+      startValue.textContent = `Start CH ${start}`;
+      startValue.title = `Start channel ${start}`;
+      startValue.setAttribute("aria-label", `Start channel ${start}`);
+    }
+    if (endValue) {
+      endValue.textContent = `End CH ${end}`;
+      endValue.title = `End channel ${end}`;
+      endValue.setAttribute("aria-label", `End channel ${end}`);
+    }
     if (fill) {
       fill.style.left = `${(start / MAX_CHANNEL) * 100}%`;
       fill.style.right = `${100 - (end / MAX_CHANNEL) * 100}%`;
@@ -731,6 +2133,126 @@ class KC761SpectrumCard extends HTMLElement {
     this._writeYAxis(keys.legacy, this._yAxis);
   }
 
+  _normalizeViewStateMode(mode, data = this._data) {
+    if (mode !== undefined && mode !== null) {
+      const explicit = String(mode);
+      return explicit.startsWith("history:") && explicit.length > 8 ? explicit : "live";
+    }
+    const snapshotId = data?.snapshot_id;
+    return snapshotId !== undefined && snapshotId !== null && String(snapshotId) !== "" && String(snapshotId) !== "latest"
+      ? `history:${String(snapshotId)}`
+      : "live";
+  }
+
+  _viewStateKeyFor(data = this._data, mode = null) {
+    const entity = this._config?.entity;
+    if (!entity) return null;
+    const source = data?.source === undefined || data?.source === null ? "unknown" : String(data.source);
+    const channel = data?.channel === undefined || data?.channel === null ? "unknown" : String(data.channel);
+    const normalizedMode = this._normalizeViewStateMode(mode, data);
+    return `${VIEW_STATE_STORAGE_PREFIX}${[entity, channel, source, normalizedMode].map((value) => encodeURIComponent(value)).join(":")}`;
+  }
+
+  _readViewState(key = this._viewStateKey) {
+    const storage = spectrumViewStateStorage();
+    if (!storage || !key) return null;
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return null;
+      const state = JSON.parse(raw);
+      return state && state.schema === VIEW_STATE_SCHEMA_VERSION ? state : null;
+    } catch (_error) {
+      // Corrupt JSON and blocked localStorage are both safe no-op cases.
+      return null;
+    }
+  }
+
+  _pointIndexForChannel(channel) {
+    const points = this._points();
+    if (!points.length) return 0;
+    let nearest = 0;
+    points.forEach((point, index) => {
+      if (Math.abs(point[0] - channel) < Math.abs(points[nearest][0] - channel)) nearest = index;
+    });
+    return nearest;
+  }
+
+  _zoomFromChannelRange(startChannel, endChannel) {
+    const points = this._points();
+    if (points.length < 2) return { ...ZOOM_DEFAULT };
+    const last = points.length - 1;
+    const startIndex = clamp(this._pointIndexForChannel(startChannel), 0, last);
+    const endIndex = clamp(this._pointIndexForChannel(endChannel), startIndex, last);
+    return this._clampZoom((startIndex / last) * 100, (endIndex / last) * 100);
+  }
+
+  _restoreViewState() {
+    const state = this._readViewState();
+    const roiStart = Number(state?.roi?.start_channel);
+    const roiEnd = Number(state?.roi?.end_channel);
+    const dataCursor = Number(state?.data_cursor_channel);
+    const start = clamp(Number.isFinite(roiStart) ? Math.round(roiStart) : 0, 0, MAX_CHANNEL);
+    const end = clamp(Number.isFinite(roiEnd) ? Math.round(roiEnd) : MAX_CHANNEL, start, MAX_CHANNEL);
+    this._cursor = {
+      roiStart: start,
+      roiEnd: end,
+      data: this._dataCursorChannel(Number.isFinite(dataCursor) ? Math.round(dataCursor) : 0),
+    };
+    const zoomStart = Number(state?.zoom?.start_channel);
+    const zoomEnd = Number(state?.zoom?.end_channel);
+    this._zoom = Number.isFinite(zoomStart) && Number.isFinite(zoomEnd)
+      ? this._zoomFromChannelRange(zoomStart, zoomEnd)
+      : { ...ZOOM_DEFAULT };
+    this._updateRoiSliderUI();
+    this._updateDataCursorUI();
+    this._updateZoomReadout();
+  }
+
+  _viewStatePayload() {
+    const [zoomStart, zoomEnd] = this._zoomChannelRange();
+    const data = this._data || {};
+    const [roiStart, roiEnd] = this._roi();
+    return {
+      schema: VIEW_STATE_SCHEMA_VERSION,
+      entity: this._config?.entity || "",
+      channel: data.channel === undefined || data.channel === null ? "unknown" : String(data.channel),
+      source: data.source === undefined || data.source === null ? "unknown" : String(data.source),
+      mode: this._dataMode,
+      roi: { start_channel: roiStart, end_channel: roiEnd },
+      data_cursor_channel: this._dataCursorChannel(this._cursor.data),
+      zoom: { start_channel: zoomStart, end_channel: zoomEnd },
+    };
+  }
+
+  _flushViewState() {
+    if (this._viewPersistTimer !== null && typeof globalThis.clearTimeout === "function") {
+      globalThis.clearTimeout(this._viewPersistTimer);
+    }
+    this._viewPersistTimer = null;
+    if (!this._viewPersistPending) return;
+    this._viewPersistPending = false;
+    const storage = spectrumViewStateStorage();
+    if (!storage || !this._viewStateKey || !this._data) return;
+    try {
+      storage.setItem(this._viewStateKey, JSON.stringify(this._viewStatePayload()));
+    } catch (_error) {
+      // Storage quota/privacy failures must not affect the chart or network.
+    }
+  }
+
+  _scheduleViewStatePersist({ flush = false } = {}) {
+    this._viewPersistPending = true;
+    if (flush || typeof globalThis.setTimeout !== "function") {
+      this._flushViewState();
+      return;
+    }
+    if (this._viewPersistTimer !== null) return;
+    this._viewPersistTimer = globalThis.setTimeout(() => {
+      this._viewPersistTimer = null;
+      this._flushViewState();
+    }, VIEW_STATE_PERSIST_DELAY_MS);
+  }
+
   _datasetIdentity(data) {
     if (!data) return null;
     const points = Array.isArray(data.points) ? data.points : [];
@@ -740,11 +2262,21 @@ class KC761SpectrumCard extends HTMLElement {
     return `${snapshot}|source:${source}|channel:${channel}|points:${points.length}`;
   }
 
-  _setData(data, { resetZoom = false } = {}) {
+  _setData(data, { viewMode = null } = {}) {
+    if (!data) return;
     const identity = this._datasetIdentity(data);
-    if (resetZoom || (this._zoomDatasetKey && identity !== this._zoomDatasetKey)) this._resetZoomState();
+    const normalizedMode = this._normalizeViewStateMode(viewMode, data);
+    const nextKey = this._viewStateKeyFor(data, normalizedMode);
+    const keyChanged = nextKey !== this._viewStateKey;
+    if (keyChanged && this._viewStateKey) this._flushViewState();
+    const previousRange = !keyChanged && this._data ? this._zoomChannelRange() : null;
+    this._dataMode = normalizedMode;
+    this._viewStateKey = nextKey;
     this._zoomDatasetKey = identity;
     this._data = data;
+    if (keyChanged) this._restoreViewState();
+    else if (previousRange) this._zoom = this._zoomFromChannelRange(previousRange[0], previousRange[1]);
+    else this._zoom = this._clampZoom(this._zoom.start, this._zoom.end);
     this._cursor.data = this._dataCursorChannel(this._cursor.data);
     this._updateDataCursorUI();
     this._updateZoomReadout();
@@ -782,6 +2314,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (Math.abs(next.start - this._zoom.start) < 0.0001 && Math.abs(next.end - this._zoom.end) < 0.0001) return;
     this._zoom = next;
     this._updateZoomReadout();
+    this._scheduleViewStatePersist();
   }
 
   _onZoom(event) {
@@ -794,6 +2327,7 @@ class KC761SpectrumCard extends HTMLElement {
 
   _resetZoom() {
     this._resetZoomState();
+    this._scheduleViewStatePersist({ flush: true });
     if (this._chart) this._chart.dispatchAction({ type: "dataZoom", dataZoomIndex: [0, 1], start: 0, end: 100 });
   }
 
@@ -880,6 +2414,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._updateSummary();
+    this._scheduleViewStatePersist();
     this._draw();
   }
 
@@ -896,6 +2431,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (endInput) endInput.value = String(this._cursor.roiEnd);
     this._updateRoiSliderUI();
     this._updateSummary();
+    this._scheduleViewStatePersist();
     this._draw();
   }
 
@@ -942,6 +2478,7 @@ class KC761SpectrumCard extends HTMLElement {
       this._setStatus("");
       this._syncAutoRefresh();
     } catch (error) {
+      diagnosticsRecordError("initial-load-failure", error);
       this._setStatus(error.message || String(error), true);
     }
   }
@@ -966,11 +2503,11 @@ class KC761SpectrumCard extends HTMLElement {
     const entryId = this._entryId;
     if (snapshotId === "latest") {
       const state = this._hass.states[this._config.entity];
-      this._setData(this._fromEntity(state), { resetZoom: true });
+      this._setData(this._fromEntity(state), { viewMode: "live" });
     } else {
       const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData(data, { resetZoom: true });
+      this._setData({ ...data, snapshot_id: snapshotId }, { viewMode: `history:${snapshotId}` });
     }
     if (generation !== this._entityGeneration || entryId !== this._entryId) return;
     this.shadowRoot.querySelector("#source").value = String(this._data.source);
@@ -979,14 +2516,14 @@ class KC761SpectrumCard extends HTMLElement {
     this._syncAutoRefresh();
   }
 
-  async _capture({ silent = false, resetZoom = false } = {}) {
+  async _capture({ silent = false } = {}) {
     if (this._busyState || !this._entryId) return;
     const generation = this._entityGeneration;
     const entryId = this._entryId;
     await this._busy(async () => {
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData(data, { resetZoom });
+      this._setData(data, { viewMode: "live" });
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -1031,7 +2568,7 @@ class KC761SpectrumCard extends HTMLElement {
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData(data);
+      this._setData(data, { viewMode: "live" });
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -1047,6 +2584,7 @@ class KC761SpectrumCard extends HTMLElement {
       await operation();
       if (success) this._setStatus(success);
     } catch (error) {
+      diagnosticsRecordError("operation-failure", error);
       this._setStatus(error.message || String(error), true);
     } finally {
       this._busyState = false;
@@ -1209,15 +2747,20 @@ class KC761SpectrumCard extends HTMLElement {
   _draw() {
     if (!this._data || !this._points().length || !this.shadowRoot.querySelector("#chart")) return;
     const token = ++this._drawToken;
+    diagnosticsRecord("draw-start", { generation: token });
     this._ensureChart().then(() => {
       if (token !== this._drawToken || !this._chart) return;
       this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
-    }).catch((error) => this._setStatus(`Chart load failed: ${error.message || error}`, true));
+    }).catch((error) => {
+      diagnosticsRecordError("draw-failure", error);
+      this._setStatus(`Chart load failed: ${error.message || error}`, true);
+    });
   }
 
   _disposeChart() {
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
+    this._cancelChartResize();
     if (this._chart && this._zoomHandler) this._chart.off("datazoom", this._zoomHandler);
     this._zoomHandler = null;
     if (this._chart) this._chart.dispose();
@@ -1227,21 +2770,43 @@ class KC761SpectrumCard extends HTMLElement {
   async _ensureChart() {
     if (this._chart) return this._chart;
     if (this._detached) return null;
-    if (!this._echartsPromise) this._echartsPromise = import(ECHARTS_URL);
-    const module = await this._echartsPromise;
+    if (!this._echartsPromise) {
+      diagnosticsRecord("dynamic-import-start");
+      this._echartsPromise = import(ECHARTS_URL);
+    }
+    let module;
+    try {
+      module = await this._echartsPromise;
+      diagnosticsRecord("dynamic-import-success");
+    } catch (error) {
+      diagnosticsRecordError("dynamic-import-failure", error);
+      throw error;
+    }
     const chartElement = this.shadowRoot.querySelector("#chart");
     if (!chartElement) return null;
     this._echarts = module.default || module;
     this._chart = this._echarts.init(chartElement, null, { renderer: "svg", useDirtyRect: false });
     this._zoomHandler = (event) => this._onZoom(event);
     this._chart.on("datazoom", this._zoomHandler);
-    this._resizeObserver = new ResizeObserver(() => {
-      if (this._chart) {
-        this._chart.resize();
-      }
-    });
+    this._resizeObserver = new ResizeObserver(() => this._scheduleChartResize());
     this._resizeObserver.observe(chartElement);
     return this._chart;
+  }
+
+  _scheduleChartResize() {
+    if (this._detached || !this._chart || this._chartResizeRaf !== null) return;
+    const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    this._chartResizeRaf = request(() => {
+      this._chartResizeRaf = null;
+      if (!this._detached && this._chart) this._chart.resize();
+    });
+  }
+
+  _cancelChartResize() {
+    if (this._chartResizeRaf === null) return;
+    const cancel = globalThis.cancelAnimationFrame || ((id) => clearTimeout(id));
+    cancel(this._chartResizeRaf);
+    this._chartResizeRaf = null;
   }
 
   _refreshColors() {
@@ -1289,8 +2854,18 @@ class KC761SpectrumCard extends HTMLElement {
 // on a module's lexical global bindings while the app is bootstrapping.
 function registerKC761SpectrumCard() {
   const registry = globalThis.customElements;
-  if (registry && !registry.get("kc761-spectrum-card")) {
-    registry.define("kc761-spectrum-card", KC761SpectrumCard);
+  const alreadyDefined = Boolean(registry?.get?.("kc761-spectrum-card"));
+  diagnosticsRecord("registration-attempt", { already_defined: alreadyDefined });
+  if (registry && !alreadyDefined) {
+    try {
+      registry.define("kc761-spectrum-card", KC761SpectrumCard);
+      diagnosticsRecord("registration-defined", { defined: true });
+    } catch (error) {
+      diagnosticsRecordError("registration-failure", error);
+      throw error;
+    }
+  } else if (alreadyDefined) {
+    diagnosticsRecord("registration-already-defined", { already_defined: true });
   }
 
   const hostWindow = globalThis.window;
@@ -1310,4 +2885,18 @@ function registerKC761SpectrumCard() {
   else cards[existing] = { ...cards[existing], ...metadata };
 }
 
-registerKC761SpectrumCard();
+const diagnosticRegistry = diagnosticsListenerRegistry();
+if (diagnosticRegistry) diagnosticRegistry.moduleEvaluated = true;
+try {
+  if (globalThis.window) globalThis.window[DIAGNOSTICS_MODULE_EVALUATED_KEY] = true;
+} catch (_error) {
+  // A restricted window must not affect card registration or diagnostics.
+}
+
+// Reinstall session-enabled global diagnostics before registration so a
+// transient Lovelace error card or module failure is captured even when no
+// card instance has survived the current refresh yet.
+diagnosticsEnsureGlobal();
+diagnosticsRecord("module-evaluated");
+  registerKC761SpectrumCard();
+scheduleKC761ErrorCardRebuild();
