@@ -47,7 +47,7 @@ class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.18")
+        self.assertEqual(VERSION, "0.2.0-alpha.22")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -122,6 +122,12 @@ class IntegrationStaticTests(unittest.TestCase):
             'type="range"',
             'aria-label="ROI start channel"',
             'aria-label="ROI end channel"',
+            "data-cursor-slider",
+            'aria-label="Data cursor channel"',
+            "aria-valuetext",
+            "_setData",
+            "_dataCursorChannel",
+            "_updateDataCursorUI",
             "_updateRoiSliderUI",
             "_applyPresentationMode",
             "const dialogPreview = this._preview && !path",
@@ -132,12 +138,7 @@ class IntegrationStaticTests(unittest.TestCase):
             'new EventConstructor("ll-edit-card"',
             'searchParams.set("edit", "1")',
             "cursorNearPeak",
-            "pointerdown",
-            "convertToPixel",
-            "convertFromPixel",
             "containLabel: true",
-            "_plotRect",
-            "_xPixelBounds",
             "COLOR_FALLBACKS",
             "_refreshColors",
             "--graph-color-${index}",
@@ -150,8 +151,6 @@ class IntegrationStaticTests(unittest.TestCase):
             "nameRotate: 0",
             "verticalAlign: \"bottom\"",
             "formatter: (value) =>",
-            "chartElement.offsetLeft",
-            "wrap.clientLeft",
             "grid-auto-rows:58px",
             "height:58px",
             ":host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden}",
@@ -164,7 +163,10 @@ class IntegrationStaticTests(unittest.TestCase):
             "getGridOptions",
             'columns: "full"',
             "getBoundingClientRect",
-            "Math.ceil(height / 50)",
+            "return 9;",
+            ".roi-slider{position:relative;min-width:250px;flex:1 1 300px",
+            ".data-slider{position:relative;width:100%;min-width:0;flex:none",
+            ".chart-wrap{position:relative;margin-top:8px;height:370px;flex:0 1 370px",
             "validateConfig",
             "show_controls",
             "show_summary",
@@ -206,6 +208,15 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertNotIn('entity: "sensor.kc761_spectrum"', frontend)
         self.assertNotIn("roi-start-cursor", frontend)
         self.assertNotIn("roi-end-cursor", frontend)
+        self.assertNotIn("chart-cursor", frontend)
+        self.assertNotIn("pointerdown", frontend)
+        self.assertNotIn("Math.ceil(height / 50)", frontend)
+        self.assertNotIn(".roi-slider,.data-slider{position", frontend)
+        self.assertNotIn(".data-slider{position:relative;min-width:250px;flex:1 1 300px", frontend)
+        self.assertNotIn("height:430px;flex:0 1 430px", frontend)
+        self.assertNotIn("_attachCursor", frontend)
+        self.assertNotIn("_setCursorFromClient", frontend)
+        self.assertNotIn('id="data-cursor"', frontend)
         self.assertNotIn("container:kc761-card / size", frontend)
         self.assertNotIn("@container", frontend)
         self.assertNotIn('type=\"number\" min=\"0\" max=\"2047\"', frontend)

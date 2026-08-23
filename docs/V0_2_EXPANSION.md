@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.18`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留和 Configure 一键编辑交接已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.22`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸和自然图高收紧已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -123,7 +123,7 @@ show_actions: true
 show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.18` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.22` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 ### 6.0 原生 Lovelace 编辑器与可见性边界
 
@@ -131,7 +131,7 @@ show_peak: true
 
 五个内容开关的作用范围如下：`show_controls` 控制通道、坐标、历史和 ROI 输入；`show_summary` 控制摘要网格；`show_legend` 控制图例；`show_actions` 控制刷新、保存、CSV 和清空按钮；`show_peak` 同时控制峰值摘要、峰值图例和 ECharts `markPoint`。这些开关只改变 DOM/ECharts 呈现，不改变数据、历史或协议请求。
 
-卡片不自行实现整卡条件编辑器。Home Assistant `hui-card-element-editor` 的标准编辑壳在支持的 Sections/仪表盘上下文提供 `config`、`visibility`、`layout` 三页；用户在“可见性”页设置的整卡条件与卡片内部 `show_*` 内容开关是两层不同语义。`getCardSize()` 在已渲染时按实际 `ha-card` 高度换算安全 Masonry 行数，未渲染时使用保守估算；`getGridOptions()` 仅声明 Sections 使用满宽和至少 6 列，不固定行数，也不暴露任意像素高度。
+卡片不自行实现整卡条件编辑器。Home Assistant `hui-card-element-editor` 的标准编辑壳在支持的 Sections/仪表盘上下文提供 `config`、`visibility`、`layout` 三页；用户在“可见性”页设置的整卡条件与卡片内部 `show_*` 内容开关是两层不同语义。`getCardSize()` 固定返回确定性的 9 行估算，不读取渲染后高度，避免 HA Masonry 行数与卡片高度互相反馈；`getGridOptions()` 仅声明 Sections 使用满宽和至少 6 列，不固定行数，也不暴露任意像素高度。
 
 Y 轴有两个持久化层级：YAML/编辑器显式改变 `y_axis` 时更新该实体的 configured baseline 并覆盖旧偏好；用户在卡片运行时切换线性/对数时只更新 selected preference。页面刷新且 configured baseline 未改变时恢复 selected preference；每个实体使用独立 localStorage 键，存储异常安全降级为配置值。切换 `entity` 会清理旧设备、entry、历史、数据、ECharts 实例和自动刷新计时器，迟到的旧 WebSocket 结果不会回写新实体。
 
@@ -143,7 +143,7 @@ Y 轴有两个持久化层级：YAML/编辑器显式改变 `y_axis` 时更新该
 - Y 轴选择按谱图实体写入浏览器 `localStorage`，刷新或重新打开页面后恢复；
 - 使用本地 vendored ECharts 6.1.0 的 SVG renderer，Y 轴留出独立刻度/label 边距，不使用 Canvas 或外网 CDN；
 - 两个可拖动的 ROI 游标、非黄色的半透明 ROI 区域，以及独立颜色的自动峰值标记；
-- 一个可拖动的数据游标，实时显示道址、能量和计数；
+- 一个控制区单 range 数据游标滑块，实时显示道址、能量和计数；
 - 累积时间、获取时间、总计数和峰值显示；
 - 用户选择的 ROI 范围及范围内计数；
 - 手动刷新、保存和 CSV 下载；
@@ -156,7 +156,7 @@ ECharts 6.1.0 的 Apache-2.0 `LICENSE`、`NOTICE` 和 D3 派生许可证随卡�
 ### 6.1 alpha.8 游标与原生 History 外观对齐
 
 - 游标的屏幕位置不再根据固定 `GRID.left/right` 横向换算；卡片使用 ECharts `convertToPixel({xAxisIndex: 0}, value)` 取得实际 plot 坐标，并使用 `convertFromPixel` 将拖动位置反算回当前 X 轴值。该路径同时覆盖 `containLabel`、Energy/Channel 和 resize 后的实际坐标。
-- ROI `markArea` 和唯一的数据游标 `markLine` 共用同一最近通道点的 X 值，因此高亮区域、数据线与谱图保持像素级对齐；ROI 起止点由双 range input 选择，不再在图内叠加两条竖线或文字标签。
+- ROI `markArea` 和唯一的数据游标 `markLine` 共用同一最近通道点的 X 值，因此高亮区域、数据线与谱图保持像素级对齐；ROI 起止点由双 range input 选择，Data cursor 由控制区单 range input 选择，不再在图内叠加 HTML 竖线或文字标签。
 - 网格采用 HA 原生统计图同类的 `containLabel` inset，轴标签启用 `hideOverlap`、明确的首尾标签和主题色；Y 轴标题改为 plot 顶部的水平 `nameLocation:"end"`/`nameRotate:0` 布局，并为标题保留独立 top reserve，避免与最大刻度重叠。Energy 轴标签按量级保留 1–2 位小数，Channel 轴使用整数，避免长浮点端点挤压 Y 轴边缘。谱图背景、文字、分隔线从 HA 主题变量读取，暗/亮主题均有安全 fallback。
 - HTML 游标的 X 坐标使用 ECharts pixel 加上 `chartElement.offsetLeft`；若浏览器不提供该 offset，则使用实际 `getBoundingClientRect` 并扣除 `wrap.clientLeft`。不再把包含边框的 chart/wrap 左边距重复计入，目标是与 `markArea`/`markLine` 保持小于四分之一像素的边缘误差。
 - 谱线与图例不再把 `#4fc3f7` 当作运行时主色，而是复用 HA History 的 `--graph-color-N → --color-N` 变量链；ROI、峰值和数据游标使用后续序号并做重复色保护，Tooltip 背景、边框和文字跟随 HA card/divider/text 主题变量。
@@ -267,7 +267,7 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 
 - 卡片版本、集成 `VERSION`、manifest 和 HA extra-JS 查询参数统一提升为 alpha.13。`getConfigForm()` 使用 HA 内置表单 schema 提供 entity/title/x_axis/y_axis/refresh_interval 及五个 `show_*` 内容开关；`assertConfig` 与运行时 `validateConfig` 共用刷新、轴模式和布尔值约束。
 - `getStubConfig()` 不再产生虚构的 `sensor.kc761_spectrum`；`getEntitySuggestion()` 只对带 KC761 身份属性且为 0/2048 点结构的谱图状态推荐配置。缺实体卡实例显示可选实体提示，不在编辑器打开阶段抛出异常。
-- `show_controls/show_summary/show_legend/show_actions/show_peak` 只改变内容 DOM 或 `markPoint` 呈现；峰值隐藏不会修改数据或发起协议请求。整卡 visibility/layout 继续交给 HA 标准 `hui-card-element-editor`，卡片新增 `getGridOptions()` 只声明 Sections 的满宽/最少 6 列约束，并由 `getCardSize()` 根据实际渲染高度估算 Masonry 行数。
+- `show_controls/show_summary/show_legend/show_actions/show_peak` 只改变内容 DOM 或 `markPoint` 呈现；峰值隐藏不会修改数据或发起协议请求。整卡 visibility/layout 继续交给 HA 标准 `hui-card-element-editor`，卡片新增 `getGridOptions()` 只声明 Sections 的满宽/最少 6 列约束，并由 `getCardSize()` 固定返回 9 行，避免已渲染高度反馈造成异常 24 行分配。
 - Y 轴 localStorage 改为 configured baseline + selected preference：显式编辑器配置覆盖旧偏好，运行时选择在 baseline 不变时跨刷新保留；entity 切换清理旧连接关联、历史、数据、计时器和 ECharts 实例，并用 generation 丢弃迟到结果。未知 YAML 字段在配置归一化时保留。
 - 当前 alpha.13 已完成本地门禁：项目虚拟环境 `pytest` 为 `47 passed, 3 skipped`（HA 运行时依赖、PATH Node 两项按环境跳过）；绑定 Node 24.19.0 的 `--check` 与 `tests/frontend_card_contract.mjs` 均通过，Python `compileall`、JSON 解析和 `git diff --check` 通过。候选已部署到测试 HA；浏览器复核确认当前 `HUI-SECTIONS-VIEW` 页面中的卡片真实渲染，DOM 存在 `kc761-spectrum-card`，显示 2048 点谱图控件，未出现 `Custom element not found`。这只证明卡片运行时加载，不替代标准编辑器三页或其它浏览器视觉门禁。
 - 浏览器自动化能够进入 `?edit=1` 并识别卡片菜单，但在继续打开卡片编辑器时多次超时；因此 Config 页字段、HA 原生整卡 Visibility 条件页、Sections 上下文 Layout 页目前均保留为人工门禁，不能把页面已渲染或静态 `getConfigForm()` 契约误记为三页已通过。预期的编辑器边界仍是：Config 页包含 entity/title/x_axis/y_axis/refresh_interval 与五个 `show_*` 内容开关；Visibility/Layout 由 HA 标准 `hui-card-element-editor` 提供，卡片不复制这两页。
@@ -308,6 +308,30 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - alpha.18 候选归档 SHA-256 为 `2b2e99497075e6acb7ddd054b84205bf765503c539371c15a90373061b9a14bf`；测试机 release `/home/pi/Codes/kc761-ha-test/releases/v02-alpha18-configure-fix-2b2e9949` 与 live 的 manifest、卡片和 ECharts SHA-256 分别一致为 `1de4c0c2d1cee29e40a1b33a37c9fbaed4794216b48494e5905c73a8da3aa748`、`8d90362dce9cde2d5e782a92272a8d47fda86fe2a72f6363e980ca9c6caabf5a`、`28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`。备份为 `/home/pi/Codes/kc761-ha-test/backups/pre-v02-alpha18-configure-fix-20260822T202453Z`。
 - 测试机 HA_READY=1，HA 与 simulator 均 running、restart count 为 0；alpha.18 卡片/ECharts 资源均 HTTP 200 `text/javascript`，入口仅含 alpha.18。只读 API 快照显示 real `loaded`、43 注册/42 active/0 unavailable，simulator `loaded`、30 注册/30 active/0 unavailable；该快照不调用 `kc761/*` 命令，谱图普通状态点数为 0，不能据此宣称实时 2048 点已捕获。
 - 部署后 simulator 命令日志 `0x52/0x53/0x54/0x55/0x62/0x63/0x64/0x66 = 0/0/0/0/0/0/0/0`、`FORBIDDEN_LOGS=0`；宿主/HA namespace 无真实设备目标 socket、无探针残留，HA 最近日志无新的 KC761/frontend/pending-task 异常。alpha.18 普通视图 Configure 的真实浏览器一键对话框仍由主任务复测，不把 HTTP/契约结果写成视觉通过。
+
+### 8.14 `0.2.0-alpha.19` Data cursor 单滑块
+
+- 图内原先可拖动的 `#data-cursor` HTML 句柄已移除，避免在固定/紧凑布局中产生额外覆盖层；ECharts `markLine` 继续显示不可拖动的数据位置指示线，峰值与数据指示线的垂直错开逻辑保留。
+- 控制区新增单个 `input[type=range]#data-cursor-slider`，范围固定为 `0..2047`，使用 Data cursor 独立主题色；`aria-label`、`aria-valuemin/max/now/text` 和旁侧完整读数随滑块输入即时更新，不触发网络请求。摘要中的 Data cursor 同步显示通道、能量和计数。
+- 新谱图、历史谱图、实体切换和重置都会把当前游标吸附到最近有效通道；当数据点少于 2048 个时保留用户可识别的 2047 上限，但不会把游标停在不存在的点上。旧图内 pointer/keyboard 拖动监听和像素换算路径已删除。
+- alpha.19 测试机部署和浏览器滑块可视/键盘门禁待本轮完成后补录；本地契约覆盖 slider listener、无 pointerdown、短谱图 clamp、ARIA 状态和无网络 getter。
+
+### 8.15 `0.2.0-alpha.20` Masonry sizing feedback 修复
+
+- alpha.19 新增 Data cursor 单滑块后，普通视图实测出现卡片约 `1171.68px` 高、文档 `scrollHeight=1309` 的异常增长；根因是 `getCardSize()` 读取已渲染 `ha-card` 高度，再把结果换算为 Masonry 行数，形成自引用反馈并放大到约 24 行。
+- alpha.20 将 `getCardSize()` 改为无 DOM/无网络、确定性返回 `9`，不再从 `getBoundingClientRect()` 反推行数；`getGridOptions()` 继续只声明 `columns: "full"` 与 `min_columns: 6`。固定行高仍由 host/`ha-card` 高度链和 `ResizeObserver` 的 `compact-height` 处理，Data cursor 单滑块保留不变。
+- 新增前端契约回归：即使伪造已渲染高度为 `2400px`，`getCardSize()` 仍返回 `9`，防止再次出现 24-row feedback；浏览器 alpha.20 的自然高度与固定行高视觉门禁待部署后复核。
+
+### 8.16 `0.2.0-alpha.21` Data slider 垂直 flex 修复
+
+- alpha.20 浏览器复核发现 Data slider 实际高度约 `311.99px`，CSS computed height 约 `300px`，使 `#controls` 增至约 `417.79px`，再次把卡片推高到约 `1171.68px`；根因是 `.roi-slider,.data-slider { flex:1 1 300px }` 共享规则被放在纵向 `.data-slider-label` 内，300px basis 被解释为垂直高度。
+- alpha.21 将 ROI 的横向 `flex:1 1 300px` 与 Data slider 分离：`.data-slider` 使用 `width:100%; min-width:0; flex:none`，其高度由滑块、读数和自然内容决定；`.data-slider-row`/label 仍负责横向响应式宽度，slider 与 ROI 保持同宽。
+- 静态契约新增共享 selector/flex-basis 回归，确保 Data slider 不再继承 ROI 的 300px 垂直 basis；确定性 `getCardSize()=9`、compact fixed-height 和 Data slider 行为保持不变。浏览器 alpha.21 高度复核待部署后完成。
+
+### 8.17 `0.2.0-alpha.22` 自然谱图高度收紧
+
+- alpha.21 浏览器复核确认 Data slider 已收缩为约 `51.19px`、slider row 约 `74.38px`、controls 约 `156.95px`，但普通卡片总高仍约 `911.92px`，视口底部外溢约 `42px`。alpha.22 只将自然高度路径 `.chart-wrap` 的 `height/flex-basis` 从 `430px` 调为 `370px`，固定行高的 `compact-height` 仍保持 `240px`/最小 `200px`。
+- ECharts 仍通过既有 `ResizeObserver` 和 `chart.resize()` 跟随实际容器尺寸；Data slider、ROI、摘要、markLine 和数据更新逻辑不变。alpha.22 浏览器高度与 ECharts SVG 视觉门禁待部署后复核。
 
 本地合并后继续测试的剩余门禁：
 

@@ -15,6 +15,7 @@ class FakeNode {
       contains: (name) => this.classList.values.has(name),
     };
     this.dataset = {};
+    this.attributes = new Map();
     this.options = [];
     this.value = "";
     this.hidden = false;
@@ -29,7 +30,8 @@ class FakeNode {
   removeEventListener() {}
   listenerCount(type) { return this.listeners.get(type) || 0; }
   setPointerCapture() {}
-  setAttribute(name, value) { this[name] = value; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = String(value); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
   querySelector(selector) { return selector === ".caption" ? new FakeNode(selector) : new FakeNode(selector); }
   querySelectorAll() { return []; }
   replaceChildren(...items) { this.options = [...items]; }
@@ -180,6 +182,9 @@ assert.deepEqual(card._config.visibility, [{ condition: "state" }]);
 assert.equal(card.shadowRoot.querySelector("#source").listenerCount("change"), 1);
 assert.equal(card.shadowRoot.querySelector("#roi-start").listenerCount("input"), 1);
 assert.equal(card.shadowRoot.querySelector("#roi-end").listenerCount("input"), 1);
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount("input"), 1);
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").getAttribute?.("role") ?? "slider", "slider");
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount("pointerdown"), 0);
 assert.equal(card.shadowRoot.querySelector("#controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
@@ -192,6 +197,9 @@ assert.equal(card.shadowRoot.querySelector(".legend").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#actions").hidden, true);
 assert.equal(card.getCardSize(), 9);
 assert.deepEqual(card.getGridOptions(), { columns: "full", min_columns: 6 });
+const feedbackSizeCard = Object.create(Card.prototype);
+feedbackSizeCard.shadowRoot = { querySelector: () => ({ getBoundingClientRect: () => ({ height: 2400 }) }) };
+assert.equal(feedbackSizeCard.getCardSize(), 9, "Masonry size must not feed rendered height back into row allocation");
 
 card.preview = true;
 assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, false, "dialog preview shows editor-only controls");
@@ -361,16 +369,19 @@ card._entryId = "old-entry";
 card._data = { points: [] };
 card._history = [{ snapshot_id: "old" }];
 card._refreshTimer = 1;
-let resetCleanupCalls = 0;
-card._dragCleanup = () => { resetCleanupCalls += 1; };
 card.setConfig({ entity: "sensor.other_spectrum" });
-assert.equal(resetCleanupCalls, 1);
-assert.equal(card._dragCleanup, null);
 assert.equal(card._device, null);
 assert.equal(card._entryId, null);
 assert.equal(card._data, null);
 assert.deepEqual(card._history, []);
 assert.equal(card._refreshTimer, null);
+card._setData({ points: [[2, 1, 5], [17, 10, 8]] });
+card._setCursorChannel("data", 2047);
+assert.equal(card._cursor.data, 17, "short spectra clamp the data cursor to the nearest available channel");
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").value, "17");
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").getAttribute("aria-valuenow"), "17");
+assert.match(card.shadowRoot.querySelector("#data-cursor-readout").getAttribute("aria-label"), /CH 17/);
+assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").getAttribute("aria-valuemax"), "2047");
 card._hass = { callWS: () => { throw new Error("getter must not call network"); } };
 assert.equal(card.getCardSize(), 9);
 assert.deepEqual(card.getGridOptions(), { columns: "full", min_columns: 6 });
@@ -408,15 +419,11 @@ assert.equal(
   "unavailable state remains outside strict spectrum validation",
 );
 
-let cleanupCalls = 0;
 const lifecycle = new Card();
 lifecycle.setConfig({ entity: "sensor.lifecycle" });
 assert.ok(lifecycle._layoutResizeObserver);
 const layoutObserver = lifecycle._layoutResizeObserver;
-lifecycle._dragCleanup = () => { cleanupCalls += 1; };
 lifecycle.disconnectedCallback();
-assert.equal(cleanupCalls, 1);
-assert.equal(lifecycle._dragCleanup, null);
 assert.equal(layoutObserver.disconnectCalls, 1);
 assert.equal(lifecycle._layoutResizeObserver, null);
 

@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.18";
+const CARD_VERSION = "0.2.0-alpha.22";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -25,10 +25,6 @@ const EDIT_HANDOFF_TTL_MS = 15000;
 const EDIT_HANDOFF_GRACE_MS = 150;
 const EDIT_HANDOFF_MAX_RETRIES = 20;
 const EDIT_HANDOFF_REGISTRY_KEY = "__kc761SpectrumEditHandoffRegistry";
-// First-paint fallback only.  After ECharts lays out the axes, the overlay is
-// positioned from its actual grid coordinate system rather than guessed CSS
-// insets (which would drift when containLabel or a theme changes).
-const GRID_FALLBACK = { top: 15, bottom: 28 };
 const COLOR_FALLBACKS = {
   curve: "#4fc3f7",
   roiStart: "#00acc1",
@@ -93,7 +89,6 @@ class KC761SpectrumCard extends HTMLElement {
     this._busyState = false;
     this._entityGeneration = 0;
     this._drawToken = 0;
-    this._dragCleanup = null;
     this._handoffRetryTimer = null;
     this._handoffRetryCount = 0;
     this._handoffCandidate = null;
@@ -248,8 +243,6 @@ class KC761SpectrumCard extends HTMLElement {
     this._stopAutoRefresh();
     this._clearEditorHandoffRetry();
     this._unregisterEditorHandoffCandidate();
-    if (this._dragCleanup) this._dragCleanup();
-    this._dragCleanup = null;
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
     if (this._layoutResizeObserver) this._layoutResizeObserver.disconnect();
@@ -295,7 +288,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._entryId = current.attributes.config_entry_id;
     const historySelect = this.shadowRoot.querySelector("#history");
     if ((!historySelect || historySelect.value === "latest") && (current !== previous || !this._data)) {
-      this._data = this._fromEntity(current);
+      this._setData(this._fromEntity(current));
       this._updateSummary();
       this._draw();
     }
@@ -304,12 +297,10 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   getCardSize() {
-    const card = this.shadowRoot?.querySelector("ha-card");
-    const height = card?.getBoundingClientRect?.().height;
-    if (Number.isFinite(height) && height > 0) return Math.max(8, Math.ceil(height / 50));
-    // A conservative unrendered estimate avoids clipping this card's summary,
-    // chart and action rows before the browser has performed layout.
-    return 24;
+    // Keep Masonry sizing deterministic.  Reading the rendered card height
+    // here feeds the result back into HA's row calculation and can create a
+    // self-referential 24-row card after a new control row is added.
+    return 9;
   }
 
   getGridOptions() {
@@ -334,16 +325,12 @@ class KC761SpectrumCard extends HTMLElement {
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
         button{cursor:pointer}button.danger{color:var(--error-color)}button:disabled{opacity:.45;cursor:not-allowed}
-        .chart-wrap{position:relative;margin-top:8px;height:430px;flex:0 1 430px;min-height:220px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
-        #chart{width:100%;height:100%}.chart-cursor{position:absolute;top:${GRID_FALLBACK.top}px;bottom:${GRID_FALLBACK.bottom}px;width:0;border-left:2px dashed;z-index:5;pointer-events:auto;touch-action:none;cursor:ew-resize}
-        .chart-cursor .handle{position:absolute;top:-8px;left:-9px;width:16px;height:16px;border-radius:50%;border:2px solid var(--card-background-color);box-shadow:0 0 0 1px currentColor;background:currentColor;cursor:ew-resize}
-        .chart-cursor .caption{position:absolute;top:-25px;left:5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:currentColor;text-shadow:0 1px var(--card-background-color);pointer-events:none}
-        .chart-cursor .caption.staggered{top:-50px}
-        #data-cursor{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}
+        .chart-wrap{position:relative;margin-top:8px;height:370px;flex:0 1 370px;min-height:220px;border:1px solid var(--divider-color);border-radius:6px;background:var(--card-background-color);overflow:hidden}
+        #chart{width:100%;height:100%}
         .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
         .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:58px;gap:6px;margin:8px 0;font-size:12px}.summary div{box-sizing:border-box;min-width:0;height:58px;padding:6px 8px;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:block;min-width:0;height:1.3em;max-height:1.3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.3;margin-top:2px}
         .status{min-height:20px;margin-top:8px;color:var(--secondary-text-color)}.status.error{color:var(--error-color)}.actions{margin-top:10px}.spacer{flex:1}
-        .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}.roi-slider{position:relative;min-width:250px;flex:1 1 300px;padding:8px 0 4px}.roi-slider-track{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:4px;background:var(--divider-color)}.roi-slider-fill{position:absolute;top:0;height:4px;border-radius:4px;background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});opacity:.9}.roi-slider input{position:absolute;left:0;top:8px;width:100%;height:24px;margin:0;padding:0;border:0;background:transparent;appearance:none;pointer-events:none}.roi-slider input::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});pointer-events:auto;cursor:ew-resize}.roi-slider input::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});pointer-events:auto;cursor:ew-resize}.roi-slider input:first-of-type{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});z-index:2}.roi-slider input:last-of-type{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd});z-index:3}.roi-values{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;margin-top:20px}.editor-only{display:block}.configure{font-size:12px;padding:5px 8px}
+        .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}.roi-slider{position:relative;min-width:250px;flex:1 1 300px;padding:8px 0 4px}.data-slider{position:relative;width:100%;min-width:0;flex:none;padding:8px 0 4px}.data-slider-row{display:flex;gap:8px;align-items:end;margin-top:4px}.data-slider-label{flex:1 1 300px;min-width:250px}.roi-slider-track,.data-slider-track{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:4px;background:var(--divider-color)}.roi-slider-fill{position:absolute;top:0;height:4px;border-radius:4px;background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});opacity:.9}.roi-slider input,.data-slider input{position:absolute;left:0;top:8px;width:100%;height:24px;margin:0;padding:0;border:0;background:transparent;appearance:none}.roi-slider input{pointer-events:none}.roi-slider input::-webkit-slider-thumb,.data-slider input::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px currentColor;pointer-events:auto;cursor:ew-resize}.roi-slider input::-moz-range-thumb,.data-slider input::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px currentColor;pointer-events:auto;cursor:ew-resize}.roi-slider input:first-of-type{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});z-index:2}.roi-slider input:last-of-type{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd});z-index:3}.data-slider input{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor});z-index:3}.roi-values,.data-values{display:flex;justify-content:space-between;gap:8px;font-variant-numeric:tabular-nums;margin-top:20px}.data-values span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}.editor-only{display:block}.configure{font-size:12px;padding:5px 8px}
         @media (max-width:600px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.header h2{font-size:18px}}
         ha-card.compact-height .chart-wrap{height:240px;flex-basis:240px;min-height:200px}ha-card.compact-height .summary{grid-auto-rows:52px}ha-card.compact-height .summary div{height:52px;padding:5px 7px}ha-card.compact-height .summary b{font-size:13px}ha-card.compact-height .actions{margin-top:6px}ha-card.compact-height select,ha-card.compact-height input,ha-card.compact-height button{padding:5px 7px}
       </style>
@@ -358,7 +345,8 @@ class KC761SpectrumCard extends HTMLElement {
           </div>
           <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">0</span><span aria-hidden="true">–</span><span id="roi-end-value">2047</span></div></div>
           </div>
-          <div class="help">Drag the two ROI handles to select a range. Drag the pink plot handle to inspect a point.</div>
+          <div class="data-slider-row"><label class="data-slider-label">Data cursor<div class="data-slider" role="group" aria-label="Data cursor channel"><div class="data-slider-track"></div><input id="data-cursor-slider" type="range" min="0" max="2047" step="1" value="0" role="slider" aria-label="Data cursor channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0" aria-valuetext="Channel 0"><div class="data-values"><span id="data-cursor-channel">CH 0</span><span id="data-cursor-readout">—</span></div></div></label></div>
+          <div class="help">Use the ROI handles to select a range and the Data cursor slider to inspect a point. The chart line is an indicator only.</div>
         </div>
         <div class="summary">
           <div data-summary="acquired">Acquired<b id="acquired">—</b></div><div data-summary="runtime">Accumulation<b id="runtime">—</b></div>
@@ -367,7 +355,6 @@ class KC761SpectrumCard extends HTMLElement {
         </div>
         <div id="chart-wrap" class="chart-wrap">
           <div id="chart" role="img" aria-label="KC761 spectrum chart"></div>
-          <div id="data-cursor" class="chart-cursor" role="slider" aria-label="Data cursor" tabindex="0"><span class="handle"></span><span class="caption">Data</span></div>
         </div>
         <div class="legend"><span><i class="swatch curve"></i> Spectrum</span><span><i class="swatch roi"></i> ROI range</span><span data-legend="peak"><i class="swatch peak"></i> Auto peak</span><span><i class="swatch data"></i> Data cursor</span></div>
         <div id="actions" class="actions">
@@ -389,14 +376,15 @@ class KC761SpectrumCard extends HTMLElement {
     });
     this.shadowRoot.querySelector("#roi-start").addEventListener("input", () => this._syncRoiFromInputs("start"));
     this.shadowRoot.querySelector("#roi-end").addEventListener("input", () => this._syncRoiFromInputs("end"));
+    this.shadowRoot.querySelector("#data-cursor-slider").addEventListener("input", (event) => this._setCursorChannel("data", event.target.value));
     this.shadowRoot.querySelector("#history").addEventListener("change", (event) => this._selectHistory(event.target.value));
     this.shadowRoot.querySelector("#capture").addEventListener("click", () => this._capture());
     this.shadowRoot.querySelector("#save").addEventListener("click", () => this._save());
     this.shadowRoot.querySelector("#csv").addEventListener("click", () => this._csv());
     this.shadowRoot.querySelector("#configure").addEventListener("click", () => this._openEditor());
     this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => button.addEventListener("click", () => this._clear(button.dataset.clear)));
-    this._attachCursor("data", "#data-cursor");
     this._updateRoiSliderUI();
+    this._updateDataCursorUI();
     this._applyVisibility();
     this._ensureLayoutObserver();
     this._applyPresentationMode();
@@ -461,8 +449,6 @@ class KC761SpectrumCard extends HTMLElement {
     this._entityGeneration = (this._entityGeneration || 0) + 1;
     this._drawToken += 1;
     this._stopAutoRefresh();
-    if (this._dragCleanup) this._dragCleanup();
-    this._dragCleanup = null;
     this._device = null;
     this._entryId = null;
     this._data = null;
@@ -485,6 +471,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (start) start.value = "0";
     if (end) end.value = String(MAX_CHANNEL);
     this._updateRoiSliderUI();
+    this._updateDataCursorUI();
   }
 
   _findLovelacePath() {
@@ -741,67 +728,54 @@ class KC761SpectrumCard extends HTMLElement {
     this._writeYAxis(keys.legacy, this._yAxis);
   }
 
-  _attachCursor(kind, selector) {
-    const cursor = this.shadowRoot.querySelector(selector);
-    if (!cursor) return;
-    const start = (event) => {
-      event.preventDefault();
-      const pointerId = event.pointerId;
-      cursor.setPointerCapture?.(pointerId);
-      const move = (moveEvent) => {
-        if (pointerId !== undefined && moveEvent.pointerId !== undefined && pointerId !== moveEvent.pointerId) return;
-        this._setCursorFromClient(kind, moveEvent.clientX);
-      };
-      const end = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", end);
-        window.removeEventListener("pointercancel", end);
-        if (this._dragCleanup === end) this._dragCleanup = null;
-      };
-      if (this._dragCleanup) this._dragCleanup();
-      this._dragCleanup = end;
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", end, { once: true });
-      window.addEventListener("pointercancel", end, { once: true });
-      this._setCursorFromClient(kind, event.clientX);
-    };
-    cursor.addEventListener("pointerdown", start);
-    cursor.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      const delta = event.key === "ArrowLeft" ? -1 : 1;
-      this._setCursorChannel(kind, this._cursor[kind] + delta);
-    });
+  _setData(data) {
+    this._data = data;
+    this._cursor.data = this._dataCursorChannel(this._cursor.data);
+    this._updateDataCursorUI();
   }
 
-  _setCursorFromClient(kind, clientX) {
-    const chartElement = this.shadowRoot.querySelector("#chart");
-    if (!chartElement || !this._chart || !this._data?.points?.length) return;
-    const chartRect = chartElement.getBoundingClientRect();
-    const xBounds = this._xPixelBounds();
-    if (!xBounds) return;
-    const pixel = clamp(clientX - chartRect.left, xBounds[0], xBounds[1]);
-    // With an xAxis finder ECharts' cartesian Grid maps a scalar pixel value
-    // through Axis.coordToData.  Passing an [x, y] pair would select the
-    // cartesian path only when a grid/series finder is used and is therefore
-    // not portable between ECharts versions.
-    const converted = this._chart.convertFromPixel({ xAxisIndex: 0 }, pixel);
-    const xValue = Array.isArray(converted) ? Number(converted[0]) : Number(converted);
-    if (!Number.isFinite(xValue)) return;
-    const point = this._nearestPointByX(xValue);
-    if (point) this._setCursorChannel(kind, point[0]);
+  _dataCursorChannel(channel) {
+    const requested = clamp(Math.round(Number(channel) || 0), 0, MAX_CHANNEL);
+    const points = this._points();
+    if (!points.length) return requested;
+    const point = this._pointForChannel(requested);
+    return point ? clamp(Math.round(point[0]), 0, MAX_CHANNEL) : requested;
+  }
+
+  _updateDataCursorUI() {
+    const slider = this.shadowRoot?.querySelector("#data-cursor-slider");
+    const channelNode = this.shadowRoot?.querySelector("#data-cursor-channel");
+    const readout = this.shadowRoot?.querySelector("#data-cursor-readout");
+    const channel = this._dataCursorChannel(this._cursor.data);
+    this._cursor.data = channel;
+    const point = this._pointForChannel(channel);
+    const value = point ? `CH ${point[0]} · ${point[1].toFixed(2)} keV · ${point[2]}` : `Channel ${channel}`;
+    if (slider) {
+      slider.value = String(channel);
+      slider.setAttribute("aria-valuemin", "0");
+      slider.setAttribute("aria-valuemax", String(MAX_CHANNEL));
+      slider.setAttribute("aria-valuenow", String(channel));
+      slider.setAttribute("aria-valuetext", value);
+    }
+    if (channelNode) channelNode.textContent = `CH ${channel}`;
+    if (readout) {
+      readout.textContent = point ? `${point[1].toFixed(2)} keV · ${point[2].toLocaleString()} counts` : "No data";
+      readout.title = value;
+      readout.setAttribute("aria-label", value);
+    }
   }
 
   _setCursorChannel(kind, channel) {
-    const value = clamp(Math.round(Number(channel) || 0), 0, MAX_CHANNEL);
-    if (kind === "roiStart") this._cursor.roiStart = Math.min(value, this._cursor.roiEnd);
-    else if (kind === "roiEnd") this._cursor.roiEnd = Math.max(value, this._cursor.roiStart);
-    else this._cursor.data = value;
+    const requested = clamp(Math.round(Number(channel) || 0), 0, MAX_CHANNEL);
+    if (kind === "roiStart") this._cursor.roiStart = Math.min(requested, this._cursor.roiEnd);
+    else if (kind === "roiEnd") this._cursor.roiEnd = Math.max(requested, this._cursor.roiStart);
+    else this._cursor.data = this._dataCursorChannel(requested);
     const startInput = this.shadowRoot.querySelector("#roi-start");
     const endInput = this.shadowRoot.querySelector("#roi-end");
     if (startInput) startInput.value = String(this._cursor.roiStart);
     if (endInput) endInput.value = String(this._cursor.roiEnd);
     this._updateRoiSliderUI();
+    this._updateDataCursorUI();
     this._updateSummary();
     this._draw();
   }
@@ -889,11 +863,11 @@ class KC761SpectrumCard extends HTMLElement {
     const entryId = this._entryId;
     if (snapshotId === "latest") {
       const state = this._hass.states[this._config.entity];
-      this._data = this._fromEntity(state);
+      this._setData(this._fromEntity(state));
     } else {
       const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._data = data;
+      this._setData(data);
     }
     if (generation !== this._entityGeneration || entryId !== this._entryId) return;
     this.shadowRoot.querySelector("#source").value = String(this._data.source);
@@ -909,7 +883,7 @@ class KC761SpectrumCard extends HTMLElement {
     await this._busy(async () => {
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._data = data;
+      this._setData(data);
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -954,7 +928,7 @@ class KC761SpectrumCard extends HTMLElement {
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._data = data;
+      this._setData(data);
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -1131,7 +1105,6 @@ class KC761SpectrumCard extends HTMLElement {
     this._ensureChart().then(() => {
       if (token !== this._drawToken || !this._chart) return;
       this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
-      this._positionCursors();
     }).catch((error) => this._setStatus(`Chart load failed: ${error.message || error}`, true));
   }
 
@@ -1147,7 +1120,6 @@ class KC761SpectrumCard extends HTMLElement {
     this._resizeObserver = new ResizeObserver(() => {
       if (this._chart) {
         this._chart.resize();
-        this._positionCursors();
       }
     });
     this._resizeObserver.observe(chartElement);
@@ -1192,76 +1164,6 @@ class KC761SpectrumCard extends HTMLElement {
     }
   }
 
-  _plotRect() {
-    const coordinateSystem = this._chart?.getModel?.()?.getComponent?.("grid", 0)?.coordinateSystem;
-    const rect = coordinateSystem?.getRect?.();
-    if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
-    return rect;
-  }
-
-  _chartXPixel(value) {
-    if (!this._chart) return null;
-    const converted = this._chart.convertToPixel({ xAxisIndex: 0 }, value);
-    const pixel = Array.isArray(converted) ? Number(converted[0]) : Number(converted);
-    return Number.isFinite(pixel) ? pixel : null;
-  }
-
-  _xPixelBounds() {
-    const [minX, maxX] = this._xRange();
-    const minimum = this._chartXPixel(minX);
-    const maximum = this._chartXPixel(maxX);
-    if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) return null;
-    return minimum <= maximum ? [minimum, maximum] : [maximum, minimum];
-  }
-
-  _positionCursors() {
-    const wrap = this.shadowRoot.querySelector("#chart-wrap");
-    const chartElement = this.shadowRoot.querySelector("#chart");
-    if (!wrap || !chartElement || !this._chart || !this._points().length) return;
-    const wrapRect = wrap.getBoundingClientRect();
-    const chartRect = chartElement.getBoundingClientRect();
-    const plot = this._plotRect();
-    const xBounds = this._xPixelBounds();
-    if (!xBounds) return;
-    const pointPixel = (channel) => {
-      const point = this._pointForChannel(channel) || this._points()[0];
-      const pixel = this._chartXPixel(this._xValue(point));
-      return Number.isFinite(pixel) ? clamp(pixel, xBounds[0], xBounds[1]) : xBounds[0];
-    };
-    // Absolute children are positioned from the wrap's padding edge.  The
-    // chart rect already includes the wrap border, so adding the raw
-    // chartRect-left delta double-counts that border and shifts every HTML
-    // cursor by about one pixel.  offsetLeft is the browser's actual offset
-    // from this containing block; the geometry fallback subtracts clientLeft
-    // for engines that do not expose it on a shadow-DOM element.
-    const relativeLeft = Number.isFinite(chartElement.offsetLeft)
-      ? chartElement.offsetLeft
-      : chartRect.left - wrapRect.left - (wrap.clientLeft || 0);
-    const top = plot ? plot.y : GRID_FALLBACK.top;
-    const bottom = plot ? Math.max(0, chartElement.clientHeight - plot.y - plot.height) : GRID_FALLBACK.bottom;
-    const points = this._points();
-    let peak = points[0];
-    points.forEach((point) => { if (point[2] > peak[2]) peak = point; });
-    const dataPoint = this._pointForChannel(this._cursor.data) || points[0];
-    const cursorValues = [["#data-cursor", this._cursor.data, "Data"]];
-    cursorValues.forEach(([selector, channel, label]) => {
-      const element = this.shadowRoot.querySelector(selector);
-      if (!element) return;
-      const pixel = pointPixel(channel);
-      element.style.left = `${relativeLeft + pixel}px`;
-      element.style.top = `${top}px`;
-      element.style.bottom = `${bottom}px`;
-      const caption = element.querySelector(".caption");
-      const point = this._pointForChannel(channel);
-      if (caption && point) {
-        caption.textContent = `CH ${point[0]} · ${point[1].toFixed(2)} keV · ${point[2]}`;
-        caption.classList.toggle("staggered", label === "Data" && dataPoint && Math.abs(peak[0] - dataPoint[0]) <= 16);
-        const atRightEdge = pixel > chartElement.clientWidth - 190;
-        caption.style.left = atRightEdge ? "auto" : "5px";
-        caption.style.right = atRightEdge ? "5px" : "auto";
-      }
-    });
-  }
 }
 
 // Keep registration in one idempotent function.  HA can import the module more
