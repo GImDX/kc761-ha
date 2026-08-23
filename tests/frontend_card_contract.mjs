@@ -349,7 +349,7 @@ assert.equal(chartOption.dataZoom.length, 2, "inside and visible slider zoom are
 assert.equal(chartOption.dataZoom[0].type, "inside");
 assert.deepEqual(chartOption.dataZoom[0].xAxisIndex, [0]);
 assert.equal(chartOption.dataZoom[0].filterMode, "none");
-assert.equal(chartOption.dataZoom[0].zoomOnMouseWheel, "shift");
+assert.equal(chartOption.dataZoom[0].zoomOnMouseWheel, "ctrl");
 assert.equal(chartOption.dataZoom[0].moveOnMouseMove, true);
 assert.equal(chartOption.dataZoom[0].moveOnMouseWheel, false);
 assert.equal(chartOption.dataZoom[1].type, "slider");

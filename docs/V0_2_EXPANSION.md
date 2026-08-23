@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.23`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧和 X 轴横向缩放已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.24`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧和 Ctrl+滚轮 X 轴横向缩放已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -335,11 +335,16 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 
 ### 8.18 `0.2.0-alpha.23` ECharts X 轴横向缩放
 
-- 谱图卡在同一 ECharts 实例中配置两个 `dataZoom`：一个可见 `slider` 位于图表内部底部保留区，另一个 `inside` 负责拖动/触控板交互；`inside.zoomOnMouseWheel` 固定为 `"shift"`，普通仪表盘滚轮不会被卡片抢占。两者均限定 `xAxisIndex: [0]`、`filterMode: "none"`，因此完整 2048 点数组仍用于 ROI 统计、自动峰值、数据游标、历史和 CSV。
+- 谱图卡在同一 ECharts 实例中配置两个 `dataZoom`：一个可见 `slider` 位于图表内部底部保留区，另一个 `inside` 负责拖动/触控板交互；`inside.zoomOnMouseWheel` 固定为 `"ctrl"`，普通仪表盘滚轮不会被卡片抢占。两者均限定 `xAxisIndex: [0]`、`filterMode: "none"`，因此完整 2048 点数组仍用于 ROI 统计、自动峰值、数据游标、历史和 CSV。
 - 缩放状态是卡片本地状态，不写入 HA 配置或网络：同一实体/通道/历史数据集在自动刷新、重绘和 Y 轴切换时保留；实体切换、通道切换和历史快照切换通过数据集身份重置到 0–100%。少于 2048 点时按实际点数反算读数，最小跨度约 5 个通道（短至两点时退化为全范围）。
 - 标题栏提供 `View CH a–b` 的 `role=status`/`aria-live` 读数和可访问 `Reset zoom` 按钮；重置只派发既有 ECharts `dataZoom` action，不产生协议调用。图内数据游标仍是完整 0–2047 范围的控制区 slider，缩放只影响视窗，不改游标数据。
 - `datazoom` listener 在每个 chart 实例创建时只绑定一次，在实体切换、断开和 dispose 前通过 `off` 移除；`ResizeObserver` 与 ECharts 实例沿用同一幂等销毁路径。图表底部从 28px 增加到 58px 的空间只属于 ECharts grid，卡片外层 `getCardSize()=9` 和固定行高 compact 链不变。
-- 本地前端契约覆盖 inside/slider 选项、Shift 滚轮、x-only/filter none、状态保持/数据集重置、短谱图最小跨度、重置按钮、无网络 getter 和 listener 清理；测试机浏览器的 slider/Shift-wheel 手势仍需在部署后由主任务人工验收。
+- 本地前端契约覆盖 inside/slider 选项、Ctrl 滚轮、x-only/filter none、状态保持/数据集重置、短谱图最小跨度、重置按钮、无网络 getter 和 listener 清理；测试机浏览器的 slider/Ctrl-wheel 手势仍需在部署后由主任务人工验收。
+
+### 8.19 `0.2.0-alpha.24` 原生 History 修饰键一致性
+
+- alpha.23 的 inside dataZoom 初版修饰键设置与原生 History 不一致；为与 Home Assistant 原生 History 图表的交互约定一致，alpha.24 将唯一缩放修饰键改为 Ctrl。普通滚轮仍不触发缩放，visible slider、拖动、触控板和完整数据集语义不变。
+- 该修订同步 `CARD_VERSION`、集成 `VERSION`、manifest、卡片资源缓存 URL、运行时静态测试、前端契约和公开文档；无需变更协议层，也不会增加任何设备请求。
 
 本地合并后继续测试的剩余门禁：
 

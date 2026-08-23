@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.23";
+const CARD_VERSION = "0.2.0-alpha.24";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -828,7 +828,7 @@ class KC761SpectrumCard extends HTMLElement {
       minSpan: this._zoomMinSpan(), zoomLock: false,
     };
     return [
-      { ...common, type: "inside", zoomOnMouseWheel: "shift", moveOnMouseMove: true, moveOnMouseWheel: false, throttle: 50 },
+      { ...common, type: "inside", zoomOnMouseWheel: "ctrl", moveOnMouseMove: true, moveOnMouseWheel: false, throttle: 50 },
       {
         ...common, type: "slider", bottom: 6, height: 14, showDataShadow: false, brushSelect: false,
         borderColor: divider, fillerColor: colors.dataCursor, handleStyle: { color: colors.dataCursor },

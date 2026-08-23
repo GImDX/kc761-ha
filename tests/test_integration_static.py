@@ -47,7 +47,7 @@ class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.23")
+        self.assertEqual(VERSION, "0.2.0-alpha.24")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -183,7 +183,7 @@ class IntegrationStaticTests(unittest.TestCase):
             'type: "slider"',
             "xAxisIndex: [0]",
             'filterMode: "none"',
-            'zoomOnMouseWheel: "shift"',
+            'zoomOnMouseWheel: "ctrl"',
             "moveOnMouseMove: true",
             "moveOnMouseWheel: false",
             "minSpan",
@@ -245,6 +245,7 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertNotIn("GRID.right", frontend)
         self.assertNotIn("min_rows", frontend)
         self.assertNotIn("rows: 8", frontend)
+        self.assertNotIn("s" + "hift", frontend.lower())
         self.assertIn('renderer: "svg"', frontend)
         vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
         self.assertEqual(
