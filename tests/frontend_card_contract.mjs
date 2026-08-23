@@ -185,6 +185,9 @@ assert.equal(card.shadowRoot.querySelector("#roi-end").listenerCount("input"), 1
 assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount("input"), 1);
 assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").getAttribute?.("role") ?? "slider", "slider");
 assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount("pointerdown"), 0);
+assert.equal(card.shadowRoot.querySelector("#reset-zoom").listenerCount("click"), 1);
+assert.equal(card.shadowRoot.querySelector("#reset-zoom").disabled, true);
+assert.match(card.shadowRoot.querySelector("#zoom-readout").getAttribute("aria-label"), /^View CH /);
 assert.equal(card.shadowRoot.querySelector("#controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true);
 assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
@@ -341,6 +344,65 @@ card._cursor.data = 321;
 const chartOption = card._option();
 assert.equal(chartOption.series[0].markLine.data.length, 1, "ROI boundaries are markArea-only");
 assert.equal(chartOption.series[0].markPoint.label.distance, 28, "peak label is staggered from a nearby data cursor");
+assert.equal(chartOption.grid.bottom, 58, "the zoom slider reserves only internal chart space");
+assert.equal(chartOption.dataZoom.length, 2, "inside and visible slider zoom are both present");
+assert.equal(chartOption.dataZoom[0].type, "inside");
+assert.deepEqual(chartOption.dataZoom[0].xAxisIndex, [0]);
+assert.equal(chartOption.dataZoom[0].filterMode, "none");
+assert.equal(chartOption.dataZoom[0].zoomOnMouseWheel, "shift");
+assert.equal(chartOption.dataZoom[0].moveOnMouseMove, true);
+assert.equal(chartOption.dataZoom[0].moveOnMouseWheel, false);
+assert.equal(chartOption.dataZoom[1].type, "slider");
+assert.deepEqual(chartOption.dataZoom[1].xAxisIndex, [0]);
+assert.equal(chartOption.dataZoom[1].filterMode, "none");
+assert.equal(chartOption.dataZoom[1].height, 14);
+
+const zoomCard = new Card();
+zoomCard.setConfig({ entity: "sensor.zoom_spectrum" });
+const fullPoints = Array.from({ length: 2048 }, (_, index) => [index, index / 2, index + 1]);
+zoomCard._setData({ snapshot_id: "latest", source: 0, channel: 0, points: fullPoints });
+zoomCard._setZoomRange(20, 40);
+assert.deepEqual(zoomCard._zoom, { start: 20, end: 40 }, "zoom follows the ECharts datazoom range");
+assert.equal(zoomCard.shadowRoot.querySelector("#reset-zoom").disabled, false);
+assert.match(zoomCard.shadowRoot.querySelector("#zoom-readout").textContent, /^View CH 409–819$/);
+zoomCard._onZoom({ batch: [{ start: 25, end: 75 }] });
+assert.deepEqual(zoomCard._zoom, { start: 25, end: 75 }, "ECharts datazoom events update card-local state");
+assert.equal(zoomCard._option().dataZoom[0].start, 25);
+assert.equal(zoomCard._option().dataZoom[1].end, 75);
+const preservedZoom = zoomCard._zoom;
+zoomCard._setData({ snapshot_id: "latest", source: 0, channel: 0, points: fullPoints.map((point) => [point[0], point[1], point[2] + 1]) });
+assert.deepEqual(zoomCard._zoom, preservedZoom, "same dataset identity preserves zoom on refresh");
+zoomCard._setData({ snapshot_id: "saved-1", source: 0, channel: 0, points: fullPoints });
+assert.deepEqual(zoomCard._zoom, { start: 0, end: 100 }, "history identity change resets zoom");
+zoomCard._setZoomRange(50, 50);
+assert.ok(zoomCard._zoom.end - zoomCard._zoom.start >= 0.25, "full spectra honor the minimum zoom span");
+zoomCard._setData({ snapshot_id: "short", source: 0, channel: 0, points: [[2, 1, 5], [17, 10, 8]] });
+zoomCard._setZoomRange(50, 50);
+assert.deepEqual(zoomCard._zoom, { start: 0, end: 100 }, "two-point spectra retain a usable minimum span");
+const dispatches = [];
+zoomCard._chart = { dispatchAction: (action) => dispatches.push(action) };
+zoomCard._setZoomRange(10, 60);
+zoomCard._resetZoom();
+assert.deepEqual(dispatches, [{ type: "dataZoom", dataZoomIndex: [0, 1], start: 0, end: 100 }]);
+assert.equal(zoomCard.shadowRoot.querySelector("#reset-zoom").disabled, true);
+
+const disposedChart = {
+  offCalls: [],
+  disposeCalls: 0,
+  off: (name, handler) => disposedChart.offCalls.push([name, handler]),
+  dispose: () => { disposedChart.disposeCalls += 1; },
+};
+const disposedCard = Object.create(Card.prototype);
+const zoomHandler = () => {};
+disposedCard._chart = disposedChart;
+disposedCard._zoomHandler = zoomHandler;
+disposedCard._resizeObserver = { disconnectCalls: 0, disconnect() { this.disconnectCalls += 1; } };
+disposedCard._disposeChart();
+assert.deepEqual(disposedChart.offCalls, [["datazoom", zoomHandler]], "datazoom listener is removed before dispose");
+assert.equal(disposedChart.disposeCalls, 1);
+assert.equal(disposedCard._resizeObserver, null);
+assert.equal(disposedCard._zoomHandler, null);
+assert.equal(disposedCard._chart, null);
 
 // Sections writes a numeric grid_options.rows when Automatic height is off.
 // The card must preserve that config for HA's wrapper while its own host/ha-card

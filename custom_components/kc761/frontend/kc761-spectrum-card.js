@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.22";
+const CARD_VERSION = "0.2.0-alpha.23";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -25,6 +25,7 @@ const EDIT_HANDOFF_TTL_MS = 15000;
 const EDIT_HANDOFF_GRACE_MS = 150;
 const EDIT_HANDOFF_MAX_RETRIES = 20;
 const EDIT_HANDOFF_REGISTRY_KEY = "__kc761SpectrumEditHandoffRegistry";
+const ZOOM_DEFAULT = Object.freeze({ start: 0, end: 100 });
 const COLOR_FALLBACKS = {
   curve: "#4fc3f7",
   roiStart: "#00acc1",
@@ -96,6 +97,9 @@ class KC761SpectrumCard extends HTMLElement {
     this._detached = false;
     this._colors = { ...COLOR_FALLBACKS };
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
+    this._zoom = { ...ZOOM_DEFAULT };
+    this._zoomDatasetKey = null;
+    this._zoomHandler = null;
   }
 
   static getStubConfig() {
@@ -243,12 +247,9 @@ class KC761SpectrumCard extends HTMLElement {
     this._stopAutoRefresh();
     this._clearEditorHandoffRetry();
     this._unregisterEditorHandoffCandidate();
-    if (this._resizeObserver) this._resizeObserver.disconnect();
-    this._resizeObserver = null;
+    this._disposeChart();
     if (this._layoutResizeObserver) this._layoutResizeObserver.disconnect();
     this._layoutResizeObserver = null;
-    if (this._chart) this._chart.dispose();
-    this._chart = null;
   }
 
   set hass(hass) {
@@ -321,7 +322,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host{display:block;min-width:0;min-height:0;height:100%;overflow:hidden} ha-card{box-sizing:border-box;height:100%;min-height:0;padding:16px;overflow:auto;display:flex;flex-direction:column}[hidden]{display:none!important}
-        h2{margin:0 0 8px;font-size:20px}.header{display:flex;align-items:center;gap:8px}.header h2{flex:1}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
+        h2{margin:0 0 8px;font-size:20px}.header{display:flex;align-items:center;gap:8px}.header h2{flex:1;min-width:0}.zoom-meta{display:flex;align-items:center;gap:6px;min-width:0}.zoom-readout{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--secondary-text-color)}.reset-zoom{font-size:12px;padding:5px 8px}.toolbar,.roi,.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
         label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--secondary-text-color)}
         select,input,button{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
         button{cursor:pointer}button.danger{color:var(--error-color)}button:disabled{opacity:.45;cursor:not-allowed}
@@ -335,7 +336,7 @@ class KC761SpectrumCard extends HTMLElement {
         ha-card.compact-height .chart-wrap{height:240px;flex-basis:240px;min-height:200px}ha-card.compact-height .summary{grid-auto-rows:52px}ha-card.compact-height .summary div{height:52px;padding:5px 7px}ha-card.compact-height .summary b{font-size:13px}ha-card.compact-height .actions{margin-top:6px}ha-card.compact-height select,ha-card.compact-height input,ha-card.compact-height button{padding:5px 7px}
       </style>
       <ha-card>
-        <div class="header"><h2 id="title"></h2><button id="configure" class="configure" type="button">Configure</button></div>
+        <div class="header"><h2 id="title"></h2><div class="zoom-meta"><span id="zoom-readout" class="zoom-readout" role="status" aria-live="polite">View CH 0–2047</span><button id="reset-zoom" class="reset-zoom" type="button" disabled>Reset zoom</button></div><button id="configure" class="configure" type="button">Configure</button></div>
         <div id="controls">
           <div id="editor-controls" class="toolbar editor-only">
             <label>Channel<select id="source"></select></label>
@@ -368,7 +369,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
     this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
     this.shadowRoot.querySelector("#xaxis").addEventListener("change", () => this._draw());
-    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture());
+    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture({ resetZoom: true }));
     this.shadowRoot.querySelector("#yaxis").addEventListener("change", (event) => {
       this._setYAxis(event.target.value);
       this._persistYAxis();
@@ -377,6 +378,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#roi-start").addEventListener("input", () => this._syncRoiFromInputs("start"));
     this.shadowRoot.querySelector("#roi-end").addEventListener("input", () => this._syncRoiFromInputs("end"));
     this.shadowRoot.querySelector("#data-cursor-slider").addEventListener("input", (event) => this._setCursorChannel("data", event.target.value));
+    this.shadowRoot.querySelector("#reset-zoom").addEventListener("click", () => this._resetZoom());
     this.shadowRoot.querySelector("#history").addEventListener("change", (event) => this._selectHistory(event.target.value));
     this.shadowRoot.querySelector("#capture").addEventListener("click", () => this._capture());
     this.shadowRoot.querySelector("#save").addEventListener("click", () => this._save());
@@ -385,6 +387,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => button.addEventListener("click", () => this._clear(button.dataset.clear)));
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
+    this._updateZoomReadout();
     this._applyVisibility();
     this._ensureLayoutObserver();
     this._applyPresentationMode();
@@ -454,10 +457,9 @@ class KC761SpectrumCard extends HTMLElement {
     this._data = null;
     this._history = [];
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
-    if (this._resizeObserver) this._resizeObserver.disconnect();
-    this._resizeObserver = null;
-    if (this._chart) this._chart.dispose();
-    this._chart = null;
+    this._zoom = { ...ZOOM_DEFAULT };
+    this._zoomDatasetKey = null;
+    this._disposeChart();
     if (!this._rendered) return;
     const source = this.shadowRoot.querySelector("#source");
     const history = this.shadowRoot.querySelector("#history");
@@ -472,6 +474,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (end) end.value = String(MAX_CHANNEL);
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
+    this._updateZoomReadout();
   }
 
   _findLovelacePath() {
@@ -728,10 +731,110 @@ class KC761SpectrumCard extends HTMLElement {
     this._writeYAxis(keys.legacy, this._yAxis);
   }
 
-  _setData(data) {
+  _datasetIdentity(data) {
+    if (!data) return null;
+    const points = Array.isArray(data.points) ? data.points : [];
+    const snapshot = data.snapshot_id == null ? "latest" : String(data.snapshot_id);
+    const source = data.source == null ? "" : String(data.source);
+    const channel = data.channel == null ? "" : String(data.channel);
+    return `${snapshot}|source:${source}|channel:${channel}|points:${points.length}`;
+  }
+
+  _setData(data, { resetZoom = false } = {}) {
+    const identity = this._datasetIdentity(data);
+    if (resetZoom || (this._zoomDatasetKey && identity !== this._zoomDatasetKey)) this._resetZoomState();
+    this._zoomDatasetKey = identity;
     this._data = data;
     this._cursor.data = this._dataCursorChannel(this._cursor.data);
     this._updateDataCursorUI();
+    this._updateZoomReadout();
+  }
+
+  _zoomMinSpan() {
+    const count = this._points().length;
+    if (count < 2) return 100;
+    return Math.min(100, Math.max(0.25, (Math.min(5, count) / (count - 1)) * 100));
+  }
+
+  _clampZoom(start, end) {
+    let low = Number.isFinite(Number(start)) ? clamp(Number(start), 0, 100) : 0;
+    let high = Number.isFinite(Number(end)) ? clamp(Number(end), 0, 100) : 100;
+    if (high < low) [low, high] = [high, low];
+    const minimum = this._zoomMinSpan();
+    if (high - low < minimum) {
+      const center = (low + high) / 2;
+      low = center - minimum / 2;
+      high = center + minimum / 2;
+      if (low < 0) { high -= low; low = 0; }
+      if (high > 100) { low -= high - 100; high = 100; }
+      low = Math.max(0, low);
+    }
+    return { start: Number(low.toFixed(4)), end: Number(high.toFixed(4)) };
+  }
+
+  _resetZoomState() {
+    this._zoom = { ...ZOOM_DEFAULT };
+    this._updateZoomReadout();
+  }
+
+  _setZoomRange(start, end) {
+    const next = this._clampZoom(start, end);
+    if (Math.abs(next.start - this._zoom.start) < 0.0001 && Math.abs(next.end - this._zoom.end) < 0.0001) return;
+    this._zoom = next;
+    this._updateZoomReadout();
+  }
+
+  _onZoom(event) {
+    const payload = event?.batch?.[0] || event;
+    if (!payload) return;
+    const start = Number(payload.start);
+    const end = Number(payload.end);
+    if (Number.isFinite(start) && Number.isFinite(end)) this._setZoomRange(start, end);
+  }
+
+  _resetZoom() {
+    this._resetZoomState();
+    if (this._chart) this._chart.dispatchAction({ type: "dataZoom", dataZoomIndex: [0, 1], start: 0, end: 100 });
+  }
+
+  _zoomChannelRange() {
+    const points = this._points();
+    if (!points.length) return [0, MAX_CHANNEL];
+    const last = points.length - 1;
+    const startIndex = clamp(Math.round((this._zoom.start / 100) * last), 0, last);
+    const endIndex = clamp(Math.round((this._zoom.end / 100) * last), startIndex, last);
+    return [points[startIndex][0], points[endIndex][0]];
+  }
+
+  _updateZoomReadout() {
+    const readout = this.shadowRoot?.querySelector("#zoom-readout");
+    const reset = this.shadowRoot?.querySelector("#reset-zoom");
+    const [start, end] = this._zoomChannelRange();
+    const text = `View CH ${start}–${end}`;
+    const full = this._zoom.start <= 0.0001 && this._zoom.end >= 99.9999;
+    if (readout) {
+      readout.textContent = text;
+      readout.title = text;
+      readout.setAttribute("aria-label", text);
+    }
+    if (reset) reset.disabled = full || !this._points().length;
+  }
+
+  _zoomOptions(colors, divider) {
+    const range = this._clampZoom(this._zoom.start, this._zoom.end);
+    this._zoom = range;
+    const common = {
+      xAxisIndex: [0], filterMode: "none", start: range.start, end: range.end,
+      minSpan: this._zoomMinSpan(), zoomLock: false,
+    };
+    return [
+      { ...common, type: "inside", zoomOnMouseWheel: "shift", moveOnMouseMove: true, moveOnMouseWheel: false, throttle: 50 },
+      {
+        ...common, type: "slider", bottom: 6, height: 14, showDataShadow: false, brushSelect: false,
+        borderColor: divider, fillerColor: colors.dataCursor, handleStyle: { color: colors.dataCursor },
+        dataBackground: { lineStyle: { color: colors.curve, opacity: 0.35 }, areaStyle: { color: colors.curve, opacity: 0.08 } },
+      },
+    ];
   }
 
   _dataCursorChannel(channel) {
@@ -863,11 +966,11 @@ class KC761SpectrumCard extends HTMLElement {
     const entryId = this._entryId;
     if (snapshotId === "latest") {
       const state = this._hass.states[this._config.entity];
-      this._setData(this._fromEntity(state));
+      this._setData(this._fromEntity(state), { resetZoom: true });
     } else {
       const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData(data);
+      this._setData(data, { resetZoom: true });
     }
     if (generation !== this._entityGeneration || entryId !== this._entryId) return;
     this.shadowRoot.querySelector("#source").value = String(this._data.source);
@@ -876,14 +979,14 @@ class KC761SpectrumCard extends HTMLElement {
     this._syncAutoRefresh();
   }
 
-  async _capture({ silent = false } = {}) {
+  async _capture({ silent = false, resetZoom = false } = {}) {
     if (this._busyState || !this._entryId) return;
     const generation = this._entityGeneration;
     const entryId = this._entryId;
     await this._busy(async () => {
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData(data);
+      this._setData(data, { resetZoom });
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -1055,7 +1158,11 @@ class KC761SpectrumCard extends HTMLElement {
       // Keep a small, explicit top reserve for the horizontal Y-axis title.
       // The native HA charts use a similarly restrained top margin, but this
       // card also exposes an axis name and must keep it away from max ticks.
-      grid: { top: 30, left: 1, right: 1, bottom: 28, containLabel: true },
+      // Keep the ECharts slider inside the existing chart footprint.  The
+      // extra bottom reserve is internal to the chart and must not change the
+      // card's outer Masonry/Sections height.
+      grid: { top: 30, left: 1, right: 1, bottom: 58, containLabel: true },
+      dataZoom: this._zoomOptions(colors, divider),
       tooltip: {
         trigger: "axis", renderMode: "html", backgroundColor: cardBackground, borderColor: divider, borderWidth: 1,
         textStyle: { color: foreground }, axisPointer: { type: "line", snap: true, lineStyle: { color: colors.dataCursor } },
@@ -1108,6 +1215,15 @@ class KC761SpectrumCard extends HTMLElement {
     }).catch((error) => this._setStatus(`Chart load failed: ${error.message || error}`, true));
   }
 
+  _disposeChart() {
+    if (this._resizeObserver) this._resizeObserver.disconnect();
+    this._resizeObserver = null;
+    if (this._chart && this._zoomHandler) this._chart.off("datazoom", this._zoomHandler);
+    this._zoomHandler = null;
+    if (this._chart) this._chart.dispose();
+    this._chart = null;
+  }
+
   async _ensureChart() {
     if (this._chart) return this._chart;
     if (this._detached) return null;
@@ -1117,6 +1233,8 @@ class KC761SpectrumCard extends HTMLElement {
     if (!chartElement) return null;
     this._echarts = module.default || module;
     this._chart = this._echarts.init(chartElement, null, { renderer: "svg", useDirtyRect: false });
+    this._zoomHandler = (event) => this._onZoom(event);
+    this._chart.on("datazoom", this._zoomHandler);
     this._resizeObserver = new ResizeObserver(() => {
       if (this._chart) {
         this._chart.resize();

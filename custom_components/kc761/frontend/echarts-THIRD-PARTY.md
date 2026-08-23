@@ -8,7 +8,7 @@ the card does not depend on a CDN or any external network at runtime.
 - License: Apache-2.0
 - Distribution: `dist/echarts.esm.min.js`
 - npm registry integrity: `sha512-q0yaFPggC9FUdsWH4blavRWFmxdrIodbkoKNAjJudAI6CA9gNPxHtV2RcZNEepZVlk4yvBYkOkbk6HIVpIyHZA==`
-- Vendored JavaScript SHA-256: `28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da`
+- Vendored JavaScript SHA-256: `7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`
 - Source archive metadata: `private/echarts-6.1.0-metadata.json`
 
 The corresponding Apache ECharts `LICENSE` and `NOTICE` are distributed as

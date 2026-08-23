@@ -47,7 +47,7 @@ class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.22")
+        self.assertEqual(VERSION, "0.2.0-alpha.23")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -178,6 +178,27 @@ class IntegrationStaticTests(unittest.TestCase):
             "CARD_DOCUMENTATION_URL",
             "_applyVisibility",
             "_resetEntityRuntime",
+            "dataZoom",
+            'type: "inside"',
+            'type: "slider"',
+            "xAxisIndex: [0]",
+            'filterMode: "none"',
+            'zoomOnMouseWheel: "shift"',
+            "moveOnMouseMove: true",
+            "moveOnMouseWheel: false",
+            "minSpan",
+            "_zoomMinSpan",
+            "_clampZoom",
+            "_setZoomRange",
+            "_resetZoom",
+            "_updateZoomReadout",
+            "_zoomDatasetKey",
+            "_zoomHandler",
+            "_disposeChart",
+            '"datazoom"',
+            "View CH ",
+            'id="reset-zoom"',
+            "bottom: 58",
             "y-axis:configured",
             "y-axis:selected",
             "_setSummaryValue",
@@ -228,7 +249,7 @@ class IntegrationStaticTests(unittest.TestCase):
         vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
         self.assertEqual(
             hashlib.sha256(vendor).hexdigest(),
-            "28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da",
+            "7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05",
         )
         third_party = (integration / "frontend" / "echarts-THIRD-PARTY.md").read_text(encoding="utf-8")
         self.assertIn("echarts`\n- Version: `6.1.0`", third_party)
