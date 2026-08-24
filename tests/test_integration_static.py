@@ -16,6 +16,7 @@ from custom_components.kc761.const import (
     CMD_GET_DEVICE_INFO,
     CMD_GET_MC_DATA,
     CMD_GET_STA,
+    BLE_VERIFIED_SERVICE_UUID,
     FORBIDDEN_WRITE_COMMANDS,
     READ_COMMANDS,
     VERSION,
@@ -59,7 +60,7 @@ class IntegrationStaticTests(unittest.TestCase):
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
         self.assertRegex(VERSION, r"^\d+\.\d+\.\d+-alpha\.\d+$")
-        self.assertEqual(manifest["dependencies"], ["frontend", "http"])
+        self.assertEqual(manifest["dependencies"], ["frontend", "http", "bluetooth_adapters"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
         self.assertEqual(manifest["iot_class"], "local_polling")
@@ -117,6 +118,26 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertEqual(READ_COMMANDS, {0x52, 0x53, 0x54, 0x55})
         self.assertEqual(WRITE_COMMANDS, {0x62, 0x63, 0x66})
         self.assertEqual(FORBIDDEN_WRITE_COMMANDS, {0x64})
+
+    def test_ble_transport_contract_has_no_guessed_service_uuid(self) -> None:
+        transport = (ROOT / "custom_components" / "kc761" / "protocol" / "transport.py").read_text(
+            encoding="utf-8"
+        )
+        const = (ROOT / "custom_components" / "kc761" / "const.py").read_text(encoding="utf-8")
+        config_flow = (ROOT / "custom_components" / "kc761" / "config_flow.py").read_text(encoding="utf-8")
+        architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        self.assertIn("6E400002-B5A3-F393-E0A9-E50E24DCCA9E", const)
+        self.assertIn("6E400003-B5A3-F393-E0A9-E50E24DCCA9E", const)
+        self.assertIn(BLE_VERIFIED_SERVICE_UUID, const)
+        self.assertIn("BLE_VERIFIED_SERVICE_UUID", transport)
+        self.assertNotIn("6E400001-B5A3-F393-E0A9-E50E24DCCA9E", transport)
+        self.assertIn("async_ble_device_from_address", transport)
+        self.assertIn("establish_connection", transport)
+        self.assertIn("BleakClientWithServiceCache", transport)
+        self.assertNotIn("from bleak import BleakClient", transport)
+        self.assertIn("ble_address", config_flow)
+        self.assertNotIn("async_discovered_service_info", config_flow)
+        self.assertIn("自动发现延后", architecture)
 
     def test_control_and_spectrum_files_are_present_without_services(self) -> None:
         integration = ROOT / "custom_components" / "kc761"

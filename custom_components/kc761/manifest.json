@@ -4,7 +4,7 @@
   "codeowners": ["@GImDX"],
   "config_flow": true,
   "documentation": "https://github.com/GImDX/kc761-ha",
-  "dependencies": ["frontend", "http"],
+  "dependencies": ["frontend", "http", "bluetooth_adapters"],
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/GImDX/kc761-ha/issues",

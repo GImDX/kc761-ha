@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.36`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.36`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -21,6 +21,14 @@
 - 校准写入 `0x64` 继续禁止，客户端不提供对应编码器或公开方法。
 - 所有写事务串行执行，必须收到同一 SYNC、成功状态且回显相同命令的 `0xAA` ACK；随后请求状态或设备信息完成读回。
 - `hardware_verified=false` 保持不变。已有实机透明流证明本设备的 A0/A6 读取形状及官方上位机 `0x63` ACK，但不等于本集成已完成 `0x62/0x63/0x66` 实机验收。
+
+### 1.1 BLE 实机证据边界
+
+- 本次授权探针仅连接一台用户指定 BLE 设备，并严格发送 `[00,54,01,00]`、`[00,53,02,00]`，命令审计顺序为 `0x54`→`0x53`；没有其它探针写入。
+- 该设备实测服务 UUID 为 `59462f12-9543-9999-12c8-58b459a2712d`，RX/TX 分别为 `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`/`6E400003-B5A3-F393-E0A9-E50E24DCCA9E`，属性为 `write`/`notify`。服务 handle、特征 handle 和 CCCD 属于该次设备观察，不固化为跨设备常量。
+- Bleak `mtu_size=23` 仅按 BlueZ placeholder/未知值处理；两条读取及通知解析成功，不能把 `23` 当作设备已协商 MTU。`A1×9` 与 `A3×1` 为自动推送，解析错误和丢弃字节均为 `0`。
+- 代码将该服务设为显式地址连接的默认约束；兼容固件只能通过用户显式提供其它已验证 UUID 覆盖。仍不启用跨型号 BLE 自动发现，且全局 `hardware_verified=false` 不变。
+- 设备信息/状态的非敏感字段和完整脱敏证据见 [协议证据账本](PROTOCOL_EVIDENCE.md#103-2026-08-23-授权-ble-连接与协议探针-脱敏)；完整地址、`DEVICE_ID` 和原始帧不进入仓库。
 
 ## 2. 设备和实体呈现
 
@@ -123,7 +131,7 @@ show_actions: true
 show_peak: true
 ```
 
-若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.22` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
+若旧部署尚未更新并且必须临时恢复，可将 `/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.23` 手动注册为 JavaScript Module。自动加载与手动资源同时存在时，卡片会通过 `registerKC761SpectrumCard()` 对 Custom Element 和选择器条目做幂等注册；确认新版本自动加载正常后可由用户自行移除旧的手动资源。
 
 ### 6.0 原生 Lovelace 编辑器与可见性边界
 
@@ -444,6 +452,6 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 2. 在用户浏览器完成谱图卡 SVG/无 canvas、编辑器/普通视图控件边界、双 ROI 滑块与数据游标拖动和读数、Y 轴视觉间距、配色、`y_axis` reload 持久性、自动刷新、确认对话框、实际 CSV 下载、手动/定时保存、历史回看和保留上限的可视验收；Recorder 排除已经实测通过。
 3. 对持久测试栈补做独立的模拟器运行时命令计数审计，确认本轮自动刷新只增加 `0x52` 且 `0x62/0x63/0x64/0x66` 均为 0；当前固定 runner 的控制覆盖不能代替该审计。
 4. 使用专门测试设备，逐项、人工确认后验证 `0x62` 和 `0x63` ACK/读回；`0x66` 必须在用户明确接受数据丢失后单独验收。
-5. 自动上传开启态、其它传感器与型号、累计量跨固件单位和 BLE UUID 继续保持未确认；`hardware_verified=false` 不变。
+5. 自动上传开启态、其它传感器与型号、累计量跨固件单位、跨固件 BLE 服务一致性和长时间运行继续保持未确认；`hardware_verified=false` 不变。
 
 用户已经授权在本轮软件验收后进行本地合并，以便继续测试；这不等于发布授权。在上述剩余门禁完成前，不得推送合并结果、发布 tag/Release、部署正式环境或宣称控制功能已通过实机验证。
