@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.37`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载且不依赖 Lovelace 配置保存；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.38`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载且不依赖 Lovelace 配置保存；alpha.38 将 TCP/BLE 配置拆分为传输选择和端点步骤，并从 HA Bluetooth 广播列表提供 BLE 地址自动选择及手动回退；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -451,6 +451,12 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - alpha.37 只提升集成、卡片和 ECharts 资源的统一 cache-busting 版本；不改变协议命令、实体、WebSocket 类型、Lovelace 配置 schema、视图状态 schema 或历史归档格式。
 - Saved spectrum 是普通仪表盘运行时控件，不依赖 Lovelace 配置保存；普通视图不预取历史谱图，只有打开历史选择器或进入编辑预览时才惰性加载，重复请求继续共享同一个 Promise。
 - alpha.35 与 alpha.36 的部署、性能和浏览器证据保持历史记录，不被本次版本收尾改写。
+
+### 8.33 `0.2.0-alpha.38`：TCP/BLE 配置端点分步与 BLE 地址选择
+
+- Config Flow 首步只显示传输方式，选定 `TCP` 后只显示 host/port，选定 `BLE` 后只显示 BLE address/service UUID；reconfigure 使用同样的两步结构，保留原有 DEVICE_ID 一致性门禁和跨传输端点键清理。
+- BLE 地址字段使用 HA `SelectSelector` 的 `custom_value` 模式：优先列出 active connectable scanner 的广播缓存，打开步骤时触发一次短时主动扫描；没有扫描器或广播时仍可手动输入地址。地址选择不会连接设备，提交后才执行现有 BLE preflight。
+- 传输选项显示为大写 `TCP`/`BLE`；仅保留 BLE 地址与服务 UUID 字段，避免 TCP 与 BLE 端点混在同一表单。
 
 本地合并后继续测试的剩余门禁：
 

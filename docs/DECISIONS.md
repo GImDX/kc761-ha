@@ -88,13 +88,13 @@
 
 理由：手册没有发现协议、服务广播或稳定主机名证据。使用未验证的端口扫描会增加网络噪声和误识别。
 
-## D-010 BLE 显式地址连接，自动发现延后
+## D-010 BLE 广播地址选择，GATT 自动连接仍延后
 
-状态：Accepted for explicit transport; automatic discovery Deferred
+状态：Accepted for address selection; unsupported-device discovery Deferred
 
-决定：允许用户在 Config Flow 中显式输入 BLE address；连接后通过 HA Bluetooth manager 解析 `BLEDevice`，枚举 GATT 服务并唯一匹配手册给出的 RX/TX 特征。对当前已验证设备默认约束服务 UUID `59462f12-9543-9999-12c8-58b459a2712d`；兼容固件必须由用户显式输入另一个已验证 UUID 覆盖。集成不声明跨型号 Bluetooth matcher，也不启动独立扫描器。
+决定：Config Flow 的 BLE 步骤使用 HA Bluetooth manager 的 connectable 广播缓存和短时 active scan 展示地址选择器，同时保留 `custom_value` 手动输入回退。选择阶段只读取广播，不建立 GATT 连接。提交后通过 HA Bluetooth manager 解析 `BLEDevice`，枚举 GATT 服务并唯一匹配手册给出的 RX/TX 特征。对当前已验证设备默认约束服务 UUID `59462f12-9543-9999-12c8-58b459a2712d`；兼容固件必须由用户显式输入另一个已验证 UUID 覆盖。集成不声明跨型号 Bluetooth matcher，不执行无标识 GATT 自动连接，也不启动独立扫描器。
 
-自动发现和稳定发布前仍必须确认：
+自动识别设备身份和稳定发布前仍必须确认：
 
 - 跨固件服务 UUID 一致性；
 - HA 主机蓝牙能力和代理支持范围；

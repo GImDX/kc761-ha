@@ -23,7 +23,7 @@
 
 - 不连接科创云，不实现云端 32 字节校验。
 - 不实现串口。官方上位机虽然显示“串口”选项，但编程手册没有提供串口接口定义。
-- 不实现 BLE 自动发现。当前 BLE 只允许显式地址配置；单台设备的服务证据不构成跨型号/跨固件广告 matcher，自动扫描不能安全识别设备。
+- 不实现 BLE 自动设备身份识别。Config Flow 可从 HA Bluetooth manager 的 connectable 广播缓存/短时主动扫描中选择地址，也保留手动输入；选择阶段只读广播，不建立 GATT 连接。单台设备的服务证据不构成跨型号/跨固件广告 matcher。
 - 不自动修改设备时间、传感器选择、音量、灯光或自动上传状态。
 - 不写入校准参数，不清除谱图、剂量曲线或累计剂量。
 - 不把 1024/2048/4096 道完整谱图保存为普通实体状态或属性。
@@ -93,13 +93,13 @@ HACS 要求一个仓库只管理一个 `custom_components` 集成，且运行所
 | 传输 | 手册状态 | 首版决定 | 理由 |
 | --- | --- | --- | --- |
 | 局域网 TCP | 设备为服务端 | 支持 | 本地、无需云认证，官方上位机已有网络入口 |
-| BLE 5.0 GATT | 设备为服务端 | 支持显式地址连接；自动发现延后 | 使用 HA Bluetooth manager 按用户地址解析 `BLEDevice`；连接后默认约束本设备实测服务 UUID，并唯一匹配 RX/TX 特征；兼容固件可显式覆盖 UUID；MTU、通知丢包和真实设备可发现性仍有跨固件门禁 |
+| BLE 5.0 GATT | 设备为服务端 | 支持 HA 广播地址选择与手动地址；不做自动身份识别 | Config Flow 使用 HA Bluetooth manager 的 connectable 广播缓存和短时主动扫描；提交后按用户地址解析 `BLEDevice`，默认约束本设备实测服务 UUID，并唯一匹配 RX/TX 特征；兼容固件可显式覆盖 UUID；MTU、通知丢包和真实设备可发现性仍有跨固件门禁 |
 | 云 TCP | 设备为客户端 | 排除 | 明文、追加校验、自建云目前不支持 |
 | 串口 | 仅截图出现 | 排除 | 编程手册没有串口定义或参数 |
 
 网络 Config Flow 接收 `host` 和 `port`。截图显示端口 `7601`，且首轮隔离实机在该候选端口完成 ARP 门控和 TCP 只读应答；因此 7601 对该测试设备达到 L 级可达证据，但仍保持可编辑，不能宣称为所有型号/固件的固定端口。
 
-BLE Config Flow 接收用户明确提供的 `ble_address`；服务 UUID 默认使用本设备实测的 `59462f12-9543-9999-12c8-58b459a2712d`，兼容固件可填写另一个已验证的 `ble_service_uuid` 覆盖默认值。清单依赖 HA 的 `bluetooth_adapters`，由 HA 提供 Bluetooth 管理器及其 `bluetooth`/Bleak 依赖链；集成不自行固定或重复声明底层 BLE 依赖。连接时调用 HA 的 `bluetooth.async_ble_device_from_address(hass, address, connectable=True)`，不在集成内启动独立扫描器；再通过 `bleak_retry_connector.establish_connection` 与 `BleakClientWithServiceCache` 建立有界重试连接，每次尝试的连接超时至少为 10 秒，2 次尝试的总等待预算另行封顶并覆盖重试开销。枚举 GATT 服务，要求 RX `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` 和 TX `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` 各出现一次且属于同一服务。缺失、重复、服务不符或属性不符均拒绝连接。
+BLE Config Flow 使用 HA Bluetooth manager 的 connectable 广播缓存和短时主动扫描构建 `ble_address` 选择器；无扫描器/广播时可手动输入。选择阶段不建立 GATT 连接；提交后服务 UUID 默认使用本设备实测的 `59462f12-9543-9999-12c8-58b459a2712d`，兼容固件可填写另一个已验证的 `ble_service_uuid` 覆盖默认值。清单依赖 HA 的 `bluetooth_adapters`，由 HA 提供 Bluetooth 管理器及其 `bluetooth`/Bleak 依赖链；集成不自行固定或重复声明底层 BLE 依赖。连接时调用 HA 的 `bluetooth.async_ble_device_from_address(hass, address, connectable=True)`，不在集成内启动独立扫描器；再通过 `bleak_retry_connector.establish_connection` 与 `BleakClientWithServiceCache` 建立有界重试连接，每次尝试的连接超时至少为 10 秒，2 次尝试的总等待预算另行封顶并覆盖重试开销。枚举 GATT 服务，要求 RX `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` 和 TX `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` 各出现一次且属于同一服务。缺失、重复、服务不符或属性不符均拒绝连接。
 
 手册给出的 BLE MTU 门禁为：MTU 小于 185 时设备不会回应，MTU 至少 185 时使用 182 B 包档，MTU 至少 507 时使用 504 B 包档。Bleak 后端若报告大于 23 且小于 185 的 MTU，连接会给出可操作错误；BlueZ 常见的 23 占位值按“未知”处理，交由首个有界请求超时判断，避免误拒绝有效连接。通知进入固定容量队列，队列溢出立即使连接失败并由 Coordinator 的有界退避重连。
 
@@ -158,7 +158,7 @@ Coordinator 的 5 秒周期中只发一次实时状态请求，并在设备信�
 
 ### 9.1 首次配置
 
-1. 用户选择 TCP 或 Bluetooth LE。TCP 输入主机/域名和端口；BLE 输入 HA Bluetooth manager 可解析的 `ble_address`，默认使用本设备已验证服务 UUID，兼容固件可显式覆盖。
+1. 用户选择 TCP 或 BLE。TCP 下一步只显示主机/域名和端口；BLE 下一步只显示 HA Bluetooth manager 广播列表中的 `ble_address`（也可手动输入）和服务 UUID 覆盖值，默认使用本设备已验证服务 UUID。
 2. 建立有界超时的 TCP 或 GATT 连接。BLE 不启动集成私有扫描器，而是复用 HA 共享 Bluetooth manager。
 3. 发送 `CMD_GET_DEVICE_INFO`，验证帧结构、支持的型号和非空 `DEVICE_ID`。
 4. 发送 `CMD_GET_STA`，验证状态包长度和基本数值合法性。

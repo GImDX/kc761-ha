@@ -2,7 +2,7 @@
 
 状态：alpha.36 性能候选，仅完成开发机静态、单元和合成基准门禁；没有把本机结果写成树莓派、Chrome 或真实 Home Assistant 性能证据。alpha.35 的部署哈希、测试栈和浏览器历史证据保留在 [0.2 扩展设计](V0_2_EXPANSION.md) 的历史章节中，不在本文件改写。
 
-当前 alpha.37 仅作为 Saved spectrum 普通视图的资源版本收尾：卡片和 ECharts URL 继续共享同一个 cache-busting 版本，历史谱图保持按需惰性加载，不依赖 Lovelace 配置保存。以下基准和 alpha.36 优化记录保持不变。
+当前 alpha.38 在 alpha.37 Saved spectrum 普通视图资源版本收尾基础上，增加 Config Flow 的 TCP/BLE 分步端点选择；卡片和 ECharts URL 继续共享同一个 cache-busting 版本，历史谱图保持按需惰性加载，不依赖 Lovelace 配置保存。以下基准和 alpha.36 优化记录保持不变。
 
 ## 已完成的优化
 
