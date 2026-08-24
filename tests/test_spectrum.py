@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import json
 import tempfile
+from threading import Barrier
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +76,44 @@ class SpectrumSnapshotTests(unittest.TestCase):
                 segment_count=1,
                 calibration_profile="x",
             )
+        with self.assertRaises(ValueError):
+            SpectrumSnapshot.create(
+                source=0,
+                acquired_at=datetime.now(UTC),
+                accumulation_seconds=1,
+                counts=(-1,) + (0,) * 2047,
+                energy_kev=(0.0,) * 2048,
+                segment_count=1,
+                calibration_profile="x",
+            )
+
+    def test_storage_validation_and_optional_accumulation(self) -> None:
+        value = snapshot()
+        invalid_source = value.to_storage()
+        invalid_source["source"] = 3
+        with self.assertRaises(ValueError):
+            SpectrumSnapshot.from_storage(invalid_source)
+
+        invalid_counts = value.to_storage()
+        invalid_counts["counts"] = [0]
+        with self.assertRaises(ValueError):
+            SpectrumSnapshot.from_storage(invalid_counts)
+
+        invalid_energy = value.to_storage()
+        invalid_energy["energy_kev"] = [0.0]
+        with self.assertRaises(ValueError):
+            SpectrumSnapshot.from_storage(invalid_energy)
+
+        optional = SpectrumSnapshot.create(
+            source=value.source,
+            acquired_at=value.acquired_at,
+            accumulation_seconds=None,
+            counts=value.counts,
+            energy_kev=value.energy_kev,
+            segment_count=value.segment_count,
+            calibration_profile=value.calibration_profile,
+        )
+        self.assertIn(",,0,0.00000000,0\r\n", optional.to_csv())
 
 
 class SpectrumArchiveTests(unittest.TestCase):
@@ -172,3 +212,148 @@ class SpectrumArchiveTests(unittest.TestCase):
             with gzip.open(invalid, "wt", encoding="utf-8") as handle:
                 json.dump([], handle)
             self.assertEqual(archive.list_metadata(), [])
+
+    def test_concurrent_saves_and_list_are_serialized(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path, maximum=4)
+            values = [snapshot(minute=index) for index in range(2)]
+            start = Barrier(3)
+
+            def save(value: SpectrumSnapshot) -> None:
+                start.wait()
+                archive.save(value)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(save, value) for value in values]
+                start.wait()
+                for future in futures:
+                    future.result()
+
+            listed = archive.list_metadata()
+            self.assertEqual(
+                {item["snapshot_id"] for item in listed},
+                {value.snapshot_id for value in values},
+            )
+            index = json.loads((path / ".metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(index["entries"]), {value.snapshot_id for value in values})
+            self.assertEqual(list(path.glob(".*.tmp")), [])
+
+            value = snapshot(minute=2)
+            start = Barrier(3)
+
+            def save_again() -> None:
+                start.wait()
+                archive.save(value)
+
+            def list_again() -> list[dict]:
+                start.wait()
+                return archive.list_metadata()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                save_future = executor.submit(save_again)
+                list_future = executor.submit(list_again)
+                start.wait()
+                save_future.result()
+                list_future.result()
+            self.assertEqual(archive.list_metadata()[0]["snapshot_id"], value.snapshot_id)
+
+    def test_index_write_failure_keeps_gzip_authoritative_and_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path)
+            value = snapshot()
+            with patch.object(archive, "_write_index", side_effect=OSError("sidecar unavailable")):
+                archive.save(value)
+                self.assertTrue((path / f"{value.snapshot_id}.json.gz").exists())
+                self.assertEqual(archive.list_metadata()[0]["snapshot_id"], value.snapshot_id)
+                self.assertTrue(archive._index_dirty)
+            self.assertEqual(archive.load(value.snapshot_id), value)
+            with patch.object(archive, "_write_index", wraps=archive._write_index) as write_index:
+                self.assertEqual(archive.list_metadata()[0]["snapshot_id"], value.snapshot_id)
+                write_index.assert_called_once()
+            self.assertFalse(archive._index_dirty)
+            self.assertTrue((path / ".metadata.json").exists())
+
+    def test_gzip_failure_is_reported_and_temporary_file_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path)
+            with patch(
+                "custom_components.kc761.spectrum.gzip.open",
+                side_effect=OSError("gzip unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "gzip unavailable"):
+                    archive.save(snapshot())
+            self.assertEqual(list(path.glob("*.json.gz")), [])
+            self.assertEqual(list(path.glob(".*.tmp")), [])
+
+    def test_index_validation_and_rebuild_edge_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path)
+            value = snapshot()
+            metadata = value.metadata()
+            valid = {"metadata": metadata, "size": 1, "mtime_ns": 1}
+            invalid_entries = (
+                ("bad", valid),
+                (value.snapshot_id, None),
+                (value.snapshot_id, {"metadata": None, "size": 1, "mtime_ns": 1}),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "snapshot_id": "bad"}, "size": 1, "mtime_ns": 1},
+                ),
+                (value.snapshot_id, {"metadata": {**metadata, "source": 9}, "size": 1, "mtime_ns": 1}),
+                (value.snapshot_id, {"metadata": {**metadata, "channel": "bad"}, "size": 1, "mtime_ns": 1}),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "point_count": 1}, "size": 1, "mtime_ns": 1},
+                ),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "acquired_at": 1}, "size": 1, "mtime_ns": 1},
+                ),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "total_counts": 1.5}, "size": 1, "mtime_ns": 1},
+                ),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "segment_count": "1"}, "size": 1, "mtime_ns": 1},
+                ),
+                (
+                    value.snapshot_id,
+                    {"metadata": {**metadata, "calibration_profile": None}, "size": 1, "mtime_ns": 1},
+                ),
+                (value.snapshot_id, {"metadata": metadata, "size": "1", "mtime_ns": 1}),
+            )
+            for snapshot_id, entry in invalid_entries:
+                self.assertFalse(archive._valid_index_entry(snapshot_id, entry))
+
+            for payload in (
+                [],
+                {"version": 2, "entries": {}},
+                {"version": 1, "entries": []},
+                {"version": 1, "entries": {"bad": valid}},
+            ):
+                (path / ".metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(archive._read_index())
+            self.assertEqual(SpectrumArchive(path / "missing")._rebuild_index(), {})
+
+    def test_refreshes_new_files_and_removes_missing_or_mismatched_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path)
+            first = snapshot()
+            second = snapshot(minute=1)
+            archive.save(first)
+            with gzip.open(path / f"{second.snapshot_id}.json.gz", "wt", encoding="utf-8") as handle:
+                json.dump(second.to_storage(), handle)
+            self.assertEqual(len(archive.list_metadata()), 2)
+            (path / f"{first.snapshot_id}.json.gz").unlink()
+            self.assertEqual(len(archive.list_metadata()), 1)
+
+            mismatch = path / "20260821T010000Z-0-aaaaaaaaaaaa.json.gz"
+            with gzip.open(mismatch, "wt", encoding="utf-8") as handle:
+                json.dump(second.to_storage(), handle)
+            self.assertEqual(len(archive.list_metadata()), 1)

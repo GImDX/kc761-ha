@@ -7,6 +7,7 @@ import math
 import struct
 import unittest
 from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch
 
 from custom_components.kc761.const import (
     CMD_GET_CAL_DATA,
@@ -20,7 +21,9 @@ from custom_components.kc761.const import (
     FLAG_CAL_DATA,
     FLAG_MC_DATA_QUERY,
     FLAG_STATUS_QUERY,
+    MAX_CONSECUTIVE_PROTOCOL_ERRORS,
 )
+from custom_components.kc761.protocol import client as client_module
 from custom_components.kc761.protocol.client import KC761Client, PendingTransaction
 from custom_components.kc761.protocol.codec import (
     DecodedFrame,
@@ -545,6 +548,153 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         no_source.future.cancel()
         pending.future.cancel()
         complete.future.cancel()
+
+    async def test_client_connect_fast_path_and_stale_reader_cleanup(self) -> None:
+        client = KC761Client("127.0.0.1", 1)
+        transport = MagicMock()
+        transport.connected = False
+        transport.async_close = AsyncMock()
+        transport.async_connect = AsyncMock()
+        client.transport = transport
+        stale_task = asyncio.create_task(asyncio.sleep(10))
+        client._reader_task = stale_task
+
+        def create_task(coroutine, name):
+            del name
+            coroutine.close()
+            return asyncio.create_task(asyncio.sleep(10))
+
+        client.task_creator = create_task
+        await client.async_connect()
+        self.assertTrue(stale_task.cancelled())
+        transport.async_close.assert_awaited_once()
+        transport.async_connect.assert_awaited_once()
+        await client.async_close()
+
+        fast = KC761Client("127.0.0.1", 1)
+        fast.transport = transport
+        transport.connected = True
+        fast._reader_task = asyncio.create_task(asyncio.sleep(10))
+        await fast.async_connect()
+        transport.async_connect.assert_awaited_once()
+        await fast.async_close()
+
+    async def test_client_request_and_reader_exception_branches(self) -> None:
+        client = KC761Client("127.0.0.1", 1)
+        with self.assertRaises(ValueError):
+            await client.async_request(CMD_GET_STA, source=0)
+
+        timeout_client = KC761Client("127.0.0.1", 1, request_timeout=0.001)
+        timeout_transport = MagicMock()
+        timeout_transport.connected = True
+        timeout_transport.async_write = AsyncMock()
+        timeout_transport.async_close = AsyncMock()
+        timeout_client.transport = timeout_transport
+        timeout_client._reader_task = asyncio.create_task(asyncio.sleep(10))
+        with self.assertRaises(TimeoutError):
+            await timeout_client.async_set_device_time(1)
+
+        bad_client = KC761Client("127.0.0.1", 1)
+        bad_transport = MagicMock()
+        bad_transport.connected = True
+        bad_transport.async_close = AsyncMock()
+        bad_transport.async_write = AsyncMock()
+        bad_client.transport = bad_transport
+        bad_client._reader_task = asyncio.create_task(asyncio.sleep(10))
+
+        async def set_bad_result(_request: bytes) -> None:
+            pending = next(iter(bad_client._pending.values()))
+            pending.future.set_result(
+                DecodedFrame(RawFrame(0, FLAG_ACK, 8, b"", b""), "ack", None)
+            )
+
+        bad_transport.async_write.side_effect = set_bad_result
+        with self.assertRaises(TransactionError):
+            await bad_client.async_set_device_time(1)
+        await bad_client.async_close()
+
+        for read_result in (b"",):
+            reader_client = KC761Client("127.0.0.1", 1)
+            reader_transport = MagicMock()
+            reader_transport.async_read = AsyncMock(return_value=read_result)
+            reader_transport.async_close = AsyncMock()
+            reader_client.transport = reader_transport
+            await reader_client._reader_loop()
+            reader_transport.async_close.assert_awaited_once()
+
+        generic_client = KC761Client("127.0.0.1", 1)
+        generic_transport = MagicMock()
+        generic_transport.async_read = AsyncMock(side_effect=RuntimeError("reader"))
+        generic_transport.async_close = AsyncMock()
+        generic_client.transport = generic_transport
+        await generic_client._reader_loop()
+        self.assertEqual(generic_client.protocol_errors, 1)
+
+        error_client = KC761Client("127.0.0.1", 1)
+        error_client.parser = MagicMock()
+        error_client.parser.errors = 0
+        error_client.parser.feed.return_value = []
+        error_client.parser.flush.return_value = []
+        error_client.consecutive_protocol_errors = MAX_CONSECUTIVE_PROTOCOL_ERRORS
+        error_transport = MagicMock()
+        error_transport.async_read = AsyncMock(return_value=b"bad")
+        error_transport.async_close = AsyncMock()
+        error_client.transport = error_transport
+        await error_client._reader_loop()
+        error_client.parser.feed.assert_called_once_with(b"bad")
+
+    async def test_client_routes_transaction_error_and_done_future(self) -> None:
+        frame = RawFrame(0, FLAG_MC_DATA_QUERY, 81, b"", b"")
+        client = KC761Client("127.0.0.1", 1)
+        loop = asyncio.get_running_loop()
+        conflict = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+        )
+        conflict.spectrum_counts[0] = 1
+        conflict.spectrum_filled = 1
+        client._pending[0] = conflict
+        decoded_segment = SpectrumSegment(0, 0, 1, (2,), FLAG_MC_DATA_QUERY)
+        with patch.object(
+            client_module,
+            "decode_frame",
+            return_value=DecodedFrame(frame, "spectrum", decoded_segment),
+        ):
+            await client._route_frame(frame)
+        self.assertIsInstance(conflict.future.exception(), TransactionError)
+
+        done = loop.create_future()
+        done.set_result(None)
+        client._pending[1] = PendingTransaction(
+            CMD_GET_STA,
+            frozenset({FLAG_STATUS_QUERY}),
+            done,
+        )
+        status_frame = RawFrame(1, FLAG_STATUS_QUERY, 81, b"", b"")
+        with patch.object(
+            client_module,
+            "decode_frame",
+            return_value=DecodedFrame(status_frame, "status", None),
+        ):
+            await client._route_frame(status_frame)
+        self.assertEqual(client.responses, 1)
+
+        threshold = KC761Client("127.0.0.1", 1)
+        threshold.consecutive_protocol_errors = MAX_CONSECUTIVE_PROTOCOL_ERRORS - 1
+        with self.assertRaises(ConnectionError):
+            await threshold._route_frame(RawFrame(0, FLAG_STATUS_QUERY, 81, b"bad", b"bad"))
+
+        upload_received = []
+
+        async def on_upload(decoded) -> None:
+            upload_received.append(decoded.kind)
+
+        upload_client = KC761Client("127.0.0.1", 1, on_push=on_upload)
+        upload = FrameParser().feed(build_status_frame(2, upload=True))[0]
+        await upload_client._route_frame(upload)
+        self.assertEqual(upload_received, ["status"])
 
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:

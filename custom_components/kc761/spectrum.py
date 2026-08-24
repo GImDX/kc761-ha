@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import mkstemp
+from threading import RLock
 from typing import Any
 
 from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNT
@@ -136,6 +138,10 @@ class SpectrumSnapshot:
         source = int(value["source"])
         if not 0 <= source <= 2:
             raise ValueError("stored spectrum source outside 0..2")
+        counts = tuple(int(item) for item in value["counts"])
+        energy_kev = tuple(float(item) for item in value["energy_kev"])
+        if len(counts) != SPECTRUM_CHANNEL_COUNT or len(energy_kev) != len(counts):
+            raise ValueError("stored spectrum has an invalid length")
         snapshot = cls(
             snapshot_id=snapshot_id,
             source=source,
@@ -143,13 +149,11 @@ class SpectrumSnapshot:
             accumulation_seconds=(
                 None if value.get("accumulation_seconds") is None else int(value["accumulation_seconds"])
             ),
-            counts=tuple(int(item) for item in value["counts"]),
-            energy_kev=tuple(float(item) for item in value["energy_kev"]),
+            counts=counts,
+            energy_kev=energy_kev,
             segment_count=int(value["segment_count"]),
             calibration_profile=str(value["calibration_profile"]),
         )
-        if len(snapshot.counts) != SPECTRUM_CHANNEL_COUNT or len(snapshot.energy_kev) != len(snapshot.counts):
-            raise ValueError("stored spectrum has an invalid length")
         return snapshot
 
     def to_csv(self) -> str:
@@ -190,33 +194,50 @@ class SpectrumArchive:
         self.directory = directory
         self.maximum = maximum
         self._index: dict[str, dict[str, Any]] | None = None
+        self._index_dirty = False
+        self._lock = RLock()
 
     def save(self, snapshot: SpectrumSnapshot) -> None:
-        """Atomically save one gzip JSON file and prune only this archive directory."""
-        self.directory.mkdir(parents=True, exist_ok=True)
-        index = self._ensure_index()
-        destination = self._path(snapshot.snapshot_id)
-        temporary = destination.with_name(f".{destination.name}.tmp")
-        with gzip.open(temporary, "wt", encoding="utf-8", newline="\n") as handle:
-            json.dump(snapshot.to_storage(), handle, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temporary, destination)
-        index[snapshot.snapshot_id] = self._index_entry(destination, snapshot.metadata())
-        self._prune(index)
-        self._write_index(index)
+        """Atomically save gzip data; a sidecar failure is retried without hiding data."""
+        with self._lock:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            index = self._ensure_index()
+            destination = self._path(snapshot.snapshot_id)
+            temporary_fd, temporary_name = mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=self.directory
+            )
+            os.close(temporary_fd)
+            temporary = Path(temporary_name)
+            try:
+                with gzip.open(temporary, "wt", encoding="utf-8", newline="\n") as handle:
+                    json.dump(snapshot.to_storage(), handle, ensure_ascii=False, separators=(",", ":"))
+                os.replace(temporary, destination)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            index[snapshot.snapshot_id] = self._index_entry(destination, snapshot.metadata())
+            self._prune(index)
+            self._persist_index(index)
 
     def list_metadata(self) -> list[dict[str, Any]]:
         """Return newest-first metadata while skipping unreadable private files."""
-        if not self.directory.exists():
-            self._index = {}
-            return []
-        index = self._ensure_index()
-        changed = self._refresh_index(index)
-        if changed:
-            self._write_index(index)
-        return [dict(index[snapshot_id]["metadata"]) for snapshot_id in sorted(index, reverse=True)]
+        with self._lock:
+            if not self.directory.exists():
+                self._index = {}
+                return []
+            index = self._ensure_index()
+            changed = self._refresh_index(index)
+            if changed or self._index_dirty:
+                self._persist_index(index)
+            return [dict(index[snapshot_id]["metadata"]) for snapshot_id in sorted(index, reverse=True)]
 
     def load(self, snapshot_id: str) -> SpectrumSnapshot:
-        return self._load_path(self._path(snapshot_id))
+        with self._lock:
+            return self._load_path(self._path(snapshot_id))
 
     def _path(self, snapshot_id: str) -> Path:
         if not _SAFE_ID.fullmatch(snapshot_id):
@@ -239,9 +260,12 @@ class SpectrumArchive:
         if self._index is not None:
             return self._index
         index = self._read_index()
+        rebuilt = index is None
         if index is None:
             index = self._rebuild_index()
         self._index = index
+        if rebuilt:
+            self._persist_index(index)
         return index
 
     def _read_index(self) -> dict[str, dict[str, Any]] | None:
@@ -278,7 +302,6 @@ class SpectrumArchive:
                 index[snapshot_id] = self._index_entry(path, snapshot.metadata())
             except _ARCHIVE_ERRORS:
                 continue
-        self._write_index(index)
         return index
 
     def _refresh_index(self, index: dict[str, dict[str, Any]]) -> bool:
@@ -307,12 +330,13 @@ class SpectrumArchive:
                 snapshot = self._load_path(path)
                 if snapshot.snapshot_id != snapshot_id:
                     raise ValueError("stored spectrum ID does not match filename")
+                updated_entry = self._index_entry(path, snapshot.metadata())
             except _ARCHIVE_ERRORS:
                 if snapshot_id in index:
                     del index[snapshot_id]
                     changed = True
                 continue
-            index[snapshot_id] = self._index_entry(path, snapshot.metadata())
+            index[snapshot_id] = updated_entry
             seen.add(snapshot_id)
             changed = True
         for snapshot_id in tuple(index):
@@ -355,7 +379,11 @@ class SpectrumArchive:
 
     def _write_index(self, index: dict[str, dict[str, Any]]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        temporary = self._index_path.with_name(f".{_INDEX_FILENAME}.tmp")
+        temporary_fd, temporary_name = mkstemp(
+            prefix=f".{_INDEX_FILENAME}.", suffix=".tmp", dir=self.directory
+        )
+        os.close(temporary_fd)
+        temporary = Path(temporary_name)
         try:
             with temporary.open("w", encoding="utf-8", newline="\n") as handle:
                 json.dump(
@@ -373,6 +401,17 @@ class SpectrumArchive:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+            except OSError:
+                pass
+
+    def _persist_index(self, index: dict[str, dict[str, Any]]) -> bool:
+        try:
+            self._write_index(index)
+        except OSError:
+            self._index_dirty = True
+            return False
+        self._index_dirty = False
+        return True
 
     def _prune(self, index: dict[str, dict[str, Any]]) -> None:
         if len(index) <= self.maximum:
