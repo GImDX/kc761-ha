@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import shutil
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -44,11 +46,19 @@ def json_shape(value):
     return type(value).__name__
 
 
+def manifest_version_to_pep440(version: str) -> str:
+    """Map the integration's alpha manifest version to a PEP 440 version."""
+    match = re.fullmatch(r"(?P<base>\d+\.\d+\.\d+)-alpha\.(?P<number>\d+)", version)
+    if match is None:
+        raise ValueError(f"unsupported integration version: {version}")
+    return f"{match.group('base')}a{match.group('number')}"
+
+
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.36")
+        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+-alpha\.\d+$")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -57,6 +67,27 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertEqual(hacs, {"name": "KC761x", "homeassistant": "2026.7.0"})
         brand_dir = ROOT / "custom_components" / "kc761" / "brand"
         self.assertTrue((brand_dir / "icon.png").is_file())
+
+    def test_package_version_matches_manifest_pep440(self) -> None:
+        manifest = json.loads(
+            (ROOT / "custom_components" / "kc761" / "manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)
+        self.assertEqual(
+            project["project"]["version"],
+            manifest_version_to_pep440(manifest["version"]),
+        )
+        for manifest_version, expected in (
+            ("1.2.3-alpha.0", "1.2.3a0"),
+            ("10.20.30-alpha.42", "10.20.30a42"),
+        ):
+            with self.subTest(manifest_version=manifest_version):
+                self.assertEqual(manifest_version_to_pep440(manifest_version), expected)
+        with self.assertRaises(ValueError):
+            manifest_version_to_pep440("1.2.3")
 
     def test_frontend_and_manifest_versions_are_coherent(self) -> None:
         manifest = json.loads(
