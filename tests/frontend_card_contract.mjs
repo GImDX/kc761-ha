@@ -1179,37 +1179,54 @@ assert.equal(catchupCaptures, 1, "repeated visible events do not duplicate catch
 visibilityCard.disconnectedCallback();
 assert.equal(document._listeners.has("visibilitychange"), false, "disconnect removes visibility listener");
 
-// Theme variables are read once and refreshed only when HA reports a theme
-// source change; individual chart options use the cached values.
+// Theme variables are read once per animation frame, but the computed CSS
+// values—not only the HA theme name—remain authoritative.  Same-frame hass
+// updates coalesce and a disconnected card cancels the pending refresh.
 const originalGetComputedStyle = globalThis.getComputedStyle;
 let computedStyleCalls = 0;
+const computedThemeValues = {
+  "--graph-color-1": "#111111",
+  "--graph-color-2": "#222222",
+  "--graph-color-3": "#333333",
+  "--graph-color-4": "#444444",
+  "--graph-color-5": "#555555",
+  "--primary-text-color": "#eeeeee",
+  "--secondary-text-color": "#aaaaaa",
+  "--divider-color": "#555555",
+  "--card-background-color": "#1c1c1c",
+};
 globalThis.getComputedStyle = () => {
   computedStyleCalls += 1;
-  return { getPropertyValue: (name) => ({
-    "--graph-color-1": "#111111",
-    "--graph-color-2": "#222222",
-    "--graph-color-3": "#333333",
-    "--graph-color-4": "#444444",
-    "--graph-color-5": "#555555",
-    "--primary-text-color": "#eeeeee",
-    "--secondary-text-color": "#aaaaaa",
-    "--divider-color": "#555555",
-    "--card-background-color": "#1c1c1c",
-  }[name] || "") };
+  return { getPropertyValue: (name) => computedThemeValues[name] || "" };
 };
 const themeCard = new Card();
 themeCard.setConfig({ entity: "sensor.theme_spectrum" });
 const firstThemeRead = computedStyleCalls;
 themeCard._refreshColors();
-assert.equal(computedStyleCalls, firstThemeRead, "unchanged theme does not reread computed styles");
-themeCard._hass = { themes: { theme: "dark", darkMode: true } };
+assert.equal(computedStyleCalls, firstThemeRead + 1, "direct color refresh reads current CSS variables");
+const firstCurve = themeCard._colors.curve;
+computedThemeValues["--graph-color-1"] = "#abcdef";
 themeCard._refreshColors();
-const changedThemeRead = computedStyleCalls;
-themeCard._refreshColors();
-assert.equal(computedStyleCalls, changedThemeRead, "same HA theme source is cached");
-themeCard._hass = { themes: { theme: "light", darkMode: false } };
-themeCard._refreshColors();
-assert.ok(computedStyleCalls > changedThemeRead, "theme source changes refresh colors once");
+assert.ok(computedStyleCalls > firstThemeRead + 1, "same-name theme variable changes are observed");
+assert.notEqual(themeCard._colors.curve, firstCurve, "same-name theme variable updates the palette");
+assert.equal(themeCard.style.getPropertyValue("--kc761-spectrum-curve"), "#abcdef");
+themeCard.isConnected = true;
+themeCard.connectedCallback();
+assert.notEqual(themeCard._themeRefreshRaf, null, "connected cards schedule an initial color refresh");
+flushAnimationFrames();
+const beforeHassBurst = computedStyleCalls;
+themeCard.hass = { themes: { theme: "same", darkMode: false }, states: {} };
+themeCard.hass = { themes: { theme: "same", darkMode: false }, states: {} };
+assert.notEqual(themeCard._themeRefreshRaf, null, "hass updates schedule a color refresh");
+flushAnimationFrames();
+assert.equal(computedStyleCalls, beforeHassBurst + 1, "same-frame hass updates share one color refresh");
+themeCard.hass = { themes: { theme: "same", darkMode: false }, states: {} };
+const pendingThemeRefresh = themeCard._themeRefreshRaf;
+assert.notEqual(pendingThemeRefresh, null);
+themeCard.disconnectedCallback();
+assert.equal(themeCard._themeRefreshRaf, null, "disconnect cancels pending theme refresh");
+flushAnimationFrames();
+assert.equal(computedStyleCalls, beforeHassBurst + 1, "cancelled theme refresh leaves no late callback");
 globalThis.getComputedStyle = originalGetComputedStyle;
 
 const lifecycle = new Card();

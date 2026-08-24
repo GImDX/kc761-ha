@@ -1348,7 +1348,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._xAxisMode = DEFAULT_CARD_CONFIG.x_axis;
     this._historyLoaded = false;
     this._historyLoadPromise = null;
-    this._themeSourceSignature = null;
+    this._themeRefreshRaf = null;
     this._themeValues = {};
     this._colorsReady = false;
     this._diagnosticsEnabled = false;
@@ -1547,6 +1547,7 @@ class KC761SpectrumCard extends HTMLElement {
       has_y_axis: Object.prototype.hasOwnProperty.call(config, "y_axis"),
       diagnostics_enabled: normalized.diagnostics,
     });
+    this._cancelThemeRefresh();
     this._refreshColors();
     this._setYAxis(this._initialYAxis(normalized.y_axis, yAxisProvided));
     this._xAxisMode = normalized.x_axis === "channel" ? "channel" : "energy";
@@ -1564,6 +1565,7 @@ class KC761SpectrumCard extends HTMLElement {
       diagnosticsSetEnabled(true);
       diagnosticsAttachCard(this);
     }
+    this._scheduleThemeRefresh();
     this._installVisibilityListener();
     this._ensureLayoutObserver();
     this._applyPresentationMode();
@@ -1577,6 +1579,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._drawToken += 1;
     this._flushViewState();
     this._stopAutoRefresh();
+    this._cancelThemeRefresh();
     this._removeVisibilityListener();
     this._refreshAfterVisible = false;
     this._clearEditorHandoffRetry();
@@ -1600,7 +1603,7 @@ class KC761SpectrumCard extends HTMLElement {
     }
     this._hass = hass;
     if (!this._config) return;
-    this._refreshColors();
+    this._scheduleThemeRefresh();
     if (!this._config.entity) {
       this._entryId = null;
       this._device = null;
@@ -3091,16 +3094,25 @@ class KC761SpectrumCard extends HTMLElement {
     this._chartResizeRaf = null;
   }
 
-  _currentThemeSignature() {
-    const themes = this._hass?.themes;
-    return [themes?.theme, themes?.darkMode, themes?.default_theme, themes?.default_theme_name]
-      .map((value) => value == null ? "" : String(value))
-      .join("|");
+  _scheduleThemeRefresh() {
+    if (this._themeRefreshRaf !== null) return;
+    const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    this._themeRefreshRaf = request(() => {
+      this._themeRefreshRaf = null;
+      if (this._detached) return;
+      if (this._refreshColors() && this._chart) this._draw();
+    });
   }
 
-  _refreshColors(force = false) {
-    const themeSignature = this._currentThemeSignature();
-    if (!force && this._colorsReady && this._themeSourceSignature === themeSignature) return;
+  _cancelThemeRefresh() {
+    if (this._themeRefreshRaf === null) return;
+    const cancel = globalThis.cancelAnimationFrame || ((id) => clearTimeout(id));
+    cancel(this._themeRefreshRaf);
+    this._themeRefreshRaf = null;
+  }
+
+  _refreshColors() {
+    const wasReady = this._colorsReady;
     let computed;
     try {
       computed = getComputedStyle(this);
@@ -3125,8 +3137,6 @@ class KC761SpectrumCard extends HTMLElement {
       const value = computed?.getPropertyValue(name)?.trim();
       if (value) themeValues[name] = value;
     });
-    this._colors = colors;
-    this._themeValues = themeValues;
     const customColors = {
       "--kc761-spectrum-curve": colors.curve,
       "--kc761-spectrum-roi-start": colors.roiStart,
@@ -3134,11 +3144,19 @@ class KC761SpectrumCard extends HTMLElement {
       "--kc761-spectrum-peak": colors.peak,
       "--kc761-spectrum-data": colors.dataCursor,
     };
+    const colorChanged = Object.keys(colors).some((name) => this._colors?.[name] !== colors[name]);
+    const themeChanged = ["--primary-text-color", "--secondary-text-color", "--divider-color", "--card-background-color"]
+      .some((name) => (this._themeValues?.[name] || "") !== (themeValues[name] || ""));
+    let styleChanged = false;
     Object.entries(customColors).forEach(([name, value]) => {
-      if (this.style?.getPropertyValue?.(name) !== value) this.style.setProperty(name, value);
+      if (this.style?.getPropertyValue?.(name) === value) return;
+      styleChanged = true;
+      this.style?.setProperty?.(name, value);
     });
-    this._themeSourceSignature = themeSignature;
+    this._colors = colors;
+    this._themeValues = themeValues;
     this._colorsReady = true;
+    return !wasReady || colorChanged || themeChanged || styleChanged;
   }
 
   _themeValue(name, fallback) {
