@@ -256,6 +256,33 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         assert info is not None
         self._attr_unique_id = f"{info.device_id}_spectrum"
         self._attr_device_info = kc761_device_info(info)
+        self._spectrum_update_seen = False
+        self._last_spectrum = None
+        self._last_available = None
+        self._last_hardware_verified = None
+        self._last_device_id = None
+
+    def _handle_coordinator_update(self) -> None:
+        """Avoid a large state serialization when the spectrum did not change."""
+        spectrum = self.coordinator.latest_spectrum
+        available = self.available
+        info = self.coordinator.device_info
+        hardware_verified = self.coordinator.hardware_verified
+        device_id = None if info is None else info.device_id
+        if (
+            self._spectrum_update_seen
+            and spectrum is self._last_spectrum
+            and available == self._last_available
+            and hardware_verified == self._last_hardware_verified
+            and device_id == self._last_device_id
+        ):
+            return
+        self._spectrum_update_seen = True
+        self._last_spectrum = spectrum
+        self._last_available = available
+        self._last_hardware_verified = hardware_verified
+        self._last_device_id = device_id
+        super()._handle_coordinator_update()
 
     @property
     def native_value(self) -> int | None:

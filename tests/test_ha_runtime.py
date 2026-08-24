@@ -1370,3 +1370,49 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         assert "AB" not in str(result)
 
     run(exercise())
+
+
+def test_spectrum_entity_skips_unchanged_coordinator_updates() -> None:
+    info = make_info((2, 0, 0))
+    coordinator = SimpleNamespace(
+        device_info=info,
+        latest_spectrum=SpectrumSnapshot.create(
+            source=0,
+            acquired_at=datetime(2025, 1, 1, tzinfo=UTC),
+            accumulation_seconds=1,
+            counts=(1,) * 2048,
+            energy_kev=(0.0,) * 2048,
+            segment_count=1,
+            calibration_profile="factory:1",
+        ),
+        hardware_verified=False,
+        last_update_success=True,
+        entry=SimpleNamespace(entry_id="entry-1"),
+    )
+    with patch.object(
+        sensor_module.CoordinatorEntity,
+        "__init__",
+        lambda self, value: setattr(self, "coordinator", value),
+    ):
+        entity = sensor_module.KC761SpectrumSensor(coordinator)
+    entity.async_write_ha_state = MagicMock()
+
+    entity._handle_coordinator_update()
+    entity._handle_coordinator_update()
+    assert entity.async_write_ha_state.call_count == 1
+
+    coordinator.latest_spectrum = SpectrumSnapshot.create(
+        source=0,
+        acquired_at=datetime(2025, 1, 1, 0, 0, 1, tzinfo=UTC),
+        accumulation_seconds=1,
+        counts=(1,) * 2048,
+        energy_kev=(0.0,) * 2048,
+        segment_count=1,
+        calibration_profile="factory:1",
+    )
+    entity._handle_coordinator_update()
+    assert entity.async_write_ha_state.call_count == 2
+
+    coordinator.last_update_success = False
+    entity._handle_coordinator_update()
+    assert entity.async_write_ha_state.call_count == 3

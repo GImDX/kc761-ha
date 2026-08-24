@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from custom_components.kc761.spectrum import SpectrumArchive, SpectrumSnapshot
 
@@ -32,6 +33,8 @@ class SpectrumSnapshotTests(unittest.TestCase):
         self.assertEqual(value.channel_name, "gamma")
         self.assertEqual(value.total_counts, sum(range(2048)))
         attributes = value.entity_attributes()
+        self.assertIs(attributes, value.entity_attributes())
+        self.assertIs(attributes["points"], value.entity_attributes()["points"])
         self.assertEqual(attributes["point_count"], 2048)
         self.assertEqual(attributes["points"][7], [7, 3.5, 7])
         csv_text = value.to_csv()
@@ -85,6 +88,65 @@ class SpectrumArchiveTests(unittest.TestCase):
             self.assertEqual(metadata[0]["snapshot_id"], values[2].snapshot_id)
             self.assertEqual(archive.load(values[1].snapshot_id), values[1])
             self.assertFalse((Path(directory) / f"{values[0].snapshot_id}.json.gz").exists())
+
+    def test_index_survives_restart_without_reloading_unchanged_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            values = [snapshot(minute=index) for index in range(2)]
+            archive = SpectrumArchive(path)
+            for value in values:
+                archive.save(value)
+            self.assertTrue((path / ".metadata.json").exists())
+
+            restarted = SpectrumArchive(path)
+            self.assertEqual(
+                [item["snapshot_id"] for item in restarted.list_metadata()],
+                [value.snapshot_id for value in reversed(values)],
+            )
+            with patch.object(
+                SpectrumArchive,
+                "_load_path",
+                side_effect=AssertionError("unchanged list must use the metadata index"),
+            ):
+                self.assertEqual(restarted.list_metadata()[0]["total_counts"], sum(range(2048)))
+            self.assertEqual(restarted.load(values[0].snapshot_id), values[0])
+
+    def test_missing_or_corrupt_index_migrates_old_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            values = [snapshot(minute=index) for index in range(2)]
+            path.mkdir(exist_ok=True)
+            for value in values:
+                with gzip.open(path / f"{value.snapshot_id}.json.gz", "wt", encoding="utf-8") as handle:
+                    json.dump(value.to_storage(), handle)
+
+            archive = SpectrumArchive(path)
+            self.assertEqual(len(archive.list_metadata()), 2)
+            self.assertTrue((path / ".metadata.json").exists())
+            (path / ".metadata.json").write_text("{broken", encoding="utf-8")
+            restarted = SpectrumArchive(path)
+            self.assertEqual(
+                [item["snapshot_id"] for item in restarted.list_metadata()],
+                [value.snapshot_id for value in reversed(values)],
+            )
+
+    def test_changed_corrupt_spectrum_is_removed_from_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = SpectrumArchive(path)
+            value = snapshot()
+            archive.save(value)
+            self.assertEqual(len(archive.list_metadata()), 1)
+            (path / f"{value.snapshot_id}.json.gz").write_bytes(b"corrupt")
+            self.assertEqual(archive.list_metadata(), [])
+            with self.assertRaises((OSError, ValueError)):
+                archive.load(value.snapshot_id)
+
+    def test_getter_does_not_touch_filesystem(self) -> None:
+        value = snapshot()
+        with patch("pathlib.Path.open", side_effect=AssertionError("getter performed I/O")):
+            self.assertEqual(value.total_counts, sum(range(2048)))
+            self.assertEqual(value.entity_attributes()["points"][2047], [2047, 1023.5, 2047])
 
     def test_rejects_path_traversal_and_skips_corruption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

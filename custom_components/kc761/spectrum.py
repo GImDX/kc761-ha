@@ -9,7 +9,7 @@ import io
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,10 @@ from typing import Any
 from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNT
 
 _SAFE_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-2]-[0-9a-f]{12}$")
+_ARCHIVE_SUFFIX = ".json.gz"
+_INDEX_FILENAME = ".metadata.json"
+_INDEX_VERSION = 1
+_ARCHIVE_ERRORS = (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +35,31 @@ class SpectrumSnapshot:
     energy_kev: tuple[float, ...]
     segment_count: int
     calibration_profile: str
+    _total_counts: int = field(init=False, repr=False, compare=False)
+    _metadata: dict[str, Any] = field(init=False, repr=False, compare=False)
+    _entity_attributes: dict[str, Any] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Build immutable-snapshot payloads once instead of per state update."""
+        total_counts = sum(self.counts)
+        metadata = {
+            "snapshot_id": self.snapshot_id,
+            "source": self.source,
+            "channel": self.channel_name,
+            "acquired_at": self.acquired_at.isoformat(),
+            "accumulation_seconds": self.accumulation_seconds,
+            "point_count": len(self.counts),
+            "total_counts": total_counts,
+            "segment_count": self.segment_count,
+            "calibration_profile": self.calibration_profile,
+        }
+        points = [
+            [channel, round(self.energy_kev[channel], 8), self.counts[channel]]
+            for channel in range(len(self.counts))
+        ]
+        object.__setattr__(self, "_total_counts", total_counts)
+        object.__setattr__(self, "_metadata", metadata)
+        object.__setattr__(self, "_entity_attributes", {**metadata, "points": points})
 
     @classmethod
     def create(
@@ -73,7 +102,7 @@ class SpectrumSnapshot:
 
     @property
     def total_counts(self) -> int:
-        return sum(self.counts)
+        return self._total_counts
 
     @property
     def channel_name(self) -> str:
@@ -81,26 +110,16 @@ class SpectrumSnapshot:
 
     def metadata(self) -> dict[str, Any]:
         """Return bounded metadata suitable for history lists and Recorder."""
-        return {
-            "snapshot_id": self.snapshot_id,
-            "source": self.source,
-            "channel": self.channel_name,
-            "acquired_at": self.acquired_at.isoformat(),
-            "accumulation_seconds": self.accumulation_seconds,
-            "point_count": len(self.counts),
-            "total_counts": self.total_counts,
-            "segment_count": self.segment_count,
-            "calibration_profile": self.calibration_profile,
-        }
+        return dict(self._metadata)
 
     def entity_attributes(self) -> dict[str, Any]:
-        """Return one structured entity payload; points are excluded from Recorder."""
-        result = self.metadata()
-        result["points"] = [
-            [channel, round(self.energy_kev[channel], 8), self.counts[channel]]
-            for channel in range(len(self.counts))
-        ]
-        return result
+        """Return one cached structured entity payload; points are excluded from Recorder.
+
+        A snapshot is immutable and Home Assistant treats the returned state
+        attributes as read-only.  Keeping this object cached avoids rebuilding
+        2048 point triples for every coordinator state write.
+        """
+        return self._entity_attributes
 
     def to_storage(self) -> dict[str, Any]:
         return {
@@ -114,9 +133,12 @@ class SpectrumSnapshot:
         snapshot_id = str(value["snapshot_id"])
         if not _SAFE_ID.fullmatch(snapshot_id):
             raise ValueError("invalid spectrum snapshot ID")
+        source = int(value["source"])
+        if not 0 <= source <= 2:
+            raise ValueError("stored spectrum source outside 0..2")
         snapshot = cls(
             snapshot_id=snapshot_id,
-            source=int(value["source"]),
+            source=source,
             acquired_at=datetime.fromisoformat(str(value["acquired_at"])).astimezone(UTC),
             accumulation_seconds=(
                 None if value.get("accumulation_seconds") is None else int(value["accumulation_seconds"])
@@ -167,26 +189,31 @@ class SpectrumArchive:
     def __init__(self, directory: Path, *, maximum: int = MAX_SAVED_SPECTRA) -> None:
         self.directory = directory
         self.maximum = maximum
+        self._index: dict[str, dict[str, Any]] | None = None
 
     def save(self, snapshot: SpectrumSnapshot) -> None:
         """Atomically save one gzip JSON file and prune only this archive directory."""
         self.directory.mkdir(parents=True, exist_ok=True)
+        index = self._ensure_index()
         destination = self._path(snapshot.snapshot_id)
         temporary = destination.with_name(f".{destination.name}.tmp")
         with gzip.open(temporary, "wt", encoding="utf-8", newline="\n") as handle:
             json.dump(snapshot.to_storage(), handle, ensure_ascii=False, separators=(",", ":"))
         os.replace(temporary, destination)
-        self._prune()
+        index[snapshot.snapshot_id] = self._index_entry(destination, snapshot.metadata())
+        self._prune(index)
+        self._write_index(index)
 
     def list_metadata(self) -> list[dict[str, Any]]:
         """Return newest-first metadata while skipping unreadable private files."""
-        result: list[dict[str, Any]] = []
-        for path in sorted(self.directory.glob("*.json.gz"), reverse=True) if self.directory.exists() else []:
-            try:
-                result.append(self._load_path(path).metadata())
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                continue
-        return result
+        if not self.directory.exists():
+            self._index = {}
+            return []
+        index = self._ensure_index()
+        changed = self._refresh_index(index)
+        if changed:
+            self._write_index(index)
+        return [dict(index[snapshot_id]["metadata"]) for snapshot_id in sorted(index, reverse=True)]
 
     def load(self, snapshot_id: str) -> SpectrumSnapshot:
         return self._load_path(self._path(snapshot_id))
@@ -204,7 +231,155 @@ class SpectrumArchive:
             raise ValueError("stored spectrum root is not an object")
         return SpectrumSnapshot.from_storage(value)
 
-    def _prune(self) -> None:
-        paths = sorted(self.directory.glob("*.json.gz"), reverse=True)
-        for path in paths[self.maximum :]:
-            path.unlink()
+    @property
+    def _index_path(self) -> Path:
+        return self.directory / _INDEX_FILENAME
+
+    def _ensure_index(self) -> dict[str, dict[str, Any]]:
+        if self._index is not None:
+            return self._index
+        index = self._read_index()
+        if index is None:
+            index = self._rebuild_index()
+        self._index = index
+        return index
+
+    def _read_index(self) -> dict[str, dict[str, Any]] | None:
+        try:
+            with self._index_path.open("r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict) or value.get("version") != _INDEX_VERSION:
+            return None
+        entries = value.get("entries")
+        if not isinstance(entries, dict):
+            return None
+        normalized: dict[str, dict[str, Any]] = {}
+        for snapshot_id, entry in entries.items():
+            if not isinstance(snapshot_id, str) or not self._valid_index_entry(snapshot_id, entry):
+                return None
+            normalized[snapshot_id] = entry
+        return normalized
+
+    def _rebuild_index(self) -> dict[str, dict[str, Any]]:
+        """Migrate old archives or recover from a missing/corrupt index once."""
+        index: dict[str, dict[str, Any]] = {}
+        if not self.directory.exists():
+            return index
+        for path in self.directory.glob(f"*{_ARCHIVE_SUFFIX}"):
+            snapshot_id = path.name[: -len(_ARCHIVE_SUFFIX)]
+            if not _SAFE_ID.fullmatch(snapshot_id):
+                continue
+            try:
+                snapshot = self._load_path(path)
+                if snapshot.snapshot_id != snapshot_id:
+                    continue
+                index[snapshot_id] = self._index_entry(path, snapshot.metadata())
+            except _ARCHIVE_ERRORS:
+                continue
+        self._write_index(index)
+        return index
+
+    def _refresh_index(self, index: dict[str, dict[str, Any]]) -> bool:
+        """Refresh changed/new files without decompressing unchanged snapshots."""
+        changed = False
+        seen: set[str] = set()
+        for path in self.directory.glob(f"*{_ARCHIVE_SUFFIX}"):
+            snapshot_id = path.name[: -len(_ARCHIVE_SUFFIX)]
+            if not _SAFE_ID.fullmatch(snapshot_id):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                index.pop(snapshot_id, None)
+                changed = True
+                continue
+            entry = index.get(snapshot_id)
+            if (
+                entry is not None
+                and entry.get("size") == stat.st_size
+                and entry.get("mtime_ns") == stat.st_mtime_ns
+            ):
+                seen.add(snapshot_id)
+                continue
+            try:
+                snapshot = self._load_path(path)
+                if snapshot.snapshot_id != snapshot_id:
+                    raise ValueError("stored spectrum ID does not match filename")
+            except _ARCHIVE_ERRORS:
+                if snapshot_id in index:
+                    del index[snapshot_id]
+                    changed = True
+                continue
+            index[snapshot_id] = self._index_entry(path, snapshot.metadata())
+            seen.add(snapshot_id)
+            changed = True
+        for snapshot_id in tuple(index):
+            if snapshot_id not in seen and not self._path(snapshot_id).exists():
+                del index[snapshot_id]
+                changed = True
+        return changed
+
+    @staticmethod
+    def _index_entry(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+        stat = path.stat()
+        return {
+            "metadata": dict(metadata),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+
+    @staticmethod
+    def _valid_index_entry(snapshot_id: str, entry: Any) -> bool:
+        if not _SAFE_ID.fullmatch(snapshot_id) or not isinstance(entry, dict):
+            return False
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("snapshot_id") != snapshot_id:
+            return False
+        if metadata.get("source") not in (0, 1, 2):
+            return False
+        if metadata.get("channel") not in CHANNEL_KEYS:
+            return False
+        if metadata.get("point_count") != SPECTRUM_CHANNEL_COUNT:
+            return False
+        if not isinstance(metadata.get("acquired_at"), str):
+            return False
+        if not isinstance(metadata.get("total_counts"), int):
+            return False
+        if not isinstance(metadata.get("segment_count"), int):
+            return False
+        if not isinstance(metadata.get("calibration_profile"), str):
+            return False
+        return isinstance(entry.get("size"), int) and isinstance(entry.get("mtime_ns"), int)
+
+    def _write_index(self, index: dict[str, dict[str, Any]]) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temporary = self._index_path.with_name(f".{_INDEX_FILENAME}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(
+                    {"version": _INDEX_VERSION, "entries": index},
+                    handle,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._index_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _prune(self, index: dict[str, dict[str, Any]]) -> None:
+        if len(index) <= self.maximum:
+            return
+        for snapshot_id in sorted(index, reverse=True)[self.maximum :]:
+            try:
+                self._path(snapshot_id).unlink()
+            except FileNotFoundError:
+                pass
+            del index[snapshot_id]
