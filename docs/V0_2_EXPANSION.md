@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.36`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.37`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载且不依赖 Lovelace 配置保存；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -445,6 +445,12 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 谱图片段完成状态采用增量跟踪；`.metadata.json` v1 仅是可重建的历史列表索引，`*.json.gz` 仍是完整数据权威来源。索引缺失、损坏或版本不兼容时扫描并校验旧 gzip 后重建，索引写失败不影响已保存数据，最多 256 条保留和已有快照格式不变。升级兼容和恢复语义详见 [性能记录](PERFORMANCE.md)。
 - 本轮本机合成/临时归档基准为：`history256` `2511.187→4.590 ms`（约 547×）；`frontend2048/3000` `1120.12→107.19 ms`（约 10.45×）；fragment 1/16/128/512 道分别为 `51.399→0.751`、`3.723→0.282`、`0.575→0.300`、`0.251→0.252 ms`。这些数字不是树莓派、Chrome Performance Profile、真实 HA 或 ECharts DOM 证据；branch coverage 当前为 `96.48%`，达到 95% 门禁。
 - points 移出 state、ECharts 增量 option/Canvas、transport priority scheduler 和错误卡扫描进一步收缩均暂缓，必须另行决策并以真实 profile 验证；alpha35 的历史部署和错误卡证据保持原样，不被 alpha.36 的本地基准覆盖。
+
+### 8.32 `0.2.0-alpha.37`：Saved spectrum 普通视图资源版本收尾
+
+- alpha.37 只提升集成、卡片和 ECharts 资源的统一 cache-busting 版本；不改变协议命令、实体、WebSocket 类型、Lovelace 配置 schema、视图状态 schema 或历史归档格式。
+- Saved spectrum 是普通仪表盘运行时控件，不依赖 Lovelace 配置保存；普通视图不预取历史谱图，只有打开历史选择器或进入编辑预览时才惰性加载，重复请求继续共享同一个 Promise。
+- alpha.35 与 alpha.36 的部署、性能和浏览器证据保持历史记录，不被本次版本收尾改写。
 
 本地合并后继续测试的剩余门禁：
 

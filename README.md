@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.36`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；alpha.36 的前端与谱图归档性能记录见 [性能记录](docs/PERFORMANCE.md)。此前 alpha.23 已整合一台授权 KC761 的 BLE 服务/GATT/只读协议证据：显式 BLE address 连接默认约束实测服务 UUID，兼容固件可显式覆盖，不启用跨型号自动发现；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
+当前开发版本为 `0.2.0-alpha.37`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载，不依赖 Lovelace 配置保存；alpha.36 的前端与谱图归档性能记录见 [性能记录](docs/PERFORMANCE.md)。此前 alpha.23 已整合一台授权 KC761 的 BLE 服务/GATT/只读协议证据：显式 BLE address 连接默认约束实测服务 UUID，兼容固件可显式覆盖，不启用跨型号自动发现；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
 
 alpha.31 延续 alpha.28 的暂态缺失配置保护，并将可选 `diagnostics: true` 测试诊断升级为 schema 4：普通生命周期事件仍保留有界环形记录，连续的 HA readiness 噪声会合并；错误事件按稳定脱敏签名去重，并另存于不会被普通事件挤出的有界 `failures` 环中。诊断会在当前浏览器 tab 的 `sessionStorage` 中脱敏保存，可记录窗口错误、未处理 rejection 以及递归发现的开放 Shadow DOM 中的 Lovelace `hui-error-card`。除卡片内 `Export diagnostics` 外，启用诊断后还会在页面 body 放置一个固定、可访问且不占布局空间的 `Export KC761 diagnostics` 按钮；点击时以 256 个 root、10000 个节点和约 100ms 为界限做一次深层快照，弥补持续 observer 的 root 上限，并只生成本地 JSON 下载。ResizeObserver 的布局/图表重绘统一延后到 requestAnimationFrame，避免同步 resize 触发循环；默认关闭时不写存储、不注册监听器、不显示按钮；不会上传实体、状态、点阵、设备 ID、主机或凭据。
 
