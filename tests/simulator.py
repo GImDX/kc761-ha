@@ -41,6 +41,10 @@ class SimulatorScenario:
     unknown_prefix: bytes = b""
     coalesce_push: bool = False
     push_upload: bool = False
+    auto_upload_spectrum: bool = False
+    auto_upload_source: int = 0
+    auto_upload_reverse_order: bool = False
+    auto_upload_duplicate_first: bool = False
     close_after_response: bool = False
     status_kwargs: dict[str, object] = field(default_factory=dict)
     ack_status: int = 0
@@ -138,16 +142,15 @@ class Kc761Simulator:
                         command if ack_command is None else ack_command,
                         status=self.scenario.ack_status,
                     )
-                if self.scenario.push_upload and self.scenario.coalesce_push:
-                    response = (
-                        build_status_frame(
-                            sync,
-                            upload=True,
-                            auto_upload_status=1,
-                            **self.scenario.status_kwargs,
-                        )
-                        + response
-                    )
+                if self.scenario.push_upload and (
+                    self.scenario.coalesce_push or self.scenario.auto_upload_spectrum
+                ):
+                    upload_status_kwargs = dict(self.scenario.status_kwargs)
+                    upload_status_kwargs["auto_upload_status"] = 1
+                    push = build_status_frame(sync, upload=True, **upload_status_kwargs)
+                    if self.scenario.auto_upload_spectrum:
+                        push += self._build_auto_upload_spectrum()
+                    response = push + response
                 if self.scenario.unknown_prefix:
                     response = self.scenario.unknown_prefix + response
                 if self.scenario.malformed_length is not None:
@@ -217,6 +220,26 @@ class Kc761Simulator:
             )
             for offset in offsets
         )
+
+    def _build_auto_upload_spectrum(self) -> bytes:
+        source = self.scenario.auto_upload_source
+        step = self.scenario.spectrum_fragment_size
+        offsets = list(range(0, 2048, step))
+        if self.scenario.auto_upload_reverse_order:
+            offsets.reverse()
+        frames = [
+            build_spectrum_frame(
+                0,
+                source=source,
+                offset=offset,
+                counts=tuple(offset + index for index in range(min(step, 2048 - offset))),
+                upload=True,
+            )
+            for offset in offsets
+        ]
+        if self.scenario.auto_upload_duplicate_first and frames:
+            frames.insert(1, frames[0])
+        return b"".join(frames)
 
     def _apply_write(self, command: int, request: bytes) -> None:
         if command == CMD_SET_STA:

@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.38`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载且不依赖 Lovelace 配置保存；alpha.38 将 TCP/BLE 配置拆分为传输选择和端点步骤，并从 HA Bluetooth 广播列表提供 BLE 地址自动选择及手动回退；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.39`，在 alpha35 的谱图卡与生命周期基础上补齐 A5 三通道累计字段普通实体、A6 七个校准只读实体、A1 自动上传谱图分片有界重组和对应协议/HA 测试；谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.37 保持 Saved spectrum 为普通仪表盘运行时控件，历史谱图按需惰性加载且不依赖 Lovelace 配置保存；alpha.38 将 TCP/BLE 配置拆分为传输选择和端点步骤，并从 HA Bluetooth 广播列表提供 BLE 地址自动选择及手动回退；alpha.23 另整合一台授权 BLE 设备的服务/GATT/只读协议证据；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -48,7 +48,7 @@ Device Registry 使用：
 
 当前资料不能可靠确认制造商标准名称，因此不填写 `manufacturer`。
 
-设备级实体包括电池、气压、设备温度、设备时间、时钟偏差、协处理器固件版本、设备唯一 ID，以及 Gamma、Neutron、PIN 三个固定通道的传感器型号。即使某通道未安装，也保留其型号实体并显示“未安装”，使设备信息完整且稳定。
+设备级实体包括电池、气压、设备温度、设备时间、时钟偏差、协处理器固件版本、设备唯一 ID、A6 七个校准只读字段，以及 Gamma、Neutron、PIN 三个固定通道的传感器型号。即使某通道未安装，也保留其型号实体并显示“未安装”，使设备信息完整且稳定。
 
 传感器型号映射：
 
@@ -63,7 +63,7 @@ Device Registry 使用：
 | `0x08` | KC7601.31 6Li |
 | 其它 | `Unknown (0xNN)` |
 
-已安装通道继续创建 AVG 测量实体；本设备 AVG 恒为 0 的行为按 `KI-AVG-001` 已知问题接受。raw 实体仍由 Options 显式选择是否创建。
+已安装通道继续创建 AVG 测量实体和四个 A5 累计普通实体；累计实体的时间单位为秒，剂量/剂量当量单位为 `mGy`/`mSv`，不设置 state class，因为 `0x66` 清空会重置它们。本设备 AVG 恒为 0 的行为按 `KI-AVG-001` 已知问题接受。raw 实体仍由 Options 显式选择是否创建。
 
 ## 3. 非破坏性控制实体
 
@@ -109,7 +109,7 @@ Device Registry 使用：
 
 `points` 在 HA 当前状态机和 WebSocket 中可用，供前端卡绘图，但通过实体 `_unrecorded_attributes` 明确排除在 Recorder 外。Recorder 只保留谱图总计数和有界元数据，不把 2048 点数组复制进每次状态历史。
 
-完整谱图由同一 SYNC 下的 A0 分片按 source/offset 重组。当前本设备已确认 4×512 道；实现仍按覆盖恰好 2048 道判断完成，支持乱序、分片 TCP、重叠一致片段，并拒绝 source 不符、越界或重叠冲突。
+完整谱图由 A0 主动响应或 A3/A1 自动上传轮次按 source/offset 重组。A1 以 A3 状态帧作为轮次边界，在固定 2048 道缓冲内隔离通道，支持乱序和精确重复；缺片不会发布，冲突、越界、断线或新的 A3 轮次会丢弃未完成组。完整数据沿用现有 `SpectrumSnapshot`、能量校准和 HA/WebSocket 接口，不实现 A4。
 
 能量值由同连接读取的 A6 校准数据计算。Gamma 支持工厂单段、工厂三段和自定义标定选择；Neutron、PIN 使用各自工厂多项式。读取和绘图不开放 `0x64` 校准写入。
 
@@ -457,6 +457,12 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - Config Flow 首步只显示传输方式，选定 `TCP` 后只显示 host/port，选定 `BLE` 后只显示 BLE address/service UUID；reconfigure 使用同样的两步结构，保留原有 DEVICE_ID 一致性门禁和跨传输端点键清理。
 - BLE 地址字段使用 HA `SelectSelector` 的 `custom_value` 模式：优先列出 active connectable scanner 的广播缓存，打开步骤时触发一次短时主动扫描；没有扫描器或广播时仍可手动输入地址。地址选择不会连接设备，提交后才执行现有 BLE preflight。
 - 传输选项显示为大写 `TCP`/`BLE`；仅保留 BLE 地址与服务 UUID 字段，避免 TCP 与 BLE 端点混在同一表单。
+
+### 8.34 `0.2.0-alpha.39`：实体补全与自动上传谱图合并
+
+- 合并 `codex/entity-completion` 后，A5 三通道累计时间、累计剂量和累计剂量当量以普通实体公开；A6 校准响应新增七个只读字段实体，并继续保留原始解析值和 `hardware_verified=false` 约束。
+- A3 自动上传状态帧作为一轮边界，A1 分片按通道和偏移进行有界、可重排、去重重组；仅在完整 2048 道快照形成后更新结构化谱图实体，连接重建、重配置和卸载时清空部分状态。
+- 当前 alpha.39 仅完成本地合并与自动化门禁；真实设备上的累计量单位、其它型号/传感器组合和自动上传跨固件行为仍待专门实机确认。
 
 本地合并后继续测试的剩余门禁：
 

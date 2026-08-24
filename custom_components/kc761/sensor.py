@@ -24,7 +24,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .coordinator import KC761Coordinator
 from .entity import kc761_device_info
 from .protocol.codec import CODEC_PROFILE
-from .protocol.models import ChannelReading
+from .protocol.models import CalibrationData, ChannelReading
 from .protocol.codec import sensor_name
 
 
@@ -36,6 +36,8 @@ class KC761SensorDescription(SensorEntityDescription):
     value_key: str
     channel_index: int | None = None
     raw_reading: bool = False
+    cumulative_key: str | None = None
+    calibration_key: str | None = None
 
 
 DEVICE_DESCRIPTIONS = (
@@ -102,6 +104,50 @@ DEVICE_DESCRIPTIONS = (
         translation_key="pin_sensor_model",
         value_key="sensor_type_2",
     ),
+    KC761SensorDescription(
+        key="rad0_trigger_offset",
+        translation_key="rad0_trigger_offset",
+        value_key="",
+        calibration_key="rad0_trigger_offset",
+    ),
+    KC761SensorDescription(
+        key="rad2_trigger_offset",
+        translation_key="rad2_trigger_offset",
+        value_key="",
+        calibration_key="rad2_trigger_offset",
+    ),
+    KC761SensorDescription(
+        key="rad0_dose_zoom",
+        translation_key="rad0_dose_zoom",
+        value_key="",
+        calibration_key="rad0_dose_zoom",
+    ),
+    KC761SensorDescription(
+        key="rad1_dose_zoom",
+        translation_key="rad1_dose_zoom",
+        value_key="",
+        calibration_key="rad1_dose_zoom",
+    ),
+    KC761SensorDescription(
+        key="rad2_dose_zoom",
+        translation_key="rad2_dose_zoom",
+        value_key="",
+        calibration_key="rad2_dose_zoom",
+    ),
+    KC761SensorDescription(
+        key="neu_window_center",
+        translation_key="neu_window_center",
+        native_unit_of_measurement="ch",
+        value_key="",
+        calibration_key="neu_window_center",
+    ),
+    KC761SensorDescription(
+        key="altitude_m_offset",
+        translation_key="altitude_m_offset",
+        native_unit_of_measurement="m",
+        value_key="",
+        calibration_key="altitude_m_offset",
+    ),
 )
 
 
@@ -167,6 +213,44 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
                     raw_reading=True,
                     icon="mdi:radioactive",
                 ),
+                KC761SensorDescription(
+                    key=f"{channel}_spectrum_runtime",
+                    translation_key=f"{channel}_spectrum_runtime",
+                    native_unit_of_measurement=UnitOfTime.SECONDS,
+                    device_class=SensorDeviceClass.DURATION,
+                    value_key="spectrum_runtime",
+                    channel_index=index,
+                    cumulative_key="spectrum_runtime",
+                    icon="mdi:timer-outline",
+                ),
+                KC761SensorDescription(
+                    key=f"{channel}_dose_runtime",
+                    translation_key=f"{channel}_dose_runtime",
+                    native_unit_of_measurement=UnitOfTime.SECONDS,
+                    device_class=SensorDeviceClass.DURATION,
+                    value_key="dose_runtime",
+                    channel_index=index,
+                    cumulative_key="dose_runtime",
+                    icon="mdi:timer-outline",
+                ),
+                KC761SensorDescription(
+                    key=f"{channel}_cumulative_dose",
+                    translation_key=f"{channel}_cumulative_dose",
+                    native_unit_of_measurement="mGy",
+                    value_key="cumulative_dose",
+                    channel_index=index,
+                    cumulative_key="cumulative_dose",
+                    icon="mdi:radioactive",
+                ),
+                KC761SensorDescription(
+                    key=f"{channel}_cumulative_dose_equivalent",
+                    translation_key=f"{channel}_cumulative_dose_equivalent",
+                    native_unit_of_measurement="mSv",
+                    value_key="cumulative_dose_equivalent",
+                    channel_index=index,
+                    cumulative_key="cumulative_dose_equivalent",
+                    icon="mdi:radioactive",
+                ),
             )
         )
     return tuple(result)
@@ -217,6 +301,15 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         snapshot = self.coordinator.snapshot
         if snapshot is None:
             return None
+        if self.entity_description.calibration_key is not None:
+            calibration = self.coordinator.calibration
+            if not isinstance(calibration, CalibrationData):
+                return None
+            return getattr(calibration, self.entity_description.calibration_key)
+        if self.entity_description.cumulative_key is not None:
+            assert self.entity_description.channel_index is not None
+            cumulative = snapshot.device_info.cumulative[self.entity_description.channel_index]
+            return getattr(cumulative, self.entity_description.cumulative_key)
         if self.entity_description.channel_index is None:
             if self.entity_description.value_key == "clock_offset":
                 if snapshot.status.device_time is None:
