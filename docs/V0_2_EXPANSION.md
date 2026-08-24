@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.35`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.36`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护、alpha.36 前端与谱图归档性能优化已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -430,6 +430,13 @@ CSV 每行包含 source、通道名称、获取时间、累积时间、道址、
 - 只对已连接且 `config_type_is_kc761=true` 的外层错误卡派发一次 `ll-rebuild`；非 KC761、断开或未知配置只记录脱敏的 `candidate_seen_but_blocked`，不派发。保留 Window `WeakSet`、9 秒硬超时、最大派发数、MutationObserver/pagehide 清理和目标 Window registry 检查。
 - schema 7 新增的诊断字段仅为 `targeted_query_hit`、`candidate_seen_but_blocked`、`budget_reason`、`dispatch_outcome` 等布尔/枚举/计数，不保存 type、entity、host、URL、状态或设备信息。前端合同新增超过 96 roots 且目标在末端的回归；待测试机用户手动确认迟到错误卡是否恢复。
 - alpha35 已部署到持久 ARM64 测试栈：候选包 SHA-256 为 `7e3db3ee6746a0424139b05f75da476db0933453b45758eba5d6c9fb11c8040f`，本地/远端 staging 一致；release/live 的 manifest、卡片和 ECharts SHA-256 分别为 `b70015d167b8f4ca6e959cb2dd7de7722144cad7b07a05baaf192ff9d4e1e2d7`、`bbb2dbf0daec1064e6ff4e20c3c225bbdd02d2e33f05ecaaaadcd9d710c2c8e2`、`7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05`；HA 根路径和两静态资源 HTTP 200，HA 与模拟器 running/restart=0，未观察到真实设备 socket、探针残留或新增模拟器协议命令（含禁止写命令均 0）。
+
+### 8.31 `0.2.0-alpha.36`：前端热路径与谱图归档性能候选
+
+- alpha.36 将前端 2048 点转换、峰值/总计数、ROI、Data cursor、X 轴范围和折线数据改为按数据集缓存；排序通道的 ROI 使用前缀和，游标使用直接索引/二分查找。rAF 合帧、固定摘要字段缓存、编辑器历史惰性加载与并发去重、隐藏页面暂停刷新及基于实际 CSS 变量的主题刷新共同减少后台和主线程重复工作。公开卡片配置、实体、协议命令、localStorage v1 和 HA extra-JS 接口保持不变。
+- 谱图片段完成状态采用增量跟踪；`.metadata.json` v1 仅是可重建的历史列表索引，`*.json.gz` 仍是完整数据权威来源。索引缺失、损坏或版本不兼容时扫描并校验旧 gzip 后重建，索引写失败不影响已保存数据，最多 256 条保留和已有快照格式不变。升级兼容和恢复语义详见 [性能记录](PERFORMANCE.md)。
+- 本轮本机合成/临时归档基准为：`history256` `2511.187→4.590 ms`（约 547×）；`frontend2048/3000` `1120.12→107.19 ms`（约 10.45×）；fragment 1/16/128/512 道分别为 `51.399→0.751`、`3.723→0.282`、`0.575→0.300`、`0.251→0.252 ms`。这些数字不是树莓派、Chrome Performance Profile、真实 HA 或 ECharts DOM 证据；branch coverage 当前为 `96.48%`，达到 95% 门禁。
+- points 移出 state、ECharts 增量 option/Canvas、transport priority scheduler 和错误卡扫描进一步收缩均暂缓，必须另行决策并以真实 profile 验证；alpha35 的历史部署和错误卡证据保持原样，不被 alpha.36 的本地基准覆盖。
 
 本地合并后继续测试的剩余门禁：
 
