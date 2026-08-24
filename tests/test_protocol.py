@@ -509,10 +509,42 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
                 SpectrumSegment(0, 2047, 1, (7, 8), FLAG_MC_DATA_QUERY)
             )
         )
+        self.assertEqual(pending.spectrum_filled, 1)
         with self.assertRaises(TransactionError):
             pending.add_spectrum_segment(SpectrumSegment(0, 2047, 1, (9,), FLAG_MC_DATA_QUERY))
+        self.assertEqual(pending.spectrum_filled, 1)
+
+        complete = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+        )
+        first = tuple(range(16))
+        self.assertIsNone(
+            complete.add_spectrum_segment(SpectrumSegment(0, 0, 1, first, FLAG_MC_DATA_QUERY))
+        )
+        self.assertIsNone(
+            complete.add_spectrum_segment(SpectrumSegment(0, 0, 1, first, FLAG_MC_DATA_QUERY))
+        )
+        self.assertEqual(complete.spectrum_filled, 16)
+        result = None
+        for offset in range(16, 2048, 16):
+            result = complete.add_spectrum_segment(
+                SpectrumSegment(
+                    0,
+                    offset,
+                    1,
+                    tuple(range(offset, offset + 16)),
+                    FLAG_MC_DATA_QUERY,
+                )
+            )
+        self.assertIsInstance(result, SpectrumData)
+        self.assertEqual(complete.spectrum_filled, 2048)
+        self.assertEqual(result.counts, tuple(range(2048)))
         no_source.future.cancel()
         pending.future.cancel()
+        complete.future.cancel()
 
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:

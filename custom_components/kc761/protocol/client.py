@@ -68,6 +68,7 @@ class PendingTransaction:
     spectrum_counts: list[int | None] = field(
         default_factory=lambda: [None] * SPECTRUM_CHANNEL_COUNT
     )
+    spectrum_filled: int = 0
     spectrum_segments: int = 0
 
     def add_spectrum_segment(self, segment: SpectrumSegment) -> SpectrumData | None:
@@ -82,10 +83,12 @@ class PendingTransaction:
             if channel >= SPECTRUM_CHANNEL_COUNT:
                 break
             existing = self.spectrum_counts[channel]
-            if existing is not None and existing != count:
+            if existing is None:
+                self.spectrum_counts[channel] = count
+                self.spectrum_filled += 1
+            elif existing != count:
                 raise TransactionError("overlapping spectrum fragments disagree")
-            self.spectrum_counts[channel] = count
-        if any(count is None for count in self.spectrum_counts):
+        if self.spectrum_filled < SPECTRUM_CHANNEL_COUNT:
             return None
         return SpectrumData(
             source=self.spectrum_source,

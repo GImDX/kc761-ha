@@ -807,6 +807,21 @@ def test_coordinator_spectrum_controls_archive_and_schedules(tmp_path: Path) -> 
         filename, csv_text = await coordinator.async_export_spectrum_csv(saved.snapshot_id)
         assert filename.endswith(".csv")
         assert "channel_address,energy_kev,counts" in csv_text
+        csv_target = hass.async_add_executor_job.call_args.args[0]
+        assert csv_target.__name__ == "to_csv"
+        assert csv_target.__self__.snapshot_id == saved.snapshot_id
+        assert csv_text == csv_target.__self__.to_csv()
+
+        async def fail_csv(target, *args):
+            del target, args
+            raise RuntimeError("csv failed")
+
+        hass.async_add_executor_job.side_effect = fail_csv
+        with pytest.raises(RuntimeError, match="csv failed"):
+            await coordinator.async_export_spectrum_csv()
+        hass.async_add_executor_job.side_effect = (
+            lambda target, *args: asyncio.to_thread(target, *args)
+        )
 
         await coordinator.async_set_active_sensor(2)
         assert fake.state_writes[-1]["sensor_status"] == (

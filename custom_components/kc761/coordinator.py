@@ -310,7 +310,8 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         )
         if snapshot is None:
             raise RuntimeError("no spectrum is available for CSV export")
-        return f"kc761-{snapshot.snapshot_id}.csv", snapshot.to_csv()
+        content = await self._hass.async_add_executor_job(snapshot.to_csv)
+        return f"kc761-{snapshot.snapshot_id}.csv", content
 
     async def async_set_active_sensor(self, source: int) -> None:
         self._validate_source(source)
