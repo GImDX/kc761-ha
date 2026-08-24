@@ -1320,9 +1320,15 @@ class KC761SpectrumCard extends HTMLElement {
     this._layoutResizeRaf = null;
     this._chartResizeRaf = null;
     this._refreshTimer = null;
+    this._refreshAfterVisible = false;
+    this._visibilityListener = null;
+    this._visibilityRefreshPromise = null;
     this._busyState = false;
     this._entityGeneration = 0;
     this._drawToken = 0;
+    this._drawRaf = null;
+    this._drawPending = false;
+    this._summaryUpdatePending = false;
     this._handoffRetryTimer = null;
     this._handoffRetryCount = 0;
     this._handoffCandidate = null;
@@ -1337,6 +1343,14 @@ class KC761SpectrumCard extends HTMLElement {
     this._viewStateKey = null;
     this._viewPersistTimer = null;
     this._viewPersistPending = false;
+    this._pointCache = null;
+    this._summaryCache = null;
+    this._xAxisMode = DEFAULT_CARD_CONFIG.x_axis;
+    this._historyLoaded = false;
+    this._historyLoadPromise = null;
+    this._themeSourceSignature = null;
+    this._themeValues = {};
+    this._colorsReady = false;
     this._diagnosticsEnabled = false;
     diagnosticsRecord("constructor");
   }
@@ -1535,6 +1549,7 @@ class KC761SpectrumCard extends HTMLElement {
     });
     this._refreshColors();
     this._setYAxis(this._initialYAxis(normalized.y_axis, yAxisProvided));
+    this._xAxisMode = normalized.x_axis === "channel" ? "channel" : "energy";
     this._renderBase();
     this._applyVisibility();
     if (!this._config.entity) this._setStatus("Select a KC761 spectrum entity");
@@ -1549,6 +1564,7 @@ class KC761SpectrumCard extends HTMLElement {
       diagnosticsSetEnabled(true);
       diagnosticsAttachCard(this);
     }
+    this._installVisibilityListener();
     this._ensureLayoutObserver();
     this._applyPresentationMode();
     this._syncAutoRefresh();
@@ -1561,6 +1577,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._drawToken += 1;
     this._flushViewState();
     this._stopAutoRefresh();
+    this._removeVisibilityListener();
+    this._refreshAfterVisible = false;
     this._clearEditorHandoffRetry();
     this._unregisterEditorHandoffCandidate();
     this._disposeChart();
@@ -1727,7 +1745,10 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#title").textContent = this._config.title || "KC761 Spectrum";
     this.shadowRoot.querySelector("#yaxis").value = this._yAxis;
     this.shadowRoot.querySelector("#xaxis").value = this._config.x_axis || "energy";
-    this.shadowRoot.querySelector("#xaxis").addEventListener("change", () => this._draw());
+    this.shadowRoot.querySelector("#xaxis").addEventListener("change", (event) => {
+      this._xAxisMode = event.target.value === "channel" ? "channel" : "energy";
+      this._draw();
+    });
     this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture());
     this.shadowRoot.querySelector("#yaxis").addEventListener("change", (event) => {
       this._setYAxis(event.target.value);
@@ -1776,6 +1797,7 @@ class KC761SpectrumCard extends HTMLElement {
     const configure = this.shadowRoot.querySelector("#configure");
     if (editorControls) editorControls.hidden = !dialogPreview;
     if (configure) configure.hidden = dialogPreview;
+    if (dialogPreview && this._config?.show_controls !== false) this._requestHistoryLoad();
     if (path && this._preview) {
       this._clearEditorHandoffRetry();
       this._tryConsumeEditorHandoff(path);
@@ -1784,6 +1806,62 @@ class KC761SpectrumCard extends HTMLElement {
     } else {
       this._clearEditorHandoffRetry();
     }
+  }
+
+  _documentIsHidden() {
+    try {
+      return (globalThis.document || globalThis.window?.document)?.visibilityState === "hidden";
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  _installVisibilityListener() {
+    if (this._visibilityListener) return;
+    const documentRoot = globalThis.document || globalThis.window?.document;
+    if (!documentRoot?.addEventListener) return;
+    this._visibilityListener = () => {
+      if (this._documentIsHidden()) {
+        this._refreshAfterVisible = this._refreshAfterVisible || Boolean(this._refreshTimer);
+        this._stopAutoRefresh();
+        return;
+      }
+      this._syncAutoRefresh();
+      if (this._refreshAfterVisible) this._scheduleVisibleRefresh();
+    };
+    try {
+      documentRoot.addEventListener("visibilitychange", this._visibilityListener);
+    } catch (_error) {
+      this._visibilityListener = null;
+    }
+  }
+
+  _removeVisibilityListener() {
+    if (!this._visibilityListener) return;
+    const documentRoot = globalThis.document || globalThis.window?.document;
+    try {
+      documentRoot?.removeEventListener?.("visibilitychange", this._visibilityListener);
+    } catch (_error) {
+      // Browser teardown must not turn visibility cleanup into a card error.
+    }
+    this._visibilityListener = null;
+  }
+
+  _scheduleVisibleRefresh() {
+    if (
+      !this._refreshAfterVisible
+      || this._visibilityRefreshPromise
+      || this._documentIsHidden()
+      || this._detached
+      || this._busyState
+      || !this._entryId
+      || !this._data
+    ) return;
+    this._refreshAfterVisible = false;
+    this._visibilityRefreshPromise = Promise.resolve(this._autoRefresh()).finally(() => {
+      this._visibilityRefreshPromise = null;
+      if (this._refreshAfterVisible && !this._documentIsHidden()) this._scheduleVisibleRefresh();
+    });
   }
 
   _ensureLayoutObserver() {
@@ -1848,6 +1926,10 @@ class KC761SpectrumCard extends HTMLElement {
     this._entryId = null;
     this._data = null;
     this._history = [];
+    this._historyLoaded = false;
+    this._historyLoadPromise = null;
+    this._pointCache = null;
+    this._summaryCache = null;
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
     this._zoomDatasetKey = null;
@@ -2167,16 +2249,6 @@ class KC761SpectrumCard extends HTMLElement {
     }
   }
 
-  _pointIndexForChannel(channel) {
-    const points = this._points();
-    if (!points.length) return 0;
-    let nearest = 0;
-    points.forEach((point, index) => {
-      if (Math.abs(point[0] - channel) < Math.abs(points[nearest][0] - channel)) nearest = index;
-    });
-    return nearest;
-  }
-
   _zoomFromChannelRange(startChannel, endChannel) {
     const points = this._points();
     if (points.length < 2) return { ...ZOOM_DEFAULT };
@@ -2413,9 +2485,8 @@ class KC761SpectrumCard extends HTMLElement {
     if (endInput) endInput.value = String(this._cursor.roiEnd);
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
-    this._updateSummary();
     this._scheduleViewStatePersist();
-    this._draw();
+    this._draw({ updateSummary: true });
   }
 
   _syncRoiFromInputs(changed) {
@@ -2430,15 +2501,19 @@ class KC761SpectrumCard extends HTMLElement {
     if (startInput) startInput.value = String(this._cursor.roiStart);
     if (endInput) endInput.value = String(this._cursor.roiEnd);
     this._updateRoiSliderUI();
-    this._updateSummary();
     this._scheduleViewStatePersist();
-    this._draw();
+    this._draw({ updateSummary: true });
   }
 
   _syncAutoRefresh() {
     const interval = Number(this._config?.refresh_interval || 0);
     if (!interval || !this._hass || !this._entryId || !this.isConnected || this._busyState) {
       if (!interval || !this._hass || !this._entryId || !this.isConnected) this._stopAutoRefresh();
+      return;
+    }
+    if (this._documentIsHidden()) {
+      this._refreshAfterVisible = this._refreshAfterVisible || Boolean(this._refreshTimer);
+      this._stopAutoRefresh();
       return;
     }
     if (!this._refreshTimer) this._refreshTimer = window.setInterval(() => this._autoRefresh(), interval * 1000);
@@ -2450,7 +2525,12 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _autoRefresh() {
-    if (this._busyState || !this._entryId || !this._device || !this._data) return;
+    if (this._documentIsHidden()) {
+      this._refreshAfterVisible = true;
+      this._stopAutoRefresh();
+      return;
+    }
+    if (this._busyState || !this._entryId || !this._device || !this._data || this._detached) return;
     const history = this.shadowRoot.querySelector("#history");
     if (history && history.value !== "latest") return;
     await this._capture({ silent: true });
@@ -2473,7 +2553,7 @@ class KC761SpectrumCard extends HTMLElement {
         source.append(option);
       });
       if (this._data) source.value = String(this._data.source);
-      await this._loadHistory(generation, entryId);
+      if (this._shouldLoadHistory()) await this._requestHistoryLoad();
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._setStatus("");
       this._syncAutoRefresh();
@@ -2487,6 +2567,7 @@ class KC761SpectrumCard extends HTMLElement {
     const history = await this._call({ type: "kc761/spectrum/list", entry_id: entryId });
     if (generation !== this._entityGeneration || entryId !== this._entryId) return;
     this._history = history;
+    this._historyLoaded = true;
     const select = this.shadowRoot.querySelector("#history");
     const selected = select.value;
     select.replaceChildren(new Option("Latest", "latest"));
@@ -2498,6 +2579,24 @@ class KC761SpectrumCard extends HTMLElement {
     this._syncAutoRefresh();
   }
 
+  _shouldLoadHistory() {
+    if (!this._rendered || !this._entryId || this._config?.show_controls === false) return false;
+    const editorControls = this.shadowRoot.querySelector("#editor-controls");
+    return Boolean(this._preview && editorControls && !editorControls.hidden);
+  }
+
+  _requestHistoryLoad({ force = false } = {}) {
+    if (!this._entryId || (!force && this._historyLoaded)) return Promise.resolve();
+    if (this._historyLoadPromise) return this._historyLoadPromise;
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
+    const request = this._loadHistory(generation, entryId).finally(() => {
+      if (this._historyLoadPromise === request) this._historyLoadPromise = null;
+    });
+    this._historyLoadPromise = request;
+    return request;
+  }
+
   async _selectHistory(snapshotId) {
     const generation = this._entityGeneration;
     const entryId = this._entryId;
@@ -2505,6 +2604,8 @@ class KC761SpectrumCard extends HTMLElement {
       const state = this._hass.states[this._config.entity];
       this._setData(this._fromEntity(state), { viewMode: "live" });
     } else {
+      if (!this._historyLoaded) await this._requestHistoryLoad();
+      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._setData({ ...data, snapshot_id: snapshotId }, { viewMode: `history:${snapshotId}` });
@@ -2536,7 +2637,7 @@ class KC761SpectrumCard extends HTMLElement {
     await this._busy(async () => {
       await this._call({ type: "kc761/spectrum/save", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      await this._loadHistory(generation, entryId);
+      if (this._historyLoaded) await this._requestHistoryLoad({ force: true });
     }, "Spectrum saved");
   }
 
@@ -2590,6 +2691,7 @@ class KC761SpectrumCard extends HTMLElement {
       this._busyState = false;
       this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
       this._syncAutoRefresh();
+      if (this._refreshAfterVisible && !this._documentIsHidden()) this._scheduleVisibleRefresh();
     }
   }
 
@@ -2608,27 +2710,172 @@ class KC761SpectrumCard extends HTMLElement {
     node.classList.toggle("error", error);
   }
 
+  _ensurePointCache() {
+    const data = this._data;
+    const rawPoints = Array.isArray(data?.points) ? data.points : [];
+    if (this._pointCache?.data === data && this._pointCache.rawPoints === rawPoints) return this._pointCache;
+    const points = [];
+    const channels = [];
+    const energies = [];
+    const counts = [];
+    const channelIndex = new Map();
+    let channelsSorted = true;
+    let peak = null;
+    let prefixTotal = 0;
+    const prefix = [0];
+    for (const point of rawPoints) {
+      if (!Array.isArray(point) || point.length < 3) continue;
+      const channel = Number(point[0]);
+      const energy = Number(point[1]);
+      const count = Number(point[2]);
+      if (!Number.isFinite(channel) || !Number.isFinite(energy) || !Number.isFinite(count)) continue;
+      const normalized = [channel, energy, count];
+      const index = points.length;
+      points.push(normalized);
+      channels.push(channel);
+      energies.push(energy);
+      counts.push(count);
+      if (!channelIndex.has(channel)) channelIndex.set(channel, index);
+      if (index > 0 && channel < channels[index - 1]) channelsSorted = false;
+      if (!peak || count > peak[2]) peak = normalized;
+      prefixTotal += count;
+      prefix.push(prefixTotal);
+    }
+    const totalInput = Number(data?.total_counts);
+    const cache = {
+      data,
+      rawPoints,
+      points,
+      channels,
+      energies,
+      counts,
+      channelIndex,
+      channelsSorted,
+      prefix,
+      peak,
+      totalCounts: Number.isFinite(totalInput) ? totalInput : prefixTotal,
+      xValues: new Map(),
+      xSorted: new Map(),
+      xRanges: new Map(),
+      lineData: new Map(),
+    };
+    this._pointCache = cache;
+    this._summaryCache = null;
+    return cache;
+  }
+
   _points() {
-    return (this._data?.points || []).filter((point) => Array.isArray(point) && point.length >= 3 && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])) && Number.isFinite(Number(point[2]))).map((point) => [Number(point[0]), Number(point[1]), Number(point[2])]);
+    return this._ensurePointCache().points;
   }
 
-  _xValue(point) {
-    return this.shadowRoot.querySelector("#xaxis")?.value === "channel" ? point[0] : point[1];
+  _readXAxisMode() {
+    const selected = this.shadowRoot?.querySelector("#xaxis")?.value;
+    if (selected === "channel" || selected === "energy") this._xAxisMode = selected;
+    return this._xAxisMode === "channel" ? "channel" : "energy";
   }
 
-  _xRange() {
-    const values = this._points().map((point) => this._xValue(point));
-    if (!values.length) return [0, 1];
-    const minimum = Math.min(...values), maximum = Math.max(...values);
-    return [minimum, maximum === minimum ? minimum + 1 : maximum];
+  _xValue(point, xMode = this._xAxisMode) {
+    return xMode === "channel" ? point[0] : point[1];
   }
 
-  _nearestPointByX(xValue) {
-    return this._points().reduce((nearest, point) => !nearest || Math.abs(this._xValue(point) - xValue) < Math.abs(this._xValue(nearest) - xValue) ? point : nearest, null);
+  _xValues(cache, xMode) {
+    if (!cache.xValues.has(xMode)) {
+      const values = xMode === "channel" ? cache.channels : cache.energies;
+      cache.xValues.set(xMode, values);
+    }
+    return cache.xValues.get(xMode);
+  }
+
+  _xValuesSorted(cache, xMode) {
+    if (!cache.xSorted.has(xMode)) {
+      const values = this._xValues(cache, xMode);
+      cache.xSorted.set(xMode, values.every((value, index) => index === 0 || value >= values[index - 1]));
+    }
+    return cache.xSorted.get(xMode);
+  }
+
+  _xRange(xMode = this._readXAxisMode()) {
+    const cache = this._ensurePointCache();
+    if (!cache.points.length) return [0, 1];
+    if (!cache.xRanges.has(xMode)) {
+      const values = this._xValues(cache, xMode);
+      let minimum = values[0];
+      let maximum = values[0];
+      for (let index = 1; index < values.length; index += 1) {
+        minimum = Math.min(minimum, values[index]);
+        maximum = Math.max(maximum, values[index]);
+      }
+      cache.xRanges.set(xMode, [minimum, maximum === minimum ? minimum + 1 : maximum]);
+    }
+    return cache.xRanges.get(xMode);
+  }
+
+  _nearestIndex(values, target, sorted = false) {
+    if (!values.length) return -1;
+    if (!sorted) {
+      let nearest = 0;
+      for (let index = 1; index < values.length; index += 1) {
+        if (Math.abs(values[index] - target) < Math.abs(values[nearest] - target)) nearest = index;
+      }
+      return nearest;
+    }
+    let low = 0;
+    let high = values.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (values[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    if (low === 0) return 0;
+    const previous = low - 1;
+    return Math.abs(values[low] - target) < Math.abs(values[previous] - target) ? low : previous;
+  }
+
+  _nearestPointByX(xValue, xMode = this._readXAxisMode()) {
+    const cache = this._ensurePointCache();
+    const values = this._xValues(cache, xMode);
+    const index = this._nearestIndex(values, xValue, this._xValuesSorted(cache, xMode));
+    return index < 0 ? null : cache.points[index];
+  }
+
+  _pointIndexForChannel(channel) {
+    const cache = this._ensurePointCache();
+    if (!cache.points.length) return 0;
+    const exact = cache.channelIndex.get(Number(channel));
+    if (exact !== undefined) return exact;
+    return this._nearestIndex(cache.channels, Number(channel), cache.channelsSorted);
   }
 
   _pointForChannel(channel) {
-    return this._points().reduce((nearest, point) => !nearest || Math.abs(point[0] - channel) < Math.abs(nearest[0] - channel) ? point : nearest, null);
+    const cache = this._ensurePointCache();
+    if (!cache.points.length) return null;
+    const index = this._pointIndexForChannel(channel);
+    return index < 0 ? null : cache.points[index];
+  }
+
+  _roiTotal(start, end) {
+    const cache = this._ensurePointCache();
+    if (!cache.points.length) return 0;
+    if (!cache.channelsSorted) {
+      let total = 0;
+      cache.points.forEach((point) => {
+        if (point[0] >= start && point[0] <= end) total += point[2];
+      });
+      return total;
+    }
+    const lowerBound = (target, upper = false) => {
+      let low = 0;
+      let high = cache.channels.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (cache.channels[middle] < target || (upper && cache.channels[middle] === target)) low = middle + 1;
+        else high = middle;
+      }
+      return low;
+    };
+    const first = lowerBound(start);
+    const after = lowerBound(end, true);
+    return cache.prefix[after] - cache.prefix[first];
   }
 
   _roi() {
@@ -2650,36 +2897,48 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _updateSummary() {
-    const points = this._points();
+    const cache = this._ensurePointCache();
+    const points = cache.points;
     const data = this._data;
     if (!data || !points.length) return;
     const [start, end] = this._roi();
-    let peak = points[0], roiTotal = 0;
-    points.forEach((point) => {
-      if (point[2] > peak[2]) peak = point;
-      if (point[0] >= start && point[0] <= end) roiTotal += point[2];
-    });
+    const peak = cache.peak || points[0];
+    const roiTotal = this._roiTotal(start, end);
     const cursorPoint = this._pointForChannel(this._cursor.data) || points[0];
-    this._setSummaryValue("#acquired", new Date(data.acquired_at).toLocaleString());
-    this._setSummaryValue("#runtime", data.accumulation_seconds == null ? "Unknown" : `${data.accumulation_seconds} s`);
-    this._setSummaryValue("#total", Number(data.total_counts).toLocaleString());
-    this._setSummaryValue("#peak", `CH ${peak[0]} · ${peak[1].toFixed(2)} keV · ${peak[2]}`);
+    if (this._summaryCache !== cache) {
+      this._setSummaryValue("#acquired", new Date(data.acquired_at).toLocaleString());
+      this._setSummaryValue("#runtime", data.accumulation_seconds == null ? "Unknown" : `${data.accumulation_seconds} s`);
+      this._setSummaryValue("#total", cache.totalCounts.toLocaleString());
+      this._setSummaryValue("#peak", `CH ${peak[0]} · ${peak[1].toFixed(2)} keV · ${peak[2]}`);
+      this._summaryCache = cache;
+    }
     this._setSummaryValue("#roi-total", roiTotal.toLocaleString());
     this._setSummaryValue("#cursor-value", `CH ${cursorPoint[0]} · ${cursorPoint[1].toFixed(2)} keV · ${cursorPoint[2]}`);
   }
 
+  _lineData(cache, xMode, logarithmic) {
+    const key = `${xMode}:${logarithmic ? "log" : "linear"}`;
+    if (!cache.lineData.has(key)) {
+      const values = this._xValues(cache, xMode);
+      cache.lineData.set(key, cache.points.map((point, index) => [values[index], logarithmic ? Math.max(1, point[2]) : point[2]]));
+    }
+    return cache.lineData.get(key);
+  }
+
   _option() {
-    const points = this._points();
-    const xMode = this.shadowRoot.querySelector("#xaxis").value;
+    const cache = this._ensurePointCache();
+    const points = cache.points;
+    const xMode = this._readXAxisMode();
     const logarithmic = this._yAxis === "log";
-    const lineData = points.map((point) => [this._xValue(point), logarithmic ? Math.max(1, point[2]) : point[2]]);
+    const lineData = this._lineData(cache, xMode, logarithmic);
     const [roiStart, roiEnd] = this._roi();
     const roiStartPoint = this._pointForChannel(roiStart) || points[0];
     const roiEndPoint = this._pointForChannel(roiEnd) || points[points.length - 1];
     const cursorPoint = this._pointForChannel(this._cursor.data) || points[0];
     let peak = points[0];
-    points.forEach((point) => { if (point[2] > peak[2]) peak = point; });
-    const xFor = (point) => this._xValue(point);
+    peak = cache.peak || peak;
+    const xFor = (point) => this._xValue(point, xMode);
+    const [xMinimum, xMaximum] = this._xRange(xMode);
     const cursorNearPeak = Math.abs(peak[0] - cursorPoint[0]) <= 16;
     const foreground = this._themeValue("--primary-text-color", "#ddd");
     const secondary = this._themeValue("--secondary-text-color", foreground);
@@ -2707,13 +2966,13 @@ class KC761SpectrumCard extends HTMLElement {
         formatter: (items) => {
           const item = items?.[0];
           if (!item) return "";
-          const point = this._nearestPointByX(Number(item.value?.[0]));
+          const point = this._nearestPointByX(Number(item.value?.[0]), xMode);
           return point ? `CH ${point[0]}<br/>${point[1].toFixed(2)} keV<br/>${point[2].toLocaleString()} counts` : "";
         },
       },
       xAxis: {
         type: "value", name: xMode === "energy" ? "Energy (keV)" : "Channel address", nameLocation: "middle", nameGap: 38,
-        min: this._xRange()[0], max: this._xRange()[1], boundaryGap: false,
+        min: xMinimum, max: xMaximum, boundaryGap: false,
         nameTextStyle: { color: secondary }, axisLabel: {
           color: secondary, hideOverlap: true, showMinLabel: true, showMaxLabel: true, margin: 12,
           formatter: (value) => {
@@ -2744,20 +3003,43 @@ class KC761SpectrumCard extends HTMLElement {
     };
   }
 
-  _draw() {
-    if (!this._data || !this._points().length || !this.shadowRoot.querySelector("#chart")) return;
-    const token = ++this._drawToken;
-    diagnosticsRecord("draw-start", { generation: token });
-    this._ensureChart().then(() => {
-      if (token !== this._drawToken || !this._chart) return;
-      this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
-    }).catch((error) => {
-      diagnosticsRecordError("draw-failure", error);
-      this._setStatus(`Chart load failed: ${error.message || error}`, true);
+  _draw({ updateSummary = false } = {}) {
+    if (!this._data || !this._ensurePointCache().points.length || !this.shadowRoot.querySelector("#chart")) return;
+    this._drawPending = true;
+    this._summaryUpdatePending = this._summaryUpdatePending || updateSummary;
+    if (this._drawRaf !== null) return;
+    const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    this._drawRaf = request(() => {
+      this._drawRaf = null;
+      if (this._detached || !this._drawPending) return;
+      this._drawPending = false;
+      if (this._summaryUpdatePending) {
+        this._summaryUpdatePending = false;
+        this._updateSummary();
+      }
+      const token = ++this._drawToken;
+      diagnosticsRecord("draw-start", { generation: token });
+      this._ensureChart().then(() => {
+        if (token !== this._drawToken || !this._chart || this._detached) return;
+        this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
+      }).catch((error) => {
+        diagnosticsRecordError("draw-failure", error);
+        this._setStatus(`Chart load failed: ${error.message || error}`, true);
+      });
     });
   }
 
+  _cancelDraw() {
+    if (this._drawRaf === null) return;
+    const cancel = globalThis.cancelAnimationFrame || ((id) => clearTimeout(id));
+    cancel(this._drawRaf);
+    this._drawRaf = null;
+    this._drawPending = false;
+    this._summaryUpdatePending = false;
+  }
+
   _disposeChart() {
+    this._cancelDraw();
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
     this._cancelChartResize();
@@ -2809,7 +3091,16 @@ class KC761SpectrumCard extends HTMLElement {
     this._chartResizeRaf = null;
   }
 
-  _refreshColors() {
+  _currentThemeSignature() {
+    const themes = this._hass?.themes;
+    return [themes?.theme, themes?.darkMode, themes?.default_theme, themes?.default_theme_name]
+      .map((value) => value == null ? "" : String(value))
+      .join("|");
+  }
+
+  _refreshColors(force = false) {
+    const themeSignature = this._currentThemeSignature();
+    if (!force && this._colorsReady && this._themeSourceSignature === themeSignature) return;
     let computed;
     try {
       computed = getComputedStyle(this);
@@ -2829,22 +3120,29 @@ class KC761SpectrumCard extends HTMLElement {
       used.add(value.toLowerCase());
       colors[name] = value;
     });
+    const themeValues = {};
+    ["--primary-text-color", "--secondary-text-color", "--divider-color", "--card-background-color"].forEach((name) => {
+      const value = computed?.getPropertyValue(name)?.trim();
+      if (value) themeValues[name] = value;
+    });
     this._colors = colors;
-    Object.entries({
+    this._themeValues = themeValues;
+    const customColors = {
       "--kc761-spectrum-curve": colors.curve,
       "--kc761-spectrum-roi-start": colors.roiStart,
       "--kc761-spectrum-roi-end": colors.roiEnd,
       "--kc761-spectrum-peak": colors.peak,
       "--kc761-spectrum-data": colors.dataCursor,
-    }).forEach(([name, value]) => this.style.setProperty(name, value));
+    };
+    Object.entries(customColors).forEach(([name, value]) => {
+      if (this.style?.getPropertyValue?.(name) !== value) this.style.setProperty(name, value);
+    });
+    this._themeSourceSignature = themeSignature;
+    this._colorsReady = true;
   }
 
   _themeValue(name, fallback) {
-    try {
-      return getComputedStyle(this).getPropertyValue(name).trim() || fallback;
-    } catch (_error) {
-      return fallback;
-    }
+    return this._themeValues?.[name] || fallback;
   }
 
 }

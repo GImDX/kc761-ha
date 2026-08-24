@@ -5,7 +5,11 @@ class FakeNode {
     this.selector = selector;
     this.localName = selector;
     this.tagName = selector.toUpperCase();
-    this.style = { setProperty() {} };
+    this.style = {
+      values: new Map(),
+      setProperty: (name, value) => this.style.values.set(name, String(value)),
+      getPropertyValue: (name) => this.style.values.get(name) || "",
+    };
     this.classList = {
       values: new Set(),
       toggle: (name, force) => {
@@ -103,7 +107,11 @@ class FakeShadowRoot extends FakeNode {
 
 class FakeHTMLElement {
   constructor() {
-    this.style = { setProperty() {} };
+    this.style = {
+      values: new Map(),
+      setProperty: (name, value) => this.style.values.set(name, String(value)),
+      getPropertyValue: (name) => this.style.values.get(name) || "",
+    };
     this.isConnected = false;
     this.parentElement = null;
   }
@@ -193,8 +201,16 @@ preExistingErrorCard.isConnected = false;
 const documentNodes = [preExistingCardHost, preExistingErrorCard];
 globalThis.document = {
   body: documentBody,
+  visibilityState: "visible",
+  _listeners: new Map(),
   createElement: (selector) => new FakeNode(selector),
   querySelectorAll: () => documentNodes,
+  addEventListener(type, callback) {
+    this._listeners.set(type, callback);
+  },
+  removeEventListener(type, callback) {
+    if (this._listeners.get(type) === callback) this._listeners.delete(type);
+  },
 };
 const animationFrames = new Map();
 let nextAnimationFrame = 0;
@@ -785,6 +801,59 @@ assert.deepEqual(chartOption.dataZoom[1].xAxisIndex, [0]);
 assert.equal(chartOption.dataZoom[1].filterMode, "none");
 assert.equal(chartOption.dataZoom[1].height, 14);
 
+// Spectrum transforms are normalized once per data/points identity.  The
+// cached prefix makes a sorted-channel ROI total independent of the 2048-point
+// length, while malformed and unsorted input retains the safe fallback path.
+const cacheCard = new Card();
+cacheCard.setConfig({ entity: "sensor.cache_spectrum" });
+const cachePoints = [[0, 1, 2], [1, 2, 3], ["bad", 3, 4], [3, 4, 5]];
+cacheCard._setData({ total_counts: 10, points: cachePoints });
+const firstPointCache = cacheCard._ensurePointCache();
+assert.equal(cacheCard._ensurePointCache(), firstPointCache, "unchanged spectrum reuses its point cache");
+assert.deepEqual(firstPointCache.points, [[0, 1, 2], [1, 2, 3], [3, 4, 5]]);
+assert.equal(cacheCard._roiTotal(0, 1), 5, "prefix ROI total includes both inclusive endpoints");
+assert.equal(cacheCard._option().series[0].data.length, 3, "malformed points never reach ECharts");
+let fixedSummaryWrites = 0;
+const originalSetSummaryValue = cacheCard._setSummaryValue.bind(cacheCard);
+cacheCard._setSummaryValue = (selector, value) => {
+  if (["#acquired", "#runtime", "#total", "#peak"].includes(selector)) fixedSummaryWrites += 1;
+  originalSetSummaryValue(selector, value);
+};
+cacheCard._updateSummary();
+cacheCard._updateSummary();
+assert.equal(fixedSummaryWrites, 4, "fixed summary fields are recomputed only for a new cache");
+cacheCard._data = { total_counts: 20, points: [[0, 8, 9], [2, 3, 1]] };
+const secondPointCache = cacheCard._ensurePointCache();
+assert.notEqual(secondPointCache, firstPointCache, "new data invalidates the point cache");
+assert.equal(cacheCard._roiTotal(0, 2), 10, "new data invalidates the prefix ROI result");
+cacheCard._data = { points: [[3, 4, 5], [0, 1, 2], [2, 3, 1]] };
+assert.equal(cacheCard._ensurePointCache().channelsSorted, false);
+assert.equal(cacheCard._roiTotal(0, 2), 3, "unsorted channels use the correct bounded fallback");
+
+// Slider/draw updates coalesce into one animation frame and a detached card
+// cancels that frame without leaving a late chart update behind.
+const drawCard = new Card();
+drawCard.setConfig({ entity: "sensor.draw_spectrum" });
+drawCard._setData({ points: [[0, 1, 2], [1, 2, 3]] });
+let drawCalls = 0;
+drawCard._chart = {
+  setOption: () => { drawCalls += 1; },
+  dispose() {},
+};
+drawCard._ensureChart = async () => drawCard._chart;
+drawCard._draw();
+drawCard._draw({ updateSummary: true });
+assert.notEqual(drawCard._drawRaf, null, "draw schedules a frame");
+flushAnimationFrames();
+await Promise.resolve();
+assert.equal(drawCalls, 1, "multiple slider/draw requests share one frame");
+drawCard._draw();
+drawCard.disconnectedCallback();
+assert.equal(drawCard._drawRaf, null, "disconnect cancels the pending draw frame");
+flushAnimationFrames();
+await Promise.resolve();
+assert.equal(drawCalls, 1, "a detached card cannot perform a late chart update");
+
 const zoomCard = new Card();
 zoomCard.setConfig({ entity: "sensor.zoom_spectrum" });
 const fullPoints = Array.from({ length: 2048 }, (_, index) => [index, index / 2, index + 1]);
@@ -1047,6 +1116,101 @@ assert.equal(
   false,
   "unavailable state remains outside strict spectrum validation",
 );
+
+// The normal dashboard path must not request saved-spectrum history.  Opening
+// the card editor requests it lazily, and concurrent editor transitions share
+// one websocket request.
+const historyCard = new Card();
+historyCard.setConfig({ entity: "sensor.history_spectrum" });
+historyCard.isConnected = true;
+historyCard._entryId = "entry-history";
+historyCard._data = { points: [[0, 1, 2]] };
+const historyCalls = [];
+historyCard._hass = {
+  callWS: async (message) => {
+    historyCalls.push(message.type);
+    if (message.type === "kc761/info") return { sensor_types: [1, 0, 0] };
+    if (message.type === "kc761/spectrum/list") return [];
+    throw new Error(`unexpected websocket call ${message.type}`);
+  },
+};
+await historyCard._loadInitial();
+assert.deepEqual(historyCalls, ["kc761/info"], "normal view does not eagerly load saved history");
+historyCard.preview = true;
+await historyCard._historyLoadPromise;
+assert.deepEqual(historyCalls, ["kc761/info", "kc761/spectrum/list"], "editor preview loads history on demand");
+historyCard._historyLoaded = false;
+let resolveConcurrentHistory;
+historyCard._hass.callWS = async (message) => {
+  historyCalls.push(message.type);
+  if (message.type === "kc761/spectrum/list") return new Promise((resolve) => { resolveConcurrentHistory = resolve; });
+  return { sensor_types: [1, 0, 0] };
+};
+const historyRequest = historyCard._requestHistoryLoad();
+assert.equal(historyCard._requestHistoryLoad(), historyRequest, "concurrent history loads are deduplicated");
+resolveConcurrentHistory([]);
+await historyRequest;
+assert.equal(historyCalls.filter((type) => type === "kc761/spectrum/list").length, 2);
+
+// Hidden tabs stop the interval.  Returning visible performs at most one
+// catch-up capture and removes the document listener on disconnect.
+const visibilityCard = new Card();
+visibilityCard.setConfig({ entity: "sensor.visibility_spectrum", refresh_interval: 5 });
+visibilityCard.isConnected = true;
+visibilityCard._hass = {};
+visibilityCard._entryId = "entry-visibility";
+visibilityCard._device = { model: "KC761" };
+visibilityCard._data = { points: [[0, 1, 2]] };
+let catchupCaptures = 0;
+visibilityCard._capture = async () => { catchupCaptures += 1; };
+visibilityCard._installVisibilityListener();
+visibilityCard._syncAutoRefresh();
+assert.notEqual(visibilityCard._refreshTimer, null);
+document.visibilityState = "hidden";
+document._listeners.get("visibilitychange")();
+assert.equal(visibilityCard._refreshTimer, null, "hidden tabs stop automatic refresh");
+assert.equal(visibilityCard._refreshAfterVisible, true);
+document.visibilityState = "visible";
+document._listeners.get("visibilitychange")();
+await visibilityCard._visibilityRefreshPromise;
+assert.equal(catchupCaptures, 1, "visible transition performs one catch-up refresh");
+document._listeners.get("visibilitychange")();
+assert.equal(catchupCaptures, 1, "repeated visible events do not duplicate catch-up work");
+visibilityCard.disconnectedCallback();
+assert.equal(document._listeners.has("visibilitychange"), false, "disconnect removes visibility listener");
+
+// Theme variables are read once and refreshed only when HA reports a theme
+// source change; individual chart options use the cached values.
+const originalGetComputedStyle = globalThis.getComputedStyle;
+let computedStyleCalls = 0;
+globalThis.getComputedStyle = () => {
+  computedStyleCalls += 1;
+  return { getPropertyValue: (name) => ({
+    "--graph-color-1": "#111111",
+    "--graph-color-2": "#222222",
+    "--graph-color-3": "#333333",
+    "--graph-color-4": "#444444",
+    "--graph-color-5": "#555555",
+    "--primary-text-color": "#eeeeee",
+    "--secondary-text-color": "#aaaaaa",
+    "--divider-color": "#555555",
+    "--card-background-color": "#1c1c1c",
+  }[name] || "") };
+};
+const themeCard = new Card();
+themeCard.setConfig({ entity: "sensor.theme_spectrum" });
+const firstThemeRead = computedStyleCalls;
+themeCard._refreshColors();
+assert.equal(computedStyleCalls, firstThemeRead, "unchanged theme does not reread computed styles");
+themeCard._hass = { themes: { theme: "dark", darkMode: true } };
+themeCard._refreshColors();
+const changedThemeRead = computedStyleCalls;
+themeCard._refreshColors();
+assert.equal(computedStyleCalls, changedThemeRead, "same HA theme source is cached");
+themeCard._hass = { themes: { theme: "light", darkMode: false } };
+themeCard._refreshColors();
+assert.ok(computedStyleCalls > changedThemeRead, "theme source changes refresh colors once");
+globalThis.getComputedStyle = originalGetComputedStyle;
 
 const lifecycle = new Card();
 lifecycle.setConfig({ entity: "sensor.lifecycle" });
