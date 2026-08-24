@@ -10,6 +10,11 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     BLE_VERIFIED_SERVICE_UUID,
@@ -53,24 +58,101 @@ from .protocol.transport import BleTransport
 
 _LOGGER = logging.getLogger(__name__)
 
+try:
+    from homeassistant.components import bluetooth
+except ImportError:  # pragma: no cover - protocol-only test environments
+    bluetooth = None
+
 
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
     VERSION = 6
 
+    def __init__(self) -> None:
+        """Initialize the flow's transport selection state."""
+        self._selected_transport: str | None = None
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=_connection_schema())
-        return await self._async_validate_and_create(user_input)
+            return self.async_show_form(step_id="user", data_schema=_transport_schema())
+        # Keep direct programmatic submissions from older flows working.  The
+        # UI never presents these endpoint fields on the transport step.
+        if _has_endpoint_input(user_input):
+            return await self._async_validate_and_create(user_input)
+        transport = _normalize_transport(user_input.get(CONF_TRANSPORT))
+        if transport is None:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_transport_schema(),
+                errors={"base": "invalid_transport"},
+            )
+        self._selected_transport = transport
+        if transport == TRANSPORT_BLE:
+            return await self.async_step_ble()
+        return await self.async_step_tcp()
+
+    async def async_step_tcp(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Collect the TCP-only endpoint fields."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="tcp",
+                data_schema=_tcp_schema(),
+            )
+        return await self._async_validate_and_create(
+            {CONF_TRANSPORT: TRANSPORT_TCP, **user_input}
+        )
+
+    async def async_step_ble(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Collect the BLE-only endpoint fields from discovered devices."""
+        if user_input is None:
+            options = await self._async_ble_address_options()
+            return self.async_show_form(
+                step_id="ble",
+                data_schema=_ble_schema(options=options),
+            )
+        return await self._async_validate_and_create(
+            {CONF_TRANSPORT: TRANSPORT_BLE, **user_input}
+        )
+
+    async def _async_ble_address_options(self, current: str = "") -> list[dict[str, str]]:
+        """Return connectable HA discoveries as selectable BLE addresses.
+
+        The scan is advertisement-only.  No GATT connection is attempted until
+        the user submits the endpoint and the existing preflight runs.
+        """
+        options: dict[str, str] = {}
+        current = current.strip()
+        if current:
+            options[current] = f"Saved device ({current})"
+        try:
+            if bluetooth is None:
+                raise RuntimeError("Bluetooth API is unavailable")
+            if bluetooth.async_scanner_count(self.hass, connectable=True):
+                await bluetooth.async_request_active_scan(self.hass, duration=5)
+            discoveries = bluetooth.async_discovered_service_info(self.hass, connectable=True)
+        except Exception as err:  # Bluetooth may be disabled or not initialized.
+            _LOGGER.debug("Unable to enumerate Bluetooth discoveries: %s", type(err).__name__)
+            discoveries = ()
+        for discovery in discoveries:
+            address = str(getattr(discovery, "address", "")).strip()
+            if not address:
+                continue
+            name = str(getattr(discovery, "name", "") or "Bluetooth device").strip()
+            options.setdefault(address, f"{name} ({address})")
+        if not options:
+            # SelectSelector custom_value provides the manual-address fallback
+            # when there are no active scanners or advertisements.
+            options[""] = "No discovered device — enter address manually"
+        return [{"value": address, "label": label} for address, label in options.items()]
 
     async def _async_validate_and_create(self, user_input: dict[str, Any]) -> ConfigFlowResult:
         try:
             endpoint = _parse_endpoint(user_input)
         except ValueError as err:
             return self.async_show_form(
-                step_id="user",
-                data_schema=_connection_schema(user_input),
+                step_id=_endpoint_step(user_input),
+                data_schema=_endpoint_schema(user_input),
                 errors={"base": str(err)},
             )
         errors: dict[str, str] = {}
@@ -86,7 +168,11 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await client.async_close()
         if info is None or not info.device_id:
             errors.setdefault("base", "cannot_connect")
-            return self.async_show_form(step_id="user", data_schema=_connection_schema(user_input), errors=errors)
+            return self.async_show_form(
+                step_id=_endpoint_step(user_input),
+                data_schema=_endpoint_schema(user_input),
+                errors=errors,
+            )
         await self.async_set_unique_id(info.device_id)
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
@@ -99,7 +185,66 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if entry is None:
             return self.async_abort(reason="unknown")
         if user_input is None:
-            return self.async_show_form(step_id="reconfigure", data_schema=_connection_schema(entry.data))
+            self._selected_transport = _normalize_transport(entry.data.get(CONF_TRANSPORT)) or TRANSPORT_TCP
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=_transport_schema(self._selected_transport),
+            )
+        # Backward-compatible direct submission for callers that bypass the
+        # transport selection step; the rendered flow always uses two steps.
+        if _has_endpoint_input(user_input):
+            return await self._async_reconfigure_endpoint(entry, user_input)
+        transport = _normalize_transport(user_input.get(CONF_TRANSPORT))
+        if transport is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=_transport_schema(self._selected_transport),
+                errors={"base": "invalid_transport"},
+            )
+        self._selected_transport = transport
+        if transport == TRANSPORT_BLE:
+            return await self.async_step_reconfigure_ble()
+        return await self.async_step_reconfigure_tcp()
+
+    async def async_step_reconfigure_tcp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect TCP-only fields while reconfiguring an entry."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="unknown")
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure_tcp",
+                data_schema=_tcp_schema(entry.data),
+            )
+        return await self._async_reconfigure_endpoint(
+            entry, {CONF_TRANSPORT: TRANSPORT_TCP, **user_input}
+        )
+
+    async def async_step_reconfigure_ble(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect BLE-only fields while reconfiguring an entry."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="unknown")
+        if user_input is None:
+            options = await self._async_ble_address_options(
+                str(entry.data.get(CONF_BLE_ADDRESS, ""))
+            )
+            return self.async_show_form(
+                step_id="reconfigure_ble",
+                data_schema=_ble_schema(entry.data, options=options),
+            )
+        return await self._async_reconfigure_endpoint(
+            entry, {CONF_TRANSPORT: TRANSPORT_BLE, **user_input}
+        )
+
+    async def _async_reconfigure_endpoint(
+        self, entry: config_entries.ConfigEntry, user_input: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Validate and persist the endpoint selected by a two-step flow."""
         defaults = entry.data
         if user_input.get(CONF_TRANSPORT) == TRANSPORT_BLE and CONF_BLE_SERVICE_UUID not in user_input:
             # An explicit BLE reconfigure without an override uses the
@@ -109,8 +254,8 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             endpoint = _parse_endpoint(user_input, defaults=defaults)
         except ValueError as err:
             return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=_connection_schema(user_input),
+                step_id=_reconfigure_endpoint_step(user_input),
+                data_schema=_reconfigure_endpoint_schema(user_input),
                 errors={"base": str(err)},
             )
         expected_device_id = str(entry.data.get("device_id", entry.unique_id or ""))
@@ -145,15 +290,15 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
         except DeviceIdentityError:
             return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=_connection_schema(user_input),
+                step_id=_reconfigure_endpoint_step(user_input),
+                data_schema=_reconfigure_endpoint_schema(user_input),
                 errors={"base": "device_mismatch"},
             )
         except Exception as err:
             _LOGGER.warning("KC761 reconfigure preflight failed: %s", type(err).__name__)
             return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=_connection_schema(user_input),
+                step_id=_reconfigure_endpoint_step(user_input),
+                data_schema=_reconfigure_endpoint_schema(user_input),
                 errors={"base": "cannot_connect"},
             )
         updated_data = replace_endpoint_data(entry.data, endpoint)
@@ -269,22 +414,110 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(step_id="init", data_schema=schema)
 
 
-def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+def _normalize_transport(value: Any) -> str | None:
+    """Normalize a transport selector value without accepting unknown values."""
+    transport = str(value or "").strip().lower()
+    return transport if transport in SUPPORTED_TRANSPORTS else None
+
+
+def _has_endpoint_input(user_input: dict[str, Any]) -> bool:
+    """Return whether input contains an endpoint field from a previous flow."""
+    return any(
+        key in user_input
+        for key in (CONF_HOST, CONF_PORT, CONF_BLE_ADDRESS, CONF_BLE_SERVICE_UUID)
+    )
+
+
+def _transport_schema(default: str = TRANSPORT_TCP) -> vol.Schema:
+    """Build the first step containing only the TCP/BLE choice."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_TRANSPORT, default=default): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        {"value": TRANSPORT_TCP, "label": "TCP"},
+                        {"value": TRANSPORT_BLE, "label": "BLE"},
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        }
+    )
+
+
+def _tcp_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Build a form containing only TCP endpoint fields."""
     defaults = defaults or {}
     return vol.Schema(
         {
-            vol.Optional(
-                CONF_TRANSPORT,
-                default=defaults.get(CONF_TRANSPORT, TRANSPORT_TCP),
-            ): vol.In(SUPPORTED_TRANSPORTS),
-            vol.Optional(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
-            vol.Optional(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
+            vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+            vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=65535)
             ),
-            vol.Optional(CONF_BLE_ADDRESS, default=defaults.get(CONF_BLE_ADDRESS, "")): str,
+        }
+    )
+
+
+def _ble_schema(
+    defaults: dict[str, Any] | None = None,
+    *,
+    options: list[dict[str, str]] | None = None,
+) -> vol.Schema:
+    """Build a form containing only BLE address and service UUID fields."""
+    defaults = defaults or {}
+    options = options or [{"value": "", "label": "No discovered device — enter address manually"}]
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_BLE_ADDRESS,
+                default=defaults.get(CONF_BLE_ADDRESS, ""),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=options,
+                    custom_value=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(
                 CONF_BLE_SERVICE_UUID,
                 default=defaults.get(CONF_BLE_SERVICE_UUID, BLE_VERIFIED_SERVICE_UUID),
             ): str,
         }
     )
+
+
+def _endpoint_step(user_input: dict[str, Any]) -> str:
+    """Return the endpoint step matching an input payload."""
+    return "ble" if _normalize_transport(user_input.get(CONF_TRANSPORT)) == TRANSPORT_BLE else "tcp"
+
+
+def _endpoint_schema(user_input: dict[str, Any]) -> vol.Schema:
+    """Return a transport-specific schema for validation errors."""
+    if _endpoint_step(user_input) == "ble":
+        return _ble_schema(user_input)
+    return _tcp_schema(user_input)
+
+
+def _reconfigure_endpoint_step(user_input: dict[str, Any]) -> str:
+    """Return the transport-specific reconfigure endpoint step."""
+    if _normalize_transport(user_input.get(CONF_TRANSPORT)) == TRANSPORT_BLE:
+        return "reconfigure_ble"
+    return "reconfigure_tcp"
+
+
+def _reconfigure_endpoint_schema(user_input: dict[str, Any]) -> vol.Schema:
+    """Return a transport-specific reconfigure schema for validation errors."""
+    if _reconfigure_endpoint_step(user_input) == "reconfigure_ble":
+        return _ble_schema(user_input)
+    return _tcp_schema(user_input)
+
+
+def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Compatibility wrapper returning a transport-specific schema."""
+    defaults = defaults or {}
+    transport = _normalize_transport(defaults.get(CONF_TRANSPORT))
+    if transport == TRANSPORT_BLE:
+        return _ble_schema(defaults)
+    if transport == TRANSPORT_TCP or _has_endpoint_input(defaults):
+        return _tcp_schema(defaults)
+    return _transport_schema()

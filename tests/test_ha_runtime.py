@@ -227,7 +227,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.37",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.38",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
@@ -625,6 +625,200 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         }
         assert (await options.async_step_init(option_values))["type"] == "create_entry"
         options.async_create_entry.assert_called_once_with(title="", data=option_values)
+
+    run(exercise())
+
+
+def test_config_flow_transport_specific_steps_and_ble_discovery() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+
+        tcp = config_flow_module.KC761ConfigFlow()
+        tcp.hass = hass
+        tcp.async_show_form = MagicMock(return_value={"type": "form"})
+        assert (await tcp.async_step_user()) ["type"] == "form"
+        transport_schema = tcp.async_show_form.call_args.kwargs["data_schema"]
+        assert {getattr(key, "key", key) for key in transport_schema.schema} == {CONF_TRANSPORT}
+        await tcp.async_step_user({CONF_TRANSPORT: "TCP"})
+        tcp_schema = tcp.async_show_form.call_args.kwargs["data_schema"]
+        assert {getattr(key, "key", key) for key in tcp_schema.schema} == {"host", "port"}
+
+        class FakeBluetooth:
+            @staticmethod
+            def async_scanner_count(_hass, *, connectable=True):
+                assert connectable
+                return 1
+
+            @staticmethod
+            async def async_request_active_scan(_hass, *, duration):
+                assert duration == 5
+
+            @staticmethod
+            def async_discovered_service_info(_hass, *, connectable=True):
+                assert connectable
+                return [SimpleNamespace(address="AA:BB:CC:DD:EE:FF", name="KC761")]
+
+        ble = config_flow_module.KC761ConfigFlow()
+        ble.hass = hass
+        ble.async_show_form = MagicMock(return_value={"type": "form"})
+        with patch.object(config_flow_module, "bluetooth", FakeBluetooth):
+            await ble.async_step_user({CONF_TRANSPORT: "BLE"})
+        assert ble.async_show_form.call_args.kwargs["step_id"] == "ble"
+        ble_schema = ble.async_show_form.call_args.kwargs["data_schema"]
+        assert {getattr(key, "key", key) for key in ble_schema.schema} == {
+            CONF_BLE_ADDRESS,
+            CONF_BLE_SERVICE_UUID,
+        }
+        ble_selector = next(
+            value for key, value in ble_schema.schema.items() if getattr(key, "key", key) == CONF_BLE_ADDRESS
+        )
+        assert ble_selector.config["custom_value"] is True
+        assert ble_selector.config["options"][0]["value"] == "AA:BB:CC:DD:EE:FF"
+
+        no_scanner = config_flow_module.KC761ConfigFlow()
+        no_scanner.hass = hass
+        no_scanner.async_show_form = MagicMock(return_value={"type": "form"})
+
+        class EmptyBluetooth:
+            @staticmethod
+            def async_scanner_count(_hass, *, connectable=True):
+                return 0
+
+            @staticmethod
+            def async_discovered_service_info(_hass, *, connectable=True):
+                return []
+
+        with patch.object(config_flow_module, "bluetooth", EmptyBluetooth):
+            await no_scanner.async_step_user({CONF_TRANSPORT: "BLE"})
+        empty_schema = no_scanner.async_show_form.call_args.kwargs["data_schema"]
+        empty_selector = next(
+            value for key, value in empty_schema.schema.items() if getattr(key, "key", key) == CONF_BLE_ADDRESS
+        )
+        assert empty_selector.config["custom_value"] is True
+        assert empty_selector.config["options"][0]["value"] == ""
+
+        entry = make_entry()
+        entry.data = {"transport": TRANSPORT_TCP, "host": "old", "port": 7601, "device_id": entry.unique_id}
+        hass.config_entries.async_get_entry.return_value = entry
+        reconfigure = config_flow_module.KC761ConfigFlow()
+        reconfigure.hass = hass
+        reconfigure.context = {"entry_id": entry.entry_id}
+        reconfigure.async_show_form = MagicMock(return_value={"type": "form"})
+        await reconfigure.async_step_reconfigure()
+        reconfigure_transport_schema = reconfigure.async_show_form.call_args.kwargs["data_schema"]
+        assert {getattr(key, "key", key) for key in reconfigure_transport_schema.schema} == {
+            CONF_TRANSPORT
+        }
+        with patch.object(config_flow_module, "bluetooth", EmptyBluetooth):
+            await reconfigure.async_step_reconfigure({CONF_TRANSPORT: "BLE"})
+        assert reconfigure.async_show_form.call_args.kwargs["step_id"] == "reconfigure_ble"
+        reconfigure_ble_schema = reconfigure.async_show_form.call_args.kwargs["data_schema"]
+        assert {getattr(key, "key", key) for key in reconfigure_ble_schema.schema} == {
+            CONF_BLE_ADDRESS,
+            CONF_BLE_SERVICE_UUID,
+        }
+
+        invalid = config_flow_module.KC761ConfigFlow()
+        invalid.async_show_form = MagicMock(return_value={"type": "form"})
+        await invalid.async_step_user({CONF_TRANSPORT: "serial"})
+        assert invalid.async_show_form.call_args.kwargs["errors"] == {"base": "invalid_transport"}
+
+        tcp_submit = config_flow_module.KC761ConfigFlow()
+        tcp_submit.async_show_form = MagicMock(return_value={"type": "form"})
+        tcp_submit._async_validate_and_create = AsyncMock(return_value={"type": "create_entry"})
+        assert (await tcp_submit.async_step_tcp({"host": "meter", "port": 7601}))["type"] == "create_entry"
+        tcp_submit._async_validate_and_create.assert_awaited_once_with(
+            {CONF_TRANSPORT: TRANSPORT_TCP, "host": "meter", "port": 7601}
+        )
+
+        ble_submit = config_flow_module.KC761ConfigFlow()
+        ble_submit.async_show_form = MagicMock(return_value={"type": "form"})
+        ble_submit._async_validate_and_create = AsyncMock(return_value={"type": "create_entry"})
+        assert (
+            await ble_submit.async_step_ble(
+                {CONF_BLE_ADDRESS: "AA:BB:CC:DD:EE:FF", CONF_BLE_SERVICE_UUID: BLE_VERIFIED_SERVICE_UUID}
+            )
+        )["type"] == "create_entry"
+
+        saved = config_flow_module.KC761ConfigFlow()
+        saved.hass = hass
+        with patch.object(config_flow_module, "bluetooth", EmptyBluetooth):
+            saved_options = await saved._async_ble_address_options("11:22:33:44:55:66")
+        assert saved_options[0]["value"] == "11:22:33:44:55:66"
+        with patch.object(config_flow_module, "bluetooth", None):
+            assert (await saved._async_ble_address_options())[0]["value"] == ""
+
+        reconfigure_invalid = config_flow_module.KC761ConfigFlow()
+        reconfigure_invalid.hass = hass
+        reconfigure_invalid.context = {"entry_id": entry.entry_id}
+        reconfigure_invalid.async_show_form = MagicMock(return_value={"type": "form"})
+        await reconfigure_invalid.async_step_reconfigure({CONF_TRANSPORT: "serial"})
+        assert reconfigure_invalid.async_show_form.call_args.kwargs["errors"] == {"base": "invalid_transport"}
+
+        reconfigure_tcp = config_flow_module.KC761ConfigFlow()
+        reconfigure_tcp.hass = hass
+        reconfigure_tcp.context = {"entry_id": entry.entry_id}
+        reconfigure_tcp.async_show_form = MagicMock(return_value={"type": "form"})
+        reconfigure_tcp._async_reconfigure_endpoint = AsyncMock(return_value={"type": "abort"})
+        await reconfigure_tcp.async_step_reconfigure({CONF_TRANSPORT: "TCP"})
+        assert reconfigure_tcp.async_show_form.call_args.kwargs["step_id"] == "reconfigure_tcp"
+        await reconfigure_tcp.async_step_reconfigure_tcp({"host": "new", "port": 7602})
+        reconfigure_tcp._async_reconfigure_endpoint.assert_awaited_once_with(
+            entry, {CONF_TRANSPORT: TRANSPORT_TCP, "host": "new", "port": 7602}
+        )
+
+        missing_ble_entry = config_flow_module.KC761ConfigFlow()
+        missing_ble_entry.hass = hass
+        missing_ble_entry.context = {"entry_id": entry.entry_id}
+        missing_ble_entry.async_abort = MagicMock(return_value={"type": "abort", "reason": "unknown"})
+        hass.config_entries.async_get_entry.return_value = None
+        assert (await missing_ble_entry.async_step_reconfigure_ble())["reason"] == "unknown"
+        hass.config_entries.async_get_entry.return_value = entry
+
+        reconfigure_ble = config_flow_module.KC761ConfigFlow()
+        reconfigure_ble.hass = hass
+        reconfigure_ble.context = {"entry_id": entry.entry_id}
+        reconfigure_ble.async_show_form = MagicMock(return_value={"type": "form"})
+        reconfigure_ble._async_reconfigure_endpoint = AsyncMock(return_value={"type": "abort"})
+        with patch.object(config_flow_module, "bluetooth", EmptyBluetooth):
+            await reconfigure_ble.async_step_reconfigure_ble()
+        assert reconfigure_ble.async_show_form.call_args.kwargs["step_id"] == "reconfigure_ble"
+        await reconfigure_ble.async_step_reconfigure_ble({CONF_BLE_ADDRESS: "AA:BB:CC:DD:EE:FF"})
+        reconfigure_ble._async_reconfigure_endpoint.assert_awaited_once_with(
+            entry, {CONF_TRANSPORT: TRANSPORT_BLE, CONF_BLE_ADDRESS: "AA:BB:CC:DD:EE:FF"}
+        )
+
+        no_info = config_flow_module.KC761ConfigFlow()
+        no_info.hass = hass
+        no_info.context = {"entry_id": entry.entry_id}
+
+        class NoInfoClient:
+            async def async_connect(self):
+                return None
+
+            async def async_get_device_info(self):
+                return None
+
+            async def async_get_status(self):
+                return None
+
+            async def async_close(self):
+                return None
+
+        with patch.object(no_info, "_new_flow_client", return_value=NoInfoClient()):
+            with pytest.raises(ValueError, match="no device information"):
+                await no_info._async_validate_reconfigure_endpoint("meter", 7601)
+
+        class MatchingClient(NoInfoClient):
+            async def async_get_device_info(self):
+                return make_info()
+
+        with patch.object(no_info, "_new_flow_client", return_value=MatchingClient()):
+            await no_info._async_validate_reconfigure_endpoint("meter", 7601, expected_device_id="7601-0000-000001")
+
+        assert config_flow_module._connection_schema().schema
+        assert config_flow_module._connection_schema({"transport": "tcp", "host": "x"}).schema
+        assert config_flow_module._connection_schema({"transport": "ble", CONF_BLE_ADDRESS: "AA"}).schema
 
     run(exercise())
 

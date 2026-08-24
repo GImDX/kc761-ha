@@ -136,8 +136,10 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertIn("BleakClientWithServiceCache", transport)
         self.assertNotIn("from bleak import BleakClient", transport)
         self.assertIn("ble_address", config_flow)
-        self.assertNotIn("async_discovered_service_info", config_flow)
-        self.assertIn("自动发现延后", architecture)
+        self.assertIn("async_discovered_service_info", config_flow)
+        self.assertIn("async_request_active_scan", config_flow)
+        self.assertIn("custom_value", config_flow)
+        self.assertIn("不实现 BLE 自动设备身份识别", architecture)
 
     def test_control_and_spectrum_files_are_present_without_services(self) -> None:
         integration = ROOT / "custom_components" / "kc761"

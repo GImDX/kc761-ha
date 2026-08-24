@@ -3,23 +3,47 @@
     "step": {
       "user": {
         "title": "Add KC761x radiation meter",
-        "description": "Connect to KC761x over local TCP or an explicit Bluetooth LE address. Automatic Bluetooth discovery is disabled until hardware advertisement evidence is available.",
+        "description": "Choose TCP or BLE first. The next step shows only the endpoint fields for that transport.",
         "data": {
-          "transport": "Transport (TCP or Bluetooth LE)",
+          "transport": "Transport (TCP or BLE)"
+        }
+      },
+      "tcp": {
+        "title": "TCP connection",
+        "description": "Enter the KC761x TCP host and port.",
+        "data": {
           "host": "Host or IP address",
-          "port": "TCP port",
-          "ble_address": "Bluetooth LE address",
+          "port": "TCP port"
+        }
+      },
+      "ble": {
+        "title": "BLE connection",
+        "description": "Choose a discovered BLE device or enter its address manually. Discovery reads advertisements only.",
+        "data": {
+          "ble_address": "BLE address",
           "ble_service_uuid": "BLE service UUID override (default is the verified device service)"
         }
       },
       "reconfigure": {
         "title": "Reconfigure KC761x connection",
-        "description": "The device ID returned by the new endpoint must match this entry.",
+        "description": "Choose TCP or BLE. The device ID returned by the new endpoint must match this entry.",
         "data": {
-          "transport": "Transport (TCP or Bluetooth LE)",
+          "transport": "Transport (TCP or BLE)"
+        }
+      },
+      "reconfigure_tcp": {
+        "title": "Reconfigure TCP connection",
+        "description": "Enter the new TCP host and port. The device ID must remain unchanged.",
+        "data": {
           "host": "Host or IP address",
-          "port": "TCP port",
-          "ble_address": "Bluetooth LE address",
+          "port": "TCP port"
+        }
+      },
+      "reconfigure_ble": {
+        "title": "Reconfigure BLE connection",
+        "description": "Choose a discovered BLE device or enter its address manually. The device ID must remain unchanged.",
+        "data": {
+          "ble_address": "BLE address",
           "ble_service_uuid": "BLE service UUID override (default is the verified device service)"
         }
       }
@@ -29,7 +53,7 @@
       "device_mismatch": "The new endpoint returned a different device ID.",
       "invalid_transport": "Choose TCP or Bluetooth LE.",
       "invalid_tcp_endpoint": "Enter a valid TCP host and port.",
-      "invalid_ble_address": "Enter a Bluetooth LE address that Home Assistant can resolve.",
+      "invalid_ble_address": "Enter a BLE address that Home Assistant can resolve.",
       "invalid_ble_service_uuid": "Enter a complete verified BLE service UUID override, or leave it blank to use the device default."
     },
     "abort": {
