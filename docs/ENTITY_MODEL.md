@@ -14,7 +14,7 @@
 - 设备/实体唯一标识来自 `DEVICE_ID` 和稳定字段 key，不使用 IP、端口或用户名称。
 - 测量实体只读取 Coordinator 内存快照，属性访问不得触发网络 I/O。
 - 当前代码候选默认开启设备端 AVG 字段；实机证据表明本设备的三个 AVG 字段恒为 0，而官方上位机在本地计算 30 秒平均值。该差异登记为已知问题 `KI-AVG-001`，按限制接受，本设备本轮实机验收通过。
-- 单位不确定的累计量仅保留解析结果，不创建实体，也不声明长期统计。
+- 累计量可以被设备清零，因此即使手册存在单位矛盾，也按裁决创建普通实体，不声明长期统计 state class。
 - 完整谱图和脉冲数组不作为实体属性。
 
 ## 2. Device Registry
@@ -68,18 +68,29 @@ Home Assistant 当前没有针对核辐射剂量率的专用 device class，因�
 - 如果 HA 的单位转换系统不支持辐射单位，实体固定发布一种单位；翻译只改变名称，不改变单位。
 - 在确认 FP16 和缩放前，剂量相关实体不能进入稳定版本。
 
-## 5. 每通道累计候选值与诊断实体
+## 5. 每通道累计普通实体与诊断值
 
 | 稳定 key | 显示名称 | 来源 | 候选语义 | 当前 RC | 发布门禁 |
 | --- | --- | --- | --- | --- | --- |
-| `<channel>_spectrum_runtime` | 谱图累计时间 | `RADn_MC_RUNTIME` | duration `s` | 仅保留解析值，不创建实体 | 端序确认 |
-| `<channel>_dose_runtime` | 剂量累计时间 | `RADn_SUM_DOSE_TIME` | duration `s` | 仅保留解析值，不创建实体 | 端序确认 |
-| `<channel>_cumulative_dose` | 累计剂量 | `RADn_SUM_DOSE` | total increasing | 仅保留解析值，不创建实体 | 单位和缩放确认 |
-| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `RADn_SUM_DOSE_EQ` | total increasing | 仅保留解析值，不创建实体 | 单位和缩放确认 |
+| `<channel>_spectrum_runtime` | 谱图累计时间 | `RADn_MC_RUNTIME` | duration `s` | 已安装通道创建、普通实体 | 清空谱图时归零 |
+| `<channel>_dose_runtime` | 剂量累计时间 | `RADn_SUM_DOSE_TIME` | duration `s` | 已安装通道创建、普通实体 | 清空累计剂量时归零 |
+| `<channel>_cumulative_dose` | 累计剂量 | `RADn_SUM_DOSE` | `mGy` | 已安装通道创建、普通实体 | 不设置 state class，避免重置污染长期统计 |
+| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `RADn_SUM_DOSE_EQ` | `mSv` | 已安装通道创建、普通实体 | 不设置 state class，避免重置污染长期统计 |
 | `<channel>_spectrum_accumulating` | 谱图正在累计 | `RAD_SENSOR_STATUS` 位 | binary sensor | 已安装通道创建、默认禁用/diagnostic | 位定义实机确认 |
 | `<channel>_sensor_type` | 传感器型号 | `RADn_SENSOR_TYPE` | enum/text | 不创建实体，仅 diagnostics | 型号映射确认 |
 
-累计剂量可以被命令 `0x66` 清零，因此若实机确认其只会递增或归零，可使用 `TOTAL_INCREASING`。在单位矛盾解决前不设置 state class，避免在长期统计中固化错误倍率。
+这些累计字段都会因设备端清空操作而重置，按用户裁决统一作为普通实体，不使用 `TOTAL_INCREASING` 或其它 state class。表格仍写 `uGy/uSv`、正文写 `mGy/mSv` 的手册矛盾保留在协议证据中；实现采用正文和当前 rate 一致的 `mGy/mSv` 显示，不声称跨固件倍率已硬件确认。
+
+## 6. A6 校准只读字段
+
+| key | 手册字段 | 类型/单位 | 当前实现 |
+| --- | --- | --- | --- |
+| `rad0_trigger_offset` / `rad2_trigger_offset` | `RAD0/RAD2_TRIGGER_OFFSET` | uint16 | 普通 sensor，只读 |
+| `rad0_dose_zoom` / `rad1_dose_zoom` / `rad2_dose_zoom` | `RAD0/1/2_DOSE_ZOOM` | float | 普通 sensor，只读 |
+| `neu_window_center` | `NEU_WINDOW_CENTER` | uint16，`ch` | 普通 sensor，保留 CENTER 命名 |
+| `altitude_m_offset` | `ALTITUDE_M_OFFSET` | int16，`m` | 普通 sensor，只读 |
+
+当前安全写协议仅覆盖 `0x62/0x63/0x66`；虽然手册描述 `0x64`，集成继续禁止其写入，因此 A6 新字段不创建 number/control 实体。实体值在最近一次 A6 读取后可用，未读取时为 `unknown`。
 
 ## 6. 可选控制实体的后续设计
 

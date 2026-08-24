@@ -188,6 +188,13 @@ def decode_calibration(frame: RawFrame) -> CalibrationData:
         channel0_factory_high=floats(126, 4),
         channel0_factory_node1=struct.unpack_from("<H", body, 142)[0],
         channel0_factory_node2=struct.unpack_from("<H", body, 144)[0],
+        rad0_trigger_offset=struct.unpack_from("<H", body, 26)[0],
+        rad2_trigger_offset=struct.unpack_from("<H", body, 28)[0],
+        rad0_dose_zoom=floats(30)[0],
+        rad1_dose_zoom=floats(34)[0],
+        rad2_dose_zoom=floats(38)[0],
+        neu_window_center=struct.unpack_from("<H", body, 42)[0],
+        altitude_m_offset=struct.unpack_from("<h", body, 44)[0],
         source_flag=frame.flag,
     )
 
@@ -430,13 +437,20 @@ def build_spectrum_frame(
     return frame_bytes(sync, FLAG_MC_DATA_UPLOAD if upload else FLAG_MC_DATA_QUERY, body)
 
 
-def build_calibration_frame(sync: int) -> bytes:
+def build_calibration_frame(sync: int, **kwargs: object) -> bytes:
     """Build a deterministic A6 fixture with identity energy calibration."""
     body = bytearray(146)
     body[0] = 2
     body[1] = 0
     for offset in (2, 10, 18):
         struct.pack_into("<f", body, offset, 1.0)
+    struct.pack_into("<H", body, 26, int(kwargs.get("rad0_trigger_offset", 0)))
+    struct.pack_into("<H", body, 28, int(kwargs.get("rad2_trigger_offset", 0)))
+    struct.pack_into("<f", body, 30, float(kwargs.get("rad0_dose_zoom", 1.0)))
+    struct.pack_into("<f", body, 34, float(kwargs.get("rad1_dose_zoom", 1.0)))
+    struct.pack_into("<f", body, 38, float(kwargs.get("rad2_dose_zoom", 1.0)))
+    struct.pack_into("<H", body, 42, int(kwargs.get("neu_window_center", 0)))
+    struct.pack_into("<h", body, 44, int(kwargs.get("altitude_m_offset", 0)))
     identity = (0.0, 0.0, 1.0, 0.0)
     for offset in (46, 62, 78, 94, 110, 126):
         struct.pack_into("<4f", body, offset, *identity)

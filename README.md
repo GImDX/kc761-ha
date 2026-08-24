@@ -2,7 +2,7 @@
 
 本仓库用于开发 KC761A、KC761B、KC761C、KC761CN 便携式核辐射分析仪的 Home Assistant 自定义集成，并以 HACS 兼容仓库形式发布。
 
-当前开发版本为 `0.2.0-alpha.35`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
+当前开发版本为 `0.2.0-alpha.36`。在 `0.1.0-rc.1` 实机只读基线上，本项目提供 2048 道结构化谱图、ECharts SVG、ROI/Data/zoom 本地持久化、Ctrl+滚轮横向缩放、原生 Lovelace 配置/可见性/布局接口和固定 Sections 行高适配；详细功能与验收边界见 [0.2 扩展设计](docs/V0_2_EXPANSION.md)。
 
 alpha.31 延续 alpha.28 的暂态缺失配置保护，并将可选 `diagnostics: true` 测试诊断升级为 schema 4：普通生命周期事件仍保留有界环形记录，连续的 HA readiness 噪声会合并；错误事件按稳定脱敏签名去重，并另存于不会被普通事件挤出的有界 `failures` 环中。诊断会在当前浏览器 tab 的 `sessionStorage` 中脱敏保存，可记录窗口错误、未处理 rejection 以及递归发现的开放 Shadow DOM 中的 Lovelace `hui-error-card`。除卡片内 `Export diagnostics` 外，启用诊断后还会在页面 body 放置一个固定、可访问且不占布局空间的 `Export KC761 diagnostics` 按钮；点击时以 256 个 root、10000 个节点和约 100ms 为界限做一次深层快照，弥补持续 observer 的 root 上限，并只生成本地 JSON 下载。ResizeObserver 的布局/图表重绘统一延后到 requestAnimationFrame，避免同步 resize 触发循环；默认关闭时不写存储、不注册监听器、不显示按钮；不会上传实体、状态、点阵、设备 ID、主机或凭据。
 
@@ -25,7 +25,7 @@ alpha.14 已在测试 HA 的同一 `HUI-SECTIONS-VIEW` 固定行高编辑场景�
 - 集成域名规划为 `kc761`。
 - 首版传输仅支持局域网 TCP；设备作为 TCP 服务端，Home Assistant 主动连接。
 - 配置通过 Home Assistant Config Flow 完成，以设备返回的 `DEVICE_ID` 作为唯一标识。
-- 提供实时辐射数据、环境数据、完整设备信息和一个结构化谱图实体；累计剂量候选值仍不创建测量实体或长期统计。
+- 提供实时辐射数据、环境数据、完整设备信息、A6 校准只读字段和一个结构化谱图实体；每个已安装通道另外提供可重置的累计时间、累计剂量和累计剂量当量普通实体。
 - 默认每 5 秒读取一次实时状态，每 60 秒读取一次设备信息。
 - Options 可调整轮询、是否创建 raw 实体、定时校时使能/间隔、定时保存谱图使能/周期。
 - 读取命令扩展为 `0x52/0x53/0x54/0x55`；模拟器控制覆盖 `0x62/0x63/0x66`，校准写入 `0x64` 继续禁止。

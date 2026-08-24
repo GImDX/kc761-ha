@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.2.0-alpha.35"
+VERSION = "0.2.0-alpha.36"
 DEFAULT_PORT = 7601
 DEFAULT_STATUS_INTERVAL = 5
 DEFAULT_INFO_INTERVAL = 60

@@ -158,6 +158,11 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     def latest_spectrum(self) -> SpectrumSnapshot | None:
         return self._latest_spectrum
 
+    @property
+    def calibration(self) -> CalibrationData | None:
+        """Return the latest A6 calibration response for read-only entities."""
+        return self._calibration
+
     async def async_start(self) -> None:
         """Initialize bounded spectrum storage and optional background schedules."""
         archive_path = Path(self._hass.config.path(".storage", DOMAIN, self.entry.entry_id))

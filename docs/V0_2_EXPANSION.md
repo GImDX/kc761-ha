@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.35`，谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.36`，在 alpha35 的谱图卡与生命周期基础上补齐 A5 三通道累计字段普通实体、A6 七个校准只读实体和对应协议/HA 测试；谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -40,7 +40,7 @@ Device Registry 使用：
 
 当前资料不能可靠确认制造商标准名称，因此不填写 `manufacturer`。
 
-设备级实体包括电池、气压、设备温度、设备时间、时钟偏差、协处理器固件版本、设备唯一 ID，以及 Gamma、Neutron、PIN 三个固定通道的传感器型号。即使某通道未安装，也保留其型号实体并显示“未安装”，使设备信息完整且稳定。
+设备级实体包括电池、气压、设备温度、设备时间、时钟偏差、协处理器固件版本、设备唯一 ID、A6 七个校准只读字段，以及 Gamma、Neutron、PIN 三个固定通道的传感器型号。即使某通道未安装，也保留其型号实体并显示“未安装”，使设备信息完整且稳定。
 
 传感器型号映射：
 
@@ -55,7 +55,7 @@ Device Registry 使用：
 | `0x08` | KC7601.31 6Li |
 | 其它 | `Unknown (0xNN)` |
 
-已安装通道继续创建 AVG 测量实体；本设备 AVG 恒为 0 的行为按 `KI-AVG-001` 已知问题接受。raw 实体仍由 Options 显式选择是否创建。
+已安装通道继续创建 AVG 测量实体和四个 A5 累计普通实体；累计实体的时间单位为秒，剂量/剂量当量单位为 `mGy`/`mSv`，不设置 state class，因为 `0x66` 清空会重置它们。本设备 AVG 恒为 0 的行为按 `KI-AVG-001` 已知问题接受。raw 实体仍由 Options 显式选择是否创建。
 
 ## 3. 非破坏性控制实体
 

@@ -46,6 +46,7 @@ from custom_components.kc761.protocol.codec import (
 )
 from custom_components.kc761.protocol.framing import FrameParser, frame_bytes
 from custom_components.kc761.protocol.models import (
+    CumulativeChannel,
     DecodeError,
     RawFrame,
     SpectrumData,
@@ -226,8 +227,14 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(info.fw_version_text, "V1.80")
         self.assertEqual(info.co_fw_version_text, "V1.80")
         self.assertEqual(info.sensor_types, (2, 0, 0))
-        self.assertEqual(info.cumulative[0].spectrum_runtime, 3600)
-        self.assertEqual(info.cumulative[2].cumulative_dose_equivalent, 6.0)
+        self.assertEqual(
+            info.cumulative,
+            (
+                CumulativeChannel(3600, 7200, 1.0, 2.0),
+                CumulativeChannel(7200, 14400, 2.0, 4.0),
+                CumulativeChannel(10800, 21600, 3.0, 6.0),
+            ),
+        )
         self.assertFalse(info.hardware_verified)
         self.assertEqual(build_device_info_frame(5), MANUAL_DEVICE_INFO_FRAME)
 
@@ -256,8 +263,26 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(segment.counts, (20, 22, 24))
         self.assertEqual(decode_frame(spectrum_frame).kind, "spectrum")
 
-        calibration_frame = FrameParser().feed(build_calibration_frame(8))[0]
+        calibration_frame = FrameParser().feed(
+            build_calibration_frame(
+                8,
+                rad0_trigger_offset=17,
+                rad2_trigger_offset=29,
+                rad0_dose_zoom=0.5,
+                rad1_dose_zoom=1.25,
+                rad2_dose_zoom=4.75,
+                neu_window_center=1536,
+                altitude_m_offset=-321,
+            )
+        )[0]
         calibration = decode_calibration(calibration_frame)
+        self.assertEqual(calibration.rad0_trigger_offset, 17)
+        self.assertEqual(calibration.rad2_trigger_offset, 29)
+        self.assertEqual(calibration.rad0_dose_zoom, 0.5)
+        self.assertEqual(calibration.rad1_dose_zoom, 1.25)
+        self.assertEqual(calibration.rad2_dose_zoom, 4.75)
+        self.assertEqual(calibration.neu_window_center, 1536)
+        self.assertEqual(calibration.altitude_m_offset, -321)
         self.assertEqual(calibration.energy_kev(0, 123), 123)
         self.assertEqual(calibration.energy_kev(1, 456), 456)
         self.assertEqual(calibration.energy_kev(2, 789), 789)

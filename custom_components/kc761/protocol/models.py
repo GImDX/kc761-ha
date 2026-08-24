@@ -81,7 +81,7 @@ class StatusData:
 
 @dataclass(frozen=True, slots=True)
 class CumulativeChannel:
-    """Candidate cumulative values kept out of stable entities until verified."""
+    """One channel's resettable cumulative values from the A5 response."""
 
     spectrum_runtime: int | None
     dose_runtime: int | None
@@ -160,6 +160,13 @@ class CalibrationData:
     channel0_factory_high: tuple[float, float, float, float]
     channel0_factory_node1: int
     channel0_factory_node2: int
+    rad0_trigger_offset: int
+    rad2_trigger_offset: int
+    rad0_dose_zoom: float
+    rad1_dose_zoom: float
+    rad2_dose_zoom: float
+    neu_window_center: int
+    altitude_m_offset: int
     source_flag: int
 
     def energy_kev(self, source: int, channel: int) -> float:
