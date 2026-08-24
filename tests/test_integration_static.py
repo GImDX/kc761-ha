@@ -363,10 +363,13 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertNotIn("rows: 8", frontend)
         self.assertNotIn("s" + "hift", frontend.lower())
         self.assertIn('renderer: "svg"', frontend)
+        # Hash normalized content so Git/Windows checkout line endings do not
+        # turn a byte-identical vendor file into a false drift failure.
         vendor = (integration / "frontend" / "echarts.esm.min.js").read_bytes()
+        vendor = vendor.replace(b"\r\n", b"\n")
         self.assertEqual(
             hashlib.sha256(vendor).hexdigest(),
-            "7208389ba18117a367f9393bd9cedece18a79ae052da30e050eaad9f4fad8c05",
+            "28515f26aa57f87eb1e4ed4eb446927eaf329b5f5e02b4bfd4b0264fea40d1da",
         )
         third_party = (integration / "frontend" / "echarts-THIRD-PARTY.md").read_text(encoding="utf-8")
         self.assertIn("echarts`\n- Version: `6.1.0`", third_party)
