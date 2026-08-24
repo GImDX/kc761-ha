@@ -1348,6 +1348,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._xAxisMode = DEFAULT_CARD_CONFIG.x_axis;
     this._historyLoaded = false;
     this._historyLoadPromise = null;
+    this._historyRequestToken = 0;
+    this._historySelectionToken = 0;
     this._themeRefreshRaf = null;
     this._themeValues = {};
     this._colorsReady = false;
@@ -1576,6 +1578,9 @@ class KC761SpectrumCard extends HTMLElement {
   disconnectedCallback() {
     diagnosticsRecord("disconnected");
     this._detached = true;
+    this._historyRequestToken += 1;
+    this._historySelectionToken += 1;
+    this._historyLoadPromise = null;
     this._drawToken += 1;
     this._flushViewState();
     this._stopAutoRefresh();
@@ -1711,6 +1716,7 @@ class KC761SpectrumCard extends HTMLElement {
         .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:12px;color:var(--secondary-text-color)}.legend span{display:inline-flex;gap:5px;align-items:center}.swatch{width:12px;height:3px;display:inline-block;border-radius:2px}.swatch.roi{background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart})}.swatch.peak{background:var(--kc761-spectrum-peak,${COLOR_FALLBACKS.peak})}.swatch.data{background:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor})}.swatch.curve{background:var(--kc761-spectrum-curve,${COLOR_FALLBACKS.curve})}
         .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:58px;gap:6px;margin:8px 0;font-size:12px}.summary div{box-sizing:border-box;min-width:0;height:58px;padding:6px 8px;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}.summary b{display:block;min-width:0;height:1.3em;max-height:1.3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:1.3;margin-top:2px}
         .status{min-height:20px;margin-top:8px;color:var(--secondary-text-color)}.status.error{color:var(--error-color)}.actions{margin-top:10px}.spacer{flex:1}
+        .history-runtime{display:flex;align-items:end;gap:8px;margin-top:4px}.history-runtime label{min-width:0;flex:1 1 280px}.history-runtime select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
         .help{font-size:12px;color:var(--secondary-text-color);margin-top:5px}.roi-slider{position:relative;min-width:250px;flex:1 1 300px;padding:8px 0 4px}.data-slider{position:relative;width:100%;min-width:0;flex:none;padding:8px 0 4px}.data-slider-row{display:flex;gap:8px;align-items:end;margin-top:4px}.data-slider-label{flex:1 1 300px;min-width:250px}.roi-slider-track,.data-slider-track{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:4px;background:var(--divider-color)}.roi-slider-fill{position:absolute;top:0;height:4px;border-radius:4px;background:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});opacity:.9}.roi-slider input,.data-slider input{position:absolute;left:0;top:8px;width:100%;height:24px;margin:0;padding:0;border:0;background:transparent;appearance:none}.roi-slider input{pointer-events:none}.roi-slider input::-webkit-slider-thumb,.data-slider input::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px currentColor;pointer-events:auto;cursor:ew-resize}.roi-slider input::-moz-range-thumb,.data-slider input::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--card-background-color);border-radius:50%;background:currentColor;box-shadow:0 0 0 1px currentColor;pointer-events:auto;cursor:ew-resize}.roi-slider input:first-of-type{color:var(--kc761-spectrum-roi-start,${COLOR_FALLBACKS.roiStart});z-index:2}.roi-slider input:last-of-type{color:var(--kc761-spectrum-roi-end,${COLOR_FALLBACKS.roiEnd});z-index:3}.data-slider input{color:var(--kc761-spectrum-data,${COLOR_FALLBACKS.dataCursor});z-index:3}.roi-values,.data-values{display:flex;justify-content:space-between;gap:8px;font-variant-numeric:tabular-nums;margin-top:20px}.data-values span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}.editor-only{display:block}.configure{font-size:12px;padding:5px 8px}
         @media (max-width:600px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.header h2{font-size:18px}}
         ha-card.compact-height .chart-wrap{height:240px;flex-basis:240px;min-height:200px}ha-card.compact-height .summary{grid-auto-rows:52px}ha-card.compact-height .summary div{height:52px;padding:5px 7px}ha-card.compact-height .summary b{font-size:13px}ha-card.compact-height .actions{margin-top:6px}ha-card.compact-height select,ha-card.compact-height input,ha-card.compact-height button{padding:5px 7px}
@@ -1718,11 +1724,13 @@ class KC761SpectrumCard extends HTMLElement {
       <ha-card>
         <div class="header"><h2 id="title"></h2><div class="zoom-meta"><span id="zoom-readout" class="zoom-readout" role="status" aria-live="polite">View CH 0–2047</span><button id="reset-zoom" class="reset-zoom" type="button" disabled>Reset zoom</button></div><button id="export-diagnostics" class="configure" type="button" hidden>Export diagnostics</button><button id="configure" class="configure" type="button">Configure</button></div>
         <div id="controls">
+          <div id="history-control" class="history-runtime">
+            <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
+          </div>
           <div id="editor-controls" class="toolbar editor-only">
             <label>Channel<select id="source"></select></label>
             <label>X axis<select id="xaxis"><option value="energy">Energy (keV)</option><option value="channel">Channel</option></select></label>
             <label>Y axis<select id="yaxis"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></label>
-            <label>Saved spectrum<select id="history"><option value="latest">Latest</option></select></label>
           </div>
           <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">Start CH 0</span><span aria-hidden="true">·</span><span id="roi-end-value">End CH 2047</span></div></div>
           </div>
@@ -1762,7 +1770,10 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#roi-end").addEventListener("input", () => this._syncRoiFromInputs("end"));
     this.shadowRoot.querySelector("#data-cursor-slider").addEventListener("input", (event) => this._setCursorChannel("data", event.target.value));
     this.shadowRoot.querySelector("#reset-zoom").addEventListener("click", () => this._resetZoom());
-    this.shadowRoot.querySelector("#history").addEventListener("change", (event) => this._selectHistory(event.target.value));
+    const history = this.shadowRoot.querySelector("#history");
+    history.addEventListener("focus", () => this._requestHistoryFromInteraction());
+    history.addEventListener("pointerdown", () => this._requestHistoryFromInteraction());
+    history.addEventListener("change", (event) => this._selectHistory(event.target.value));
     this.shadowRoot.querySelector("#capture").addEventListener("click", () => this._capture());
     this.shadowRoot.querySelector("#save").addEventListener("click", () => this._save());
     this.shadowRoot.querySelector("#csv").addEventListener("click", () => this._csv());
@@ -1800,7 +1811,9 @@ class KC761SpectrumCard extends HTMLElement {
     const configure = this.shadowRoot.querySelector("#configure");
     if (editorControls) editorControls.hidden = !dialogPreview;
     if (configure) configure.hidden = dialogPreview;
-    if (dialogPreview && this._config?.show_controls !== false) this._requestHistoryLoad();
+    if (dialogPreview && this._config?.show_controls !== false) {
+      void this._requestHistoryLoad().catch((error) => this._handleHistoryError("history-load-failure", error));
+    }
     if (path && this._preview) {
       this._clearEditorHandoffRetry();
       this._tryConsumeEditorHandoff(path);
@@ -1931,6 +1944,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._history = [];
     this._historyLoaded = false;
     this._historyLoadPromise = null;
+    this._historySelectionToken += 1;
     this._pointCache = null;
     this._summaryCache = null;
     this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
@@ -2566,9 +2580,13 @@ class KC761SpectrumCard extends HTMLElement {
     }
   }
 
-  async _loadHistory(generation = this._entityGeneration, entryId = this._entryId) {
+  async _loadHistory(
+    generation = this._entityGeneration,
+    entryId = this._entryId,
+    requestToken = this._historyRequestToken,
+  ) {
     const history = await this._call({ type: "kc761/spectrum/list", entry_id: entryId });
-    if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+    if (requestToken !== this._historyRequestToken || this._detached || generation !== this._entityGeneration || entryId !== this._entryId) return;
     this._history = history;
     this._historyLoaded = true;
     const select = this.shadowRoot.querySelector("#history");
@@ -2593,31 +2611,50 @@ class KC761SpectrumCard extends HTMLElement {
     if (this._historyLoadPromise) return this._historyLoadPromise;
     const generation = this._entityGeneration;
     const entryId = this._entryId;
-    const request = this._loadHistory(generation, entryId).finally(() => {
+    const requestToken = this._historyRequestToken;
+    const request = this._loadHistory(generation, entryId, requestToken).finally(() => {
       if (this._historyLoadPromise === request) this._historyLoadPromise = null;
     });
     this._historyLoadPromise = request;
     return request;
   }
 
+  _handleHistoryError(event, error) {
+    if (this._detached) return;
+    diagnosticsRecordError(event, error);
+    this._setStatus(error?.message || String(error), true);
+  }
+
+  _requestHistoryFromInteraction() {
+    if (!this._entryId || this._detached) return;
+    void this._requestHistoryLoad().catch((error) => this._handleHistoryError("history-load-failure", error));
+  }
+
   async _selectHistory(snapshotId) {
     const generation = this._entityGeneration;
     const entryId = this._entryId;
-    if (snapshotId === "latest") {
-      const state = this._hass.states[this._config.entity];
-      this._setData(this._fromEntity(state), { viewMode: "live" });
-    } else {
-      if (!this._historyLoaded) await this._requestHistoryLoad();
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-      this._setData({ ...data, snapshot_id: snapshotId }, { viewMode: `history:${snapshotId}` });
+    const requestToken = this._historyRequestToken;
+    const selectionToken = ++this._historySelectionToken;
+    try {
+      if (snapshotId === "latest") {
+        const state = this._hass?.states?.[this._config.entity];
+        if (!state) throw new Error("Live spectrum is unavailable");
+        this._setData(this._fromEntity(state), { viewMode: "live" });
+      } else {
+        if (!this._historyLoaded) await this._requestHistoryLoad();
+        if (selectionToken !== this._historySelectionToken || requestToken !== this._historyRequestToken || this._detached || generation !== this._entityGeneration || entryId !== this._entryId) return;
+        const data = await this._call({ type: "kc761/spectrum/get", entry_id: entryId, snapshot_id: snapshotId });
+        if (selectionToken !== this._historySelectionToken || requestToken !== this._historyRequestToken || this._detached || generation !== this._entityGeneration || entryId !== this._entryId) return;
+        this._setData({ ...data, snapshot_id: snapshotId }, { viewMode: `history:${snapshotId}` });
+      }
+      if (selectionToken !== this._historySelectionToken || requestToken !== this._historyRequestToken || this._detached || generation !== this._entityGeneration || entryId !== this._entryId) return;
+      this.shadowRoot.querySelector("#source").value = String(this._data.source);
+      this._updateSummary();
+      this._draw();
+      this._syncAutoRefresh();
+    } catch (error) {
+      this._handleHistoryError("history-select-failure", error);
     }
-    if (generation !== this._entityGeneration || entryId !== this._entryId) return;
-    this.shadowRoot.querySelector("#source").value = String(this._data.source);
-    this._updateSummary();
-    this._draw();
-    this._syncAutoRefresh();
   }
 
   async _capture({ silent = false } = {}) {

@@ -50,6 +50,10 @@ class FakeNode {
     this.clicked = true;
     this.listenerCallbacks.get("click")?.({ currentTarget: this, target: this, type: "click" });
   }
+  emit(type, init = {}) {
+    const event = { ...init, currentTarget: this, target: init.target || this, type };
+    this.listenerCallbacks.get(type)?.(event);
+  }
   listenerCount(type) { return this.listeners.get(type) || 0; }
   setPointerCapture() {}
   setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = String(value); }
@@ -1117,9 +1121,80 @@ assert.equal(
   "unavailable state remains outside strict spectrum validation",
 );
 
-// The normal dashboard path must not request saved-spectrum history.  Opening
-// the card editor requests it lazily, and concurrent editor transitions share
-// one websocket request.
+// The normal dashboard path exposes one compact saved-spectrum selector but
+// does not request history until the user opens it.  Focus/pointerdown share a
+// single lazy request, and selecting a saved record or Live never mutates the
+// Lovelace config.
+const runtimeHistoryCard = new Card();
+runtimeHistoryCard.setConfig({ entity: "sensor.runtime_history_spectrum" });
+runtimeHistoryCard.isConnected = true;
+runtimeHistoryCard._entryId = "entry-runtime-history";
+runtimeHistoryCard._data = { source: 0, points: [[0, 1, 2]] };
+runtimeHistoryCard._draw = () => {};
+runtimeHistoryCard._updateSummary = () => {};
+const runtimeHistoryCalls = [];
+runtimeHistoryCard._hass = {
+  states: {
+    "sensor.runtime_history_spectrum": {
+      attributes: { config_entry_id: "entry-runtime-history", codec_profile: "manual_v1_8_candidate", source: 0, points: [[0, 1, 2]] },
+    },
+  },
+  callWS: async (message) => {
+    runtimeHistoryCalls.push(message);
+    if (message.type === "kc761/spectrum/list") {
+      return [{ snapshot_id: "saved-runtime", channel: 0, acquired_at: "2026-08-24T00:00:00Z", total_counts: 12 }];
+    }
+    if (message.type === "kc761/spectrum/get") {
+      return { source: 0, channel: 0, points: [[0, 4, 12]], acquired_at: "2026-08-24T00:00:00Z", total_counts: 12 };
+    }
+    throw new Error(`unexpected websocket call ${message.type}`);
+  },
+};
+const runtimeHistorySelect = runtimeHistoryCard.shadowRoot.querySelector("#history");
+assert.equal(runtimeHistoryCard.shadowRoot.querySelector("#history-control").hidden, false, "normal view shows saved spectrum control");
+assert.equal(runtimeHistoryCard.shadowRoot.querySelector("#editor-controls").hidden, true, "normal view keeps editor controls hidden");
+assert.equal(runtimeHistorySelect.listenerCount("focus"), 1, "history opens from keyboard focus");
+assert.equal(runtimeHistorySelect.listenerCount("pointerdown"), 1, "history opens from pointer interaction");
+assert.deepEqual(runtimeHistoryCalls, [], "normal view starts with no history websocket request");
+runtimeHistorySelect.emit("focus");
+const runtimeHistoryRequest = runtimeHistoryCard._historyLoadPromise;
+runtimeHistorySelect.emit("pointerdown");
+assert.equal(runtimeHistoryCard._historyLoadPromise, runtimeHistoryRequest, "focus and pointerdown deduplicate history loading");
+await runtimeHistoryRequest;
+assert.deepEqual(runtimeHistoryCalls.map((message) => message.type), ["kc761/spectrum/list"]);
+const runtimeCardEvents = [];
+runtimeHistoryCard.dispatchEvent = (event) => runtimeCardEvents.push(event);
+runtimeHistorySelect.emit("change", { target: { value: "saved-runtime" } });
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(runtimeHistoryCard._data.snapshot_id, "saved-runtime", "runtime selector loads a saved spectrum");
+assert.equal(runtimeHistoryCalls.filter((message) => message.type === "kc761/spectrum/get").length, 1);
+runtimeHistorySelect.emit("change", { target: { value: "latest" } });
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(runtimeHistoryCard._data.snapshot_id, undefined, "Live returns to the current entity spectrum");
+assert.deepEqual(runtimeCardEvents, [], "history selection does not dispatch config mutation events");
+const historyFailureCard = new Card();
+historyFailureCard.setConfig({ entity: "sensor.history_failure_spectrum" });
+historyFailureCard.isConnected = true;
+historyFailureCard._entryId = "entry-history-failure";
+historyFailureCard._hass = { callWS: async () => { throw new Error("history unavailable"); } };
+const historyFailureSelect = historyFailureCard.shadowRoot.querySelector("#history");
+historyFailureSelect.emit("focus");
+const historyFailureRequest = historyFailureCard._historyLoadPromise;
+await historyFailureRequest.catch(() => {});
+await Promise.resolve();
+assert.equal(historyFailureCard.shadowRoot.querySelector("#status").textContent, "history unavailable", "history errors remain visible without breaking the card");
+assert.equal(historyFailureCard.shadowRoot.querySelector("#status").classList.contains("error"), true);
+const runtimeGeneration = runtimeHistoryCard._historyRequestToken;
+runtimeHistoryCard._historyLoadPromise = new Promise(() => {});
+runtimeHistoryCard.disconnectedCallback();
+assert.equal(runtimeHistoryCard._historyLoadPromise, null, "disconnect clears the pending history request handle");
+assert.ok(runtimeHistoryCard._historyRequestToken > runtimeGeneration, "disconnect invalidates late history results");
+
+// The editor preview still requests history through the same single control;
+// the existing test also covers concurrent editor transitions sharing one
+// websocket request.
 const historyCard = new Card();
 historyCard.setConfig({ entity: "sensor.history_spectrum" });
 historyCard.isConnected = true;

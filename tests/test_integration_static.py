@@ -392,10 +392,13 @@ class IntegrationStaticTests(unittest.TestCase):
         for summary_id in ("acquired", "runtime", "total", "peak", "roi-total", "cursor-value"):
             self.assertIn(f'this._setSummaryValue("#{summary_id}"', frontend)
         self.assertNotIn('entity: "sensor.kc761_spectrum"', frontend)
+        self.assertIn('id="history-control"', frontend)
+        self.assertEqual(frontend.count('id="history"'), 1)
+        self.assertIn("_requestHistoryFromInteraction", frontend)
         self.assertNotIn("roi-start-cursor", frontend)
         self.assertNotIn("roi-end-cursor", frontend)
         self.assertNotIn("chart-cursor", frontend)
-        self.assertNotIn("pointerdown", frontend)
+        self.assertIn("pointerdown", frontend)
         self.assertNotIn("Math.ceil(height / 50)", frontend)
         self.assertNotIn(".roi-slider,.data-slider{position", frontend)
         self.assertNotIn(
