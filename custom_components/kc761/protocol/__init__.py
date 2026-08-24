@@ -5,6 +5,7 @@ reported as hardware verified until real-device fixtures are added.
 """
 
 from .codec import CODEC_PROFILE, HARDWARE_VERIFIED
+from .client import SpectrumUploadAssembler
 from .framing import FrameParser
 from .models import (
     CalibrationData,
@@ -30,5 +31,6 @@ __all__ = [
     "RawFrame",
     "SpectrumData",
     "SpectrumSegment",
+    "SpectrumUploadAssembler",
     "StatusData",
 ]

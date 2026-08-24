@@ -95,6 +95,70 @@ class PendingTransaction:
         )
 
 
+@dataclass(slots=True)
+class SpectrumUploadAssembler:
+    """Bounded assembler for one A3/A1 automatic-upload spectrum round."""
+
+    channel_count: int = SPECTRUM_CHANNEL_COUNT
+    source: int | None = None
+    counts: list[int | None] = field(default_factory=list)
+    segment_count: int = 0
+    complete: bool = False
+
+    def __post_init__(self) -> None:
+        if self.channel_count < 1:
+            raise ValueError("spectrum channel count must be positive")
+        self.counts = [None] * self.channel_count
+
+    def begin_round(self, source: int) -> None:
+        """Start a new round at the A3 boundary and discard older fragments."""
+        self.reset()
+        if 0 <= source <= 2:
+            self.source = source
+
+    def reset(self) -> None:
+        """Discard all partial data without retaining an unbounded fragment log."""
+        self.source = None
+        self.counts = [None] * self.channel_count
+        self.segment_count = 0
+        self.complete = False
+
+    def add(self, segment: SpectrumSegment) -> SpectrumData | None:
+        """Add one A1 segment, tolerating reordering and exact duplicates."""
+        if self.complete or self.source is None:
+            return None
+        if segment.source_flag != FLAG_MC_DATA_UPLOAD or segment.source != self.source:
+            return None
+        if segment.offset < 0 or segment.offset >= self.channel_count:
+            self.reset()
+            return None
+        end = min(self.channel_count, segment.offset + len(segment.counts))
+        if end <= segment.offset:
+            return None
+        for channel in range(segment.offset, end):
+            existing = self.counts[channel]
+            incoming = segment.counts[channel - segment.offset]
+            if existing is not None and existing != incoming:
+                self.reset()
+                return None
+        added_new_channel = False
+        for channel in range(segment.offset, end):
+            if self.counts[channel] is None:
+                added_new_channel = True
+                self.counts[channel] = segment.counts[channel - segment.offset]
+        if added_new_channel:
+            self.segment_count += 1
+        if any(count is None for count in self.counts):
+            return None
+        self.complete = True
+        return SpectrumData(
+            source=self.source,
+            counts=tuple(int(count) for count in self.counts),
+            segment_count=self.segment_count,
+            source_flag=FLAG_MC_DATA_UPLOAD,
+        )
+
+
 def _asyncio_task_creator(coroutine: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
     return asyncio.create_task(coroutine, name=name)
 

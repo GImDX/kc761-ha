@@ -47,7 +47,7 @@ class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_alpha_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], VERSION)
-        self.assertEqual(VERSION, "0.2.0-alpha.36")
+        self.assertEqual(VERSION, "0.2.0-alpha.37")
         self.assertEqual(manifest["dependencies"], ["frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])

@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_TIME_SYNC_ENABLED,
     DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
+    FLAG_MC_DATA_UPLOAD,
     FLAG_STATUS_UPLOAD,
     MAX_INFO_INTERVAL,
     MAX_RECONNECT_BACKOFF,
@@ -45,9 +46,9 @@ from .const import (
     RECONNECT_JITTER_MAX,
     RECONNECT_JITTER_MIN,
 )
-from .protocol.client import KC761Client
+from .protocol.client import KC761Client, SpectrumUploadAssembler
 from .protocol.codec import CODEC_PROFILE, DecodedFrame, HARDWARE_VERIFIED
-from .protocol.models import CalibrationData, DeviceInfo, StatusData
+from .protocol.models import CalibrationData, DeviceInfo, SpectrumSegment, StatusData
 from .spectrum import SpectrumArchive, SpectrumSnapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +116,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self._last_info_at: datetime | None = None
         self._snapshot: KC761Snapshot | None = None
         self._calibration: CalibrationData | None = None
+        self._auto_upload_spectrum = SpectrumUploadAssembler()
         self._latest_spectrum: SpectrumSnapshot | None = None
         self._archive: SpectrumArchive | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -182,6 +184,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         try:
             new_connection = not self.client.connected
             if new_connection:
+                self._auto_upload_spectrum.reset()
                 await self.client.async_connect()
                 if self._device_info is not None:
                     self.reconnects += 1
@@ -227,25 +230,49 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             raise UpdateFailed(f"KC761 update failed: {type(err).__name__}") from err
 
     async def _async_push(self, decoded: DecodedFrame) -> None:
-        """Accept status pushes without changing device settings."""
+        """Accept A3 status and bounded A1 spectrum pushes without writes."""
+        if decoded.frame.flag == FLAG_STATUS_UPLOAD and isinstance(decoded.data, StatusData):
+            self._auto_upload_spectrum.begin_round(decoded.data.active_sensor)
+            if self._device_info is None:
+                return
+            now = datetime.now(UTC)
+            self._snapshot = KC761Snapshot(
+                device_info=self._device_info,
+                status=decoded.data,
+                received_at=now,
+            )
+            self.last_success = now
+            self.consecutive_failures = 0
+            self.last_error = None
+            self._reset_backoff()
+            if self.last_update_success:
+                self.async_set_updated_data(self._snapshot)
+            return
         if (
-            decoded.frame.flag != FLAG_STATUS_UPLOAD
-            or not isinstance(decoded.data, StatusData)
+            decoded.frame.flag != FLAG_MC_DATA_UPLOAD
+            or not isinstance(decoded.data, SpectrumSegment)
             or self._device_info is None
         ):
             return
-        now = datetime.now(UTC)
-        self._snapshot = KC761Snapshot(
-            device_info=self._device_info,
-            status=decoded.data,
-            received_at=now,
+        uploaded = self._auto_upload_spectrum.add(decoded.data)
+        if uploaded is None or self._calibration is None:
+            return
+        acquired_at = datetime.now(UTC)
+        energy = tuple(
+            self._calibration.energy_kev(uploaded.source, channel)
+            for channel in range(len(uploaded.counts))
         )
-        self.last_success = now
-        self.consecutive_failures = 0
-        self.last_error = None
-        self._reset_backoff()
-        if self.last_update_success:
-            self.async_set_updated_data(self._snapshot)
+        runtime = self._device_info.cumulative[uploaded.source].spectrum_runtime
+        self._latest_spectrum = SpectrumSnapshot.create(
+            source=uploaded.source,
+            acquired_at=acquired_at,
+            accumulation_seconds=runtime,
+            counts=uploaded.counts,
+            energy_kev=energy,
+            segment_count=uploaded.segment_count,
+            calibration_profile=f"factory:{self._calibration.factory_version}",
+        )
+        self._notify_entities()
 
     async def async_shutdown(self) -> None:
         """Cancel coordinator work and close the owned TCP client."""
@@ -259,6 +286,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._background_tasks.clear()
+            self._auto_upload_spectrum.reset()
             await super().async_shutdown()
             await self.client.async_close()
 
@@ -451,6 +479,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             old_info = self._device_info
             old_info_at = self._last_info_at
 
+            self._auto_upload_spectrum.reset()
             await old_client.async_close()
             candidate = self._new_client(host, port, on_push=False)
             try:

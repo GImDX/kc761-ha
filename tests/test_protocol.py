@@ -18,10 +18,11 @@ from custom_components.kc761.const import (
     CMD_SET_STA,
     FLAG_ACK,
     FLAG_CAL_DATA,
+    FLAG_MC_DATA_UPLOAD,
     FLAG_MC_DATA_QUERY,
     FLAG_STATUS_QUERY,
 )
-from custom_components.kc761.protocol.client import KC761Client, PendingTransaction
+from custom_components.kc761.protocol.client import KC761Client, PendingTransaction, SpectrumUploadAssembler
 from custom_components.kc761.protocol.codec import (
     DecodedFrame,
     HARDWARE_VERIFIED,
@@ -539,6 +540,53 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         no_source.future.cancel()
         pending.future.cancel()
 
+    def test_auto_upload_spectrum_assembler_round_boundaries_and_duplicates(self) -> None:
+        assembler = SpectrumUploadAssembler()
+        assembler.begin_round(0)
+        self.assertEqual(len(assembler.counts), 2048)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, -1, 1, (1,), FLAG_MC_DATA_UPLOAD))
+        )
+        self.assertIsNone(assembler.source)
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(1, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
+        )
+        first = tuple(range(1024, 1536))
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD)))
+        self.assertEqual(assembler.segment_count, 1)
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD)))
+        self.assertEqual(assembler.segment_count, 1)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 1024, 1, tuple(range(999, 1511)), FLAG_MC_DATA_UPLOAD))
+        )
+        self.assertIsNone(assembler.source)
+
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 1536, 1, tuple(range(1536, 2048)), FLAG_MC_DATA_UPLOAD))
+        )
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
+        )
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 512, 1, tuple(range(512, 1024)), FLAG_MC_DATA_UPLOAD))
+        )
+        complete = assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD))
+        self.assertIsNotNone(complete)
+        assert complete is not None
+        self.assertEqual(complete.source, 0)
+        self.assertEqual(complete.segment_count, 4)
+        self.assertEqual(complete.counts, tuple(range(2048)))
+        self.assertTrue(assembler.complete)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
+        )
+        assembler.begin_round(1)
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_UPLOAD)))
+        self.assertIsNone(assembler.add(SpectrumSegment(1, 0, 1, (1,), FLAG_MC_DATA_QUERY)))
+        self.assertFalse(assembler.complete)
+
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:
             client = KC761Client(*simulator.address)
@@ -628,6 +676,31 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
                 await client.async_close()
         self.assertEqual(status.battery_percent, 87)
         self.assertGreaterEqual(client.push_frames, 1)
+
+    async def test_simulator_auto_upload_spectrum_pushes_reordered_a1(self) -> None:
+        received = []
+        scenario = SimulatorScenario(
+            push_upload=True,
+            auto_upload_spectrum=True,
+            auto_upload_reverse_order=True,
+            auto_upload_duplicate_first=True,
+            spectrum_fragment_size=512,
+        )
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(
+                *simulator.address,
+                request_timeout=2,
+                on_push=lambda decoded: received.append(decoded),
+            )
+            try:
+                await client.async_get_status()
+                await asyncio.sleep(0.01)
+            finally:
+                await client.async_close()
+        self.assertEqual(received[0].frame.flag, 0xA3)
+        segments = [item.data for item in received[1:] if item.frame.flag == FLAG_MC_DATA_UPLOAD]
+        self.assertEqual([segment.offset for segment in segments], [1536, 1536, 1024, 512, 0])
+        self.assertTrue(all(segment.source == 0 for segment in segments))
 
     async def test_half_frame_closes_pending_request(self) -> None:
         async with Kc761Simulator(SimulatorScenario(close_mid_frame=True)) as simulator:

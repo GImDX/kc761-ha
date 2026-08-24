@@ -1,6 +1,6 @@
 # KC761x 0.2 控制与谱图扩展设计
 
-状态：`0.2.0-alpha.36`，在 alpha35 的谱图卡与生命周期基础上补齐 A5 三通道累计字段普通实体、A6 七个校准只读实体和对应协议/HA 测试；谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
+状态：`0.2.0-alpha.37`，在 alpha35 的谱图卡与生命周期基础上补齐 A5 三通道累计字段普通实体、A6 七个校准只读实体、A1 自动上传谱图分片有界重组和对应协议/HA 测试；谱图卡 ECharts SVG 游标/网格对齐修复、缓存版本提升、左下角轴标签间距、紧凑 summary、模块幂等注册、原生 Lovelace 编辑器候选、Sections 固定行高修复、ROI 双滑块/编辑预览边界、unavailable 状态保留、Configure 一键编辑交接、Data cursor 单滑块、确定性 Masonry sizing、Data slider 垂直尺寸、自然图高收紧、Ctrl+滚轮 X 轴横向缩放、浏览器本地 ROI/Data/zoom 状态持久化、HA 刷新状态初始化防护、暂态缺失卡片配置防护、alpha32 schema 5 脱敏诊断、alpha33/34/35 延迟注册后的错误卡重建保护已完成本地静态核对；alpha.6 的 reconfigure 单连接所有权修复保留，真实条目仍只观察
 
 日期：2026-08-21
 
@@ -101,7 +101,7 @@ Device Registry 使用：
 
 `points` 在 HA 当前状态机和 WebSocket 中可用，供前端卡绘图，但通过实体 `_unrecorded_attributes` 明确排除在 Recorder 外。Recorder 只保留谱图总计数和有界元数据，不把 2048 点数组复制进每次状态历史。
 
-完整谱图由同一 SYNC 下的 A0 分片按 source/offset 重组。当前本设备已确认 4×512 道；实现仍按覆盖恰好 2048 道判断完成，支持乱序、分片 TCP、重叠一致片段，并拒绝 source 不符、越界或重叠冲突。
+完整谱图由 A0 主动响应或 A3/A1 自动上传轮次按 source/offset 重组。A1 以 A3 状态帧作为轮次边界，在固定 2048 道缓冲内隔离通道，支持乱序和精确重复；缺片不会发布，冲突、越界、断线或新的 A3 轮次会丢弃未完成组。完整数据沿用现有 `SpectrumSnapshot`、能量校准和 HA/WebSocket 接口，不实现 A4。
 
 能量值由同连接读取的 A6 校准数据计算。Gamma 支持工厂单段、工厂三段和自定义标定选择；Neutron、PIN 使用各自工厂多项式。读取和绘图不开放 `0x64` 校准写入。
 
