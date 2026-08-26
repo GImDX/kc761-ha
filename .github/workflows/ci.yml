@@ -3,34 +3,60 @@ name: KC761 validation
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
+          cache: pip
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - name: Install test dependencies
-        run: python -m pip install -r requirements_test.txt
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements_test.txt
+          python -m pip check
       - name: Ruff
-        run: ruff check custom_components tests
+        run: python -m ruff check --no-cache custom_components tests
       - name: JSON validation
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
-          for path in Path("custom_components/kc761").rglob("*.json"):
+
+          paths = [Path("hacs.json"), *Path("custom_components/kc761").rglob("*.json")]
+          for path in paths:
               json.loads(path.read_text(encoding="utf-8"))
           PY
       - name: Compile
         run: python -m compileall -q custom_components tests
+      - name: Frontend syntax and contract
+        run: |
+          node --check custom_components/kc761/frontend/kc761-spectrum-card.js
+          node tests/frontend_card_contract.mjs
       - name: Protocol and integration tests
-        run: python -m pytest -q --cov=custom_components/kc761 --cov-branch --cov-report=term-missing --cov-fail-under=95
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          --cov=custom_components/kc761 --cov-branch
+          --cov-report=term-missing --cov-fail-under=95
       - name: Hassfest
-        uses: home-assistant/actions/hassfest@master
+        uses: home-assistant/actions/hassfest@a7c616ce81ccda50150bf1595786c71b1883fabb
       - name: HACS validation
-        uses: hacs/action@main
+        uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa
         with:
           category: integration
