@@ -27,11 +27,14 @@ from custom_components.kc761.const import (
 ROOT = Path(__file__).parents[1]
 PUBLIC_DOCS = (
     ROOT / "README.md",
+    ROOT / "docs" / "README.md",
     ROOT / "docs" / "ARCHITECTURE.md",
     ROOT / "docs" / "DECISIONS.md",
     ROOT / "docs" / "ENTITY_MODEL.md",
+    ROOT / "docs" / "SAFETY.md",
     ROOT / "docs" / "PROTOCOL_EVIDENCE.md",
     ROOT / "docs" / "RC_TEST_RESULTS.md",
+    ROOT / "docs" / "RELEASE_NOTES_0.2.0_RC1.md",
     ROOT / "docs" / "TEST_RELEASE_PLAN.md",
     ROOT / "docs" / "PERFORMANCE.md",
     ROOT / "docs" / "V0_2_EXPANSION.md",
@@ -144,7 +147,8 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertIn("async_discovered_service_info", config_flow)
         self.assertIn("async_request_active_scan", config_flow)
         self.assertIn("custom_value", config_flow)
-        self.assertIn("不实现 BLE 自动设备身份识别", architecture)
+        self.assertIn("HA Bluetooth manager", architecture)
+        self.assertIn("不做无标识自动连接", architecture)
 
     def test_control_and_spectrum_files_are_present_without_services(self) -> None:
         integration = ROOT / "custom_components" / "kc761"
@@ -448,6 +452,8 @@ class IntegrationStaticTests(unittest.TestCase):
             "create_raw_entities",
             canonical["options"]["step"]["init"]["data"],
         )
+        self.assertIn("enable_device_controls", canonical["options"]["step"]["init"]["data"])
+        self.assertIn("enable_destructive_actions", canonical["options"]["step"]["init"]["data"])
         self.assertIn("time_sync_enabled", canonical["options"]["step"]["init"]["data"])
         self.assertIn("time_sync_interval", canonical["options"]["step"]["init"]["data"])
         self.assertIn("spectrum_save_enabled", canonical["options"]["step"]["init"]["data"])
@@ -458,17 +464,22 @@ class IntegrationStaticTests(unittest.TestCase):
 
     def test_public_docs_do_not_disclose_environment_details(self) -> None:
         forbidden = (
-            "192.168.8.29",
-            "192.168.8.121",
+            "192.168.",
             "ssh_password.txt",
             "access_token",
             "refresh_token",
-            "7601-0000-000001",
+            "/home/pi/",
+            "C:\\Users\\",
+            "private/",
         )
         for path in PUBLIC_DOCS:
             text = path.read_text(encoding="utf-8")
             for value in forbidden:
                 self.assertNotIn(value, text, f"{value!r} leaked in {path.name}")
+            self.assertIsNone(
+                re.search(r"\b\d{4}-\d{4}-\d{6}\b", text),
+                f"full device identifier leaked in {path.name}",
+            )
 
     def test_frontend_javascript_syntax_when_node_is_available(self) -> None:
         """Use the host Node executable as an optional, path-independent gate."""

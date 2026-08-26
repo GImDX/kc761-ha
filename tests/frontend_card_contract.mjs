@@ -451,7 +451,7 @@ assert.equal(JSON.stringify(diagnosticsSnapshot).includes("192.168."), false);
 for (let index = 0; index < 120; index += 1) {
   assert.throws(() => diagnosticsCard.setConfig("not-an-object"), /configuration must be an object/);
 }
-const recordRedactionFailure = () => diagnosticsCard._recordDiagnosticError("test-redaction", new Error('sensor.secret_spectrum at 192.168.8.127:7601 host=kc761.local token=secret "points":[1,2] device_id=abc'));
+const recordRedactionFailure = () => diagnosticsCard._recordDiagnosticError("test-redaction", new Error('sensor.secret_spectrum at 192.0.2.127:7601 host=kc761.local token=secret "points":[1,2] device_id=abc'));
 recordRedactionFailure();
 recordRedactionFailure();
 for (let index = 0; index < 140; index += 1) diagnosticsCard._recordDiagnostic("normal-noise", { count: index });
@@ -463,14 +463,14 @@ assert.ok(diagnosticsSnapshot.failures.find((failure) => failure.event === "test
 assert.ok(JSON.stringify(diagnosticsSnapshot).length <= 60000, "diagnostic payload is size bounded");
 const redactedText = JSON.stringify(diagnosticsSnapshot);
 assert.equal(redactedText.includes("sensor.secret_spectrum"), false);
-assert.equal(redactedText.includes("192.168.8.127"), false);
+assert.equal(redactedText.includes("192.0.2.127"), false);
 assert.equal(redactedText.includes("kc761.local"), false);
 assert.equal(redactedText.includes("token=secret"), false);
 assert.equal(redactedText.includes("\"points\":[1,2]"), false);
 assert.equal(redactedText.includes("device_id=abc"), false);
 
 const errorCard = new FakeNode("hui-error-card");
-errorCard.textContent = "配置错误 sensor.hidden at 192.168.8.127 token=secret points=[1,2]";
+errorCard.textContent = "配置错误 sensor.hidden at 192.0.2.127 token=secret points=[1,2]";
 const activeObserver = globalThis.MutationObserver.instances.at(-1);
 assert.ok(activeObserver, "diagnostics installs an error-card observer");
 activeObserver.trigger([{ addedNodes: [errorCard] }]);
@@ -484,7 +484,7 @@ assert.equal(typeof observedFailure.custom_element_defined, "boolean");
 assert.equal(typeof observedFailure.module_evaluated, "boolean");
 assert.equal(typeof observedFailure.card_instances, "number");
 assert.equal(JSON.stringify(observedFailure).includes("sensor.hidden"), false);
-assert.equal(JSON.stringify(observedFailure).includes("192.168.8.127"), false);
+assert.equal(JSON.stringify(observedFailure).includes("192.0.2.127"), false);
 assert.equal(JSON.stringify(observedFailure).includes("token=secret"), false);
 assert.equal(JSON.stringify(observedFailure).includes("points=[1,2]"), false);
 
@@ -507,7 +507,7 @@ const otherFailure = diagnosticsSnapshot.failures.find((failure) => failure.erro
 assert.equal(otherFailure.config_type_is_kc761, false);
 
 const nestedErrorCard = new FakeNode("hui-error-card");
-nestedErrorCard.textContent = "nested configuration error sensor.nested_secret at 192.168.8.127";
+nestedErrorCard.textContent = "nested configuration error sensor.nested_secret at 192.0.2.127";
 const nestedShadowRoot = new FakeNode("shadow-root");
 nestedShadowRoot.querySelectorAll = (selector) => selector === "hui-error-card, ha-card.error" || selector === "*" ? [nestedErrorCard] : [];
 const nestedShadowHost = new FakeNode("hui-view");
@@ -526,7 +526,7 @@ const originalDocumentQuery = globalThis.document.querySelectorAll;
 const originalBodyQuery = globalThis.document.body.querySelectorAll;
 const deepHosts = Array.from({ length: 280 }, (_, index) => new FakeNode(`ha-host-${index}`));
 const deepErrorCard = new FakeNode("hui-error-card");
-deepErrorCard.textContent = "配置错误 sensor.deep_secret at 192.168.8.127 token=secret points=[1,2]";
+deepErrorCard.textContent = "配置错误 sensor.deep_secret at 192.0.2.127 token=secret points=[1,2]";
 const deepShadowRoot = new FakeNode("shadow-root");
 deepShadowRoot.querySelectorAll = (selector) => selector === "*" || selector === "hui-error-card, ha-card.error" ? [deepErrorCard] : [];
 deepHosts[79].shadowRoot = deepShadowRoot;
@@ -544,7 +544,7 @@ diagnosticsRegistry.globalButton.click();
 assert.match(deepExportedDiagnostics, /"schema": 7/);
 assert.match(deepExportedDiagnostics, /lovelace-error-card-snapshot/);
 assert.equal(deepExportedDiagnostics.includes("sensor.deep_secret"), false);
-assert.equal(deepExportedDiagnostics.includes("192.168.8.127"), false);
+assert.equal(deepExportedDiagnostics.includes("192.0.2.127"), false);
 assert.equal(deepExportedDiagnostics.includes("token=secret"), false);
 assert.equal(deepExportedDiagnostics.includes("points=[1,2]"), false);
 const deepPayload = JSON.parse(deepExportedDiagnostics);
