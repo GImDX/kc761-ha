@@ -65,6 +65,23 @@ def manifest_version_to_pep440(version: str) -> str:
 class IntegrationStaticTests(unittest.TestCase):
     def test_manifest_is_release_candidate_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            list(manifest),
+            [
+                "domain",
+                "name",
+                "codeowners",
+                "config_flow",
+                "dependencies",
+                "documentation",
+                "integration_type",
+                "iot_class",
+                "issue_tracker",
+                "quality_scale",
+                "requirements",
+                "version",
+            ],
+        )
         self.assertEqual(manifest["version"], VERSION)
         self.assertRegex(VERSION, r"^\d+\.\d+\.\d+-rc\.\d+$")
         self.assertEqual(manifest["dependencies"], ["bluetooth", "frontend", "http"])
