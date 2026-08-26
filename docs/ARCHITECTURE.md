@@ -104,6 +104,8 @@ Options Flow 当前包含：
 
 只为已安装通道创建通道实体。关闭通道的测量字段 `-1` 转为 `unknown`；温度等其它合法负数保留。未知但结构兼容的型号/传感器值保留原值或 `Unknown (0xNN)`，不伪装成未安装。
 
+A2 剂量率字段保留线协议原生单位 `mGy/h`、`mSv/h`；Home Assistant/Recorder 保存原生量值，前端可换算显示为 `µGy/h`、`µSv/h`。A5 累计剂量/剂量当量在 `manual_v1_8_candidate` 档案中的目标单位为 `µGy`、`µSv`；当前 RC 代码仍把相同数值标为 `mGy`、`mSv`，这是待修复的已知实现差距，不能与速率单位混为一谈。
+
 实体完整列表及默认门禁见 [ENTITY_MODEL.md](ENTITY_MODEL.md)。
 
 ## 8. 谱图
@@ -154,3 +156,13 @@ Options Flow 当前包含：
 - 手册覆盖 KC761A/B/C/CN，但真实证据样本有限；`hardware_verified=false` 在 RC 中保持不变。
 - 公开版本必须通过 Ruff、Node 前端契约、pytest branch coverage ≥95%、Hassfest 和 HACS。
 - 测试环境、真实设备和生产环境的证据必须分开记录；模拟器、历史 alpha 或旧 RC 结果不能替代当前候选验收。
+
+## 13. 后续 TODO
+
+### A4 流模式与瀑布图
+
+- 为 `STREAM_DATA_FLAG=0xA4` 增加语义解析：每个 16-bit `PULSE` 的高 2 bit 是 source，低 14 bit 是道址；按 A3/SYNC 轮次隔离后续一个或多个 A4 包。
+- 使用有界时间桶维护各通道的增量直方图，为谱图卡提供时间-道址/能量-计数瀑布图；窗口长度、时间分辨率和内存上限必须显式可控。
+- 原始脉冲数组不得写入普通 HA state、attributes 或 Recorder；前端通过有界后端接口读取聚合后的瀑布图切片。
+- 在实现前取得自动上传开启态的真实 A3/A4/A1 捕获，覆盖低计数流模式、同轮多 A4、SYNC 回卷、丢包和流/谱模式切换。
+- 当前版本继续只对 A4 有界拆帧和分类，本 TODO 不改变现有运行行为。

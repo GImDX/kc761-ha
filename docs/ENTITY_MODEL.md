@@ -58,6 +58,17 @@
 
 这些值只从 `0x55`/A6 读取。集成不实现 `0x64`，因此不创建校准 number、select 或写按钮。
 
+以下 A6 字段已经解析并用于能量换算或谱图元数据，但没有独立 HA 实体：
+
+- `FAC_CAL_VER`、`RAD0_ENERGY_CAL_SELECT`；
+- `RAD0/1/2_ENERGY_ZOOM`、`RAD0/1/2_ENERGY_OFFSET`；
+- `RAD0_CUSTOM_ENERGY_CAL` 的 4 个系数；
+- `RAD1_FAC_ENERGY_CAL`、`RAD2_FAC_ENERGY_CAL` 各 4 个系数；
+- `RAD0_FAC_ENERGY_CAL_L/M/H` 各 4 个系数；
+- `RAD0_FAC_ENERGY_CAL_NODE1`、`RAD0_FAC_ENERGY_CAL_NODE2`。
+
+其中 `FAC_CAL_VER` 会间接进入谱图的 `calibration_profile`，其余能量字段会反映在每个谱图点的 `energy_kev` 中；“未独立实体化”不表示解码器丢弃了这些字段。
+
 ## 5. 每通道测量传感器
 
 下表以 `<channel>` 表示 `gamma`、`neutron` 或 `pin`。
@@ -73,18 +84,20 @@
 
 所有测量值使用 `measurement` state class。Home Assistant 没有核辐射剂量率的专用 device class，因此只发布明确单位，不套用不相关设备类。
 
+速率单位不随累计量单位复核而改变。2026-08-27 对真实条目的 Recorder 做只读查询，`gamma_raw_dose_equivalent_rate` 的 80,453 个数值记录中位数为 `0.000120639801025391 mSv/h`，即 `0.120639801025391 µSv/h`，与设备约 `0.1 µSv/h` 的本底量级一致。Recorder 保存的是原生 `mSv/h` 数值；前端显示为 `µSv/h` 时只是等价换算，不是 1000 倍错误。
+
 `KI-AVG-001`：一台实机的三个设备端 AVG 字段在全部对齐样本中为 0，而官方上位机用实时序列计算 30 秒平均。AVG 实体忠实显示线协议值；需要实时测量时启用 raw 实体。RC 不把上位机算法伪装成设备字段。
 
 ## 6. 每通道累计传感器
 
-| key | 来源 | 单位 | state class |
-| --- | --- | --- | --- |
-| `<channel>_spectrum_runtime` | 谱图累计时间 | `s` duration | 无 |
-| `<channel>_dose_runtime` | 剂量累计时间 | `s` duration | 无 |
-| `<channel>_cumulative_dose` | 累计剂量 | `mGy` | 无 |
-| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `mSv` | 无 |
+| key | 来源 | 协议档案/目标单位 | 当前 RC 代码标签 | state class |
+| --- | --- | --- | --- | --- |
+| `<channel>_spectrum_runtime` | 谱图累计时间 | `s` duration | `s` | 无 |
+| `<channel>_dose_runtime` | 剂量累计时间 | `s` duration | `s` | 无 |
+| `<channel>_cumulative_dose` | 累计剂量 | `µGy` | `mGy`（已知错误） | 无 |
+| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `µSv` | `mSv`（已知错误） | 无 |
 
-这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。手册表格的 `uGy/uSv` 与正文 `mGy/mSv` 存在矛盾；实现采用正文和 rate 字段一致的 `mGy/mSv`，但不声称跨固件已确认。
+这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。PDF 原页复核确认 DEVICE_INFO 表逐字段写 `uGy/uSv`，下一页正文却以颠倒顺序写“单位 mSv/mGy”；官方上位机把实帧数值 `36.864582/40.960648` 显示为约 `36.89 µGy/40.99 µSv`，支持表格单位。目标实现只修正单位标签，不对 A5 原始浮点值再乘或除 1000。真实条目的累计传感器尚无 Recorder 序列，因此该 Recorder 门禁仍待条目成功加载后补测。
 
 ## 7. 结构化谱图实体
 
