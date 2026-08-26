@@ -840,8 +840,9 @@ const drawCard = new Card();
 drawCard.setConfig({ entity: "sensor.draw_spectrum" });
 drawCard._setData({ points: [[0, 1, 2], [1, 2, 3]] });
 let drawCalls = 0;
+const drawOptions = [];
 drawCard._chart = {
-  setOption: () => { drawCalls += 1; },
+  setOption: (...args) => { drawCalls += 1; drawOptions.push(args); },
   dispose() {},
 };
 drawCard._ensureChart = async () => drawCard._chart;
@@ -851,12 +852,31 @@ assert.notEqual(drawCard._drawRaf, null, "draw schedules a frame");
 flushAnimationFrames();
 await Promise.resolve();
 assert.equal(drawCalls, 1, "multiple slider/draw requests share one frame");
+assert.equal(drawOptions[0][1].notMerge, true, "a full draw replaces the complete option");
+drawCard._draw({ interactionOnly: true });
+drawCard._draw({ interactionOnly: true, updateSummary: true });
+flushAnimationFrames();
+await Promise.resolve();
+assert.equal(drawCalls, 2, "multiple cursor updates share one incremental frame");
+assert.equal(drawOptions[1][1].notMerge, false);
+assert.equal(drawOptions[1][1].lazyUpdate, true);
+assert.equal(drawOptions[1][0].series[0].id, "spectrum");
+assert.equal("data" in drawOptions[1][0].series[0], false, "cursor updates do not resend 2048 points");
 drawCard._draw();
 drawCard.disconnectedCallback();
 assert.equal(drawCard._drawRaf, null, "disconnect cancels the pending draw frame");
 flushAnimationFrames();
 await Promise.resolve();
-assert.equal(drawCalls, 1, "a detached card cannot perform a late chart update");
+assert.equal(drawCalls, 2, "a detached card cannot perform a late chart update");
+
+const protectedCard = new Card();
+protectedCard.setConfig({ entity: "sensor.protected_spectrum" });
+protectedCard._device = { model: "KC761", serial_number: "redacted", destructive_actions_enabled: false };
+let destructiveCall = false;
+protectedCard._call = async () => { destructiveCall = true; };
+await protectedCard._clear("spectrum");
+assert.equal(destructiveCall, false, "frontend never calls a destructive command when the backend gate is off");
+assert.match(protectedCard.shadowRoot.querySelector("#status").textContent, /disabled/i);
 
 const zoomCard = new Card();
 zoomCard.setConfig({ entity: "sensor.zoom_spectrum" });

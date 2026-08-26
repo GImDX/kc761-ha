@@ -16,6 +16,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+    CONF_ENABLE_DEVICE_CONTROLS,
     CONF_BLE_ADDRESS,
     CONF_BLE_SERVICE_UUID,
     CONF_INFO_INTERVAL,
@@ -25,6 +27,8 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
+    DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
+    DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_SPECTRUM_SAVE_ENABLED,
     DEFAULT_SPECTRUM_SAVE_INTERVAL,
@@ -108,7 +112,21 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             MAX_INFO_INTERVAL,
         )
         self.create_raw_entities = bool(entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES))
-        self.time_sync_enabled = bool(entry.options.get(CONF_TIME_SYNC_ENABLED, DEFAULT_TIME_SYNC_ENABLED))
+        self.device_controls_enabled = bool(
+            entry.options.get(
+                CONF_ENABLE_DEVICE_CONTROLS,
+                DEFAULT_ENABLE_DEVICE_CONTROLS,
+            )
+        )
+        self.destructive_actions_enabled = self.device_controls_enabled and bool(
+            entry.options.get(
+                CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+                DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
+            )
+        )
+        self.time_sync_enabled = self.device_controls_enabled and bool(
+            entry.options.get(CONF_TIME_SYNC_ENABLED, DEFAULT_TIME_SYNC_ENABLED)
+        )
         self.time_sync_interval = _bounded(
             entry.options.get(CONF_TIME_SYNC_INTERVAL, DEFAULT_TIME_SYNC_INTERVAL),
             MIN_TIME_SYNC_INTERVAL,
@@ -393,6 +411,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         await self._execute_state_write(auto_upload_status=int(enabled))
 
     async def async_sync_device_time(self) -> None:
+        self._require_device_controls()
         async with self._write_lock:
             await self.client.async_set_device_time(int(datetime.now(UTC).timestamp()))
             self.control_commands += 1
@@ -400,6 +419,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         await self.async_request_refresh()
 
     async def async_clear_statistics(self, source: int, kind: str) -> None:
+        self._require_destructive_actions()
         self._validate_source(source)
         bit = 1 << source
         masks = {
@@ -416,6 +436,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         await self.async_request_refresh()
 
     async def _execute_state_write(self, **values: int) -> None:
+        self._require_device_controls()
         async with self._write_lock:
             await self.client.async_set_state(**values)
             self.control_commands += 1
@@ -436,6 +457,14 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         if self._archive is None:
             raise RuntimeError("KC761 spectrum archive is not initialized")
         return self._archive
+
+    def _require_device_controls(self) -> None:
+        if not self.device_controls_enabled:
+            raise PermissionError("KC761 device controls are disabled in integration options")
+
+    def _require_destructive_actions(self) -> None:
+        if not self.destructive_actions_enabled:
+            raise PermissionError("KC761 destructive actions are disabled in integration options")
 
     def _notify_entities(self) -> None:
         if self._snapshot is not None:
@@ -691,9 +720,9 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         if self._reload_scheduled or self._shutdown:
             return
         self._reload_scheduled = True
-        self._hass.async_create_task(
+        self._start_background(
             self._async_reload_after_hardware_change(),
-            name="kc761-hardware-reload",
+            "kc761-hardware-reload",
         )
 
     async def _async_reload_after_hardware_change(self) -> None:

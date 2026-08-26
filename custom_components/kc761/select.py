@@ -41,7 +41,7 @@ async def async_setup_entry(
 ) -> None:
     del hass
     coordinator: KC761Coordinator = entry.runtime_data
-    if coordinator.device_info is None:
+    if not coordinator.device_controls_enabled or coordinator.device_info is None:
         return
     async_add_entities([KC761Select(coordinator, description) for description in DESCRIPTIONS])
 

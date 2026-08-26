@@ -9,6 +9,8 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+    CONF_ENABLE_DEVICE_CONTROLS,
     CONF_SPECTRUM_SAVE_ENABLED,
     CONF_SPECTRUM_SAVE_INTERVAL,
     CONF_TIME_SYNC_ENABLED,
@@ -50,6 +52,12 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                     "create_raw_entities",
                     entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 )
+            ),
+            CONF_ENABLE_DEVICE_CONTROLS: bool(
+                getattr(coordinator, "device_controls_enabled", False)
+            ),
+            CONF_ENABLE_DESTRUCTIVE_ACTIONS: bool(
+                getattr(coordinator, "destructive_actions_enabled", False)
             ),
             CONF_TIME_SYNC_ENABLED: bool(getattr(coordinator, "time_sync_enabled", False)),
             CONF_TIME_SYNC_INTERVAL: getattr(coordinator, "time_sync_interval", None),

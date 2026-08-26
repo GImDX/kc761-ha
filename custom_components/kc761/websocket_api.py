@@ -57,6 +57,8 @@ async def websocket_info(
                 "coprocessor_firmware_version": info.co_fw_version_text,
                 "serial_number": info.device_id,
                 "sensor_types": list(info.sensor_types),
+                "device_controls_enabled": coordinator.device_controls_enabled,
+                "destructive_actions_enabled": coordinator.destructive_actions_enabled,
             },
         )
     except Exception as err:

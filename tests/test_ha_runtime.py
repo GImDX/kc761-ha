@@ -41,6 +41,8 @@ from custom_components.kc761.const import (  # noqa: E402
     BLE_VERIFIED_SERVICE_UUID,
     CONF_BLE_ADDRESS,
     CONF_BLE_SERVICE_UUID,
+    CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+    CONF_ENABLE_DEVICE_CONTROLS,
     CONF_TRANSPORT,
     DOMAIN,
     TRANSPORT_BLE,
@@ -236,7 +238,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-alpha.39",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.1",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
@@ -627,6 +629,8 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
             "status_interval": 5,
             "info_interval": 60,
             "create_raw_entities": True,
+            CONF_ENABLE_DEVICE_CONTROLS: True,
+            CONF_ENABLE_DESTRUCTIVE_ACTIONS: True,
             "time_sync_enabled": True,
             "time_sync_interval": 24,
             "spectrum_save_enabled": True,
@@ -634,6 +638,19 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         }
         assert (await options.async_step_init(option_values))["type"] == "create_entry"
         options.async_create_entry.assert_called_once_with(title="", data=option_values)
+
+        safe_options = config_flow_module.KC761ConfigFlow.async_get_options_flow(entry)
+        safe_options.async_create_entry = MagicMock(return_value={"type": "create_entry"})
+        unsafe_values = {
+            **option_values,
+            CONF_ENABLE_DEVICE_CONTROLS: False,
+            CONF_ENABLE_DESTRUCTIVE_ACTIONS: True,
+            "time_sync_enabled": True,
+        }
+        assert (await safe_options.async_step_init(unsafe_values))["type"] == "create_entry"
+        normalized = safe_options.async_create_entry.call_args.kwargs["data"]
+        assert normalized[CONF_ENABLE_DESTRUCTIVE_ACTIONS] is False
+        assert normalized["time_sync_enabled"] is False
 
     run(exercise())
 
@@ -1097,6 +1114,8 @@ def test_coordinator_spectrum_controls_archive_and_schedules(tmp_path: Path) -> 
         hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
         entry = make_entry(
             options={
+                CONF_ENABLE_DEVICE_CONTROLS: True,
+                CONF_ENABLE_DESTRUCTIVE_ACTIONS: True,
                 "time_sync_enabled": True,
                 "time_sync_interval": 12,
                 "spectrum_save_enabled": True,
@@ -1188,6 +1207,16 @@ def test_coordinator_spectrum_controls_archive_and_schedules(tmp_path: Path) -> 
         with pytest.raises(ValueError):
             await coordinator.async_clear_statistics(0, "unknown")
 
+        coordinator.device_controls_enabled = False
+        with pytest.raises(PermissionError, match="controls are disabled"):
+            await coordinator.async_set_auto_upload(True)
+        with pytest.raises(PermissionError, match="controls are disabled"):
+            await coordinator.async_sync_device_time()
+        coordinator.device_controls_enabled = True
+        coordinator.destructive_actions_enabled = False
+        with pytest.raises(PermissionError, match="destructive actions are disabled"):
+            await coordinator.async_clear_statistics(0, "spectrum")
+
     run(exercise())
 
 
@@ -1216,6 +1245,8 @@ def test_websocket_spectrum_and_confirmation_api() -> None:
         coordinator.async_save_spectrum = AsyncMock(return_value=spectrum)
         coordinator.async_export_spectrum_csv = AsyncMock(return_value=("spectrum.csv", "a,b\r\n"))
         coordinator.async_clear_statistics = AsyncMock()
+        coordinator.device_controls_enabled = True
+        coordinator.destructive_actions_enabled = True
         hass.data[DOMAIN] = {entry.entry_id: coordinator}
         connection = MagicMock()
         connection.user.is_admin = True
@@ -1228,7 +1259,10 @@ def test_websocket_spectrum_and_confirmation_api() -> None:
             websocket_module.websocket_info,
             hass, connection, {"id": 1, "type": "kc761/info", "entry_id": entry.entry_id}
         )
-        assert connection.send_result.call_args.args[1]["serial_number"] == fake.info.device_id
+        info_result = connection.send_result.call_args.args[1]
+        assert info_result["serial_number"] == fake.info.device_id
+        assert info_result["device_controls_enabled"] is True
+        assert info_result["destructive_actions_enabled"] is True
         await invoke_websocket_handler(
             websocket_module.websocket_spectrum_list,
             hass,
@@ -1655,6 +1689,8 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.async_capture_spectrum = AsyncMock()
         coordinator.async_save_spectrum = AsyncMock()
         coordinator.async_clear_statistics = AsyncMock()
+        coordinator.device_controls_enabled = True
+        coordinator.destructive_actions_enabled = True
 
         with patch.object(
             switch_module.CoordinatorEntity,
@@ -1718,6 +1754,32 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
             coordinator.async_save_spectrum.assert_awaited_once()
             await button_by_key["clear_gamma_spectrum"].async_press()
             coordinator.async_clear_statistics.assert_awaited_once_with(0, "spectrum")
+
+        coordinator.device_controls_enabled = False
+        coordinator.destructive_actions_enabled = False
+        switches = []
+        await switch_module.async_setup_entry(
+            MagicMock(), entry, lambda values: switches.extend(values)
+        )
+        assert switches == []
+        selects = []
+        await select_module.async_setup_entry(
+            MagicMock(), entry, lambda values: selects.extend(values)
+        )
+        assert selects == []
+        with patch.object(
+            button_module.CoordinatorEntity,
+            "__init__",
+            lambda self, value: setattr(self, "coordinator", value),
+        ):
+            safe_buttons = []
+            await button_module.async_setup_entry(
+                MagicMock(), entry, lambda values: safe_buttons.extend(values)
+            )
+        assert {button.entity_description.key for button in safe_buttons} == {
+            "refresh_spectrum",
+            "save_spectrum",
+        }
 
         coordinator.client = SimpleNamespace(
             connected=False,

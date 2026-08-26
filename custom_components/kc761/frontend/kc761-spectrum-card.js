@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-alpha.39";
+const CARD_VERSION = "0.2.0-rc.1";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -1328,6 +1328,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._drawToken = 0;
     this._drawRaf = null;
     this._drawPending = false;
+    this._fullDrawPending = false;
     this._summaryUpdatePending = false;
     this._handoffRetryTimer = null;
     this._handoffRetryCount = 0;
@@ -1748,8 +1749,8 @@ class KC761SpectrumCard extends HTMLElement {
         <div class="legend"><span><i class="swatch curve"></i> Spectrum</span><span><i class="swatch roi"></i> ROI range</span><span data-legend="peak"><i class="swatch peak"></i> Auto peak</span><span><i class="swatch data"></i> Data cursor</span></div>
         <div id="actions" class="actions">
           <button id="capture">Refresh</button><button id="save">Save spectrum</button><button id="csv">Export CSV</button>
-          <span class="spacer"></span><button class="danger" data-clear="spectrum">Clear spectrum</button>
-          <button class="danger" data-clear="dose_curve">Clear dose curve</button><button class="danger" data-clear="cumulative_dose">Clear cumulative dose</button>
+          <span class="spacer"></span><button class="danger" data-clear="spectrum" hidden>Clear spectrum</button>
+          <button class="danger" data-clear="dose_curve" hidden>Clear dose curve</button><button class="danger" data-clear="cumulative_dose" hidden>Clear cumulative dose</button>
         </div>
         <div id="status" class="status"></div>
       </ha-card>`;
@@ -2503,7 +2504,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._scheduleViewStatePersist();
-    this._draw({ updateSummary: true });
+    this._draw({ updateSummary: true, interactionOnly: true });
   }
 
   _syncRoiFromInputs(changed) {
@@ -2519,7 +2520,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (endInput) endInput.value = String(this._cursor.roiEnd);
     this._updateRoiSliderUI();
     this._scheduleViewStatePersist();
-    this._draw({ updateSummary: true });
+    this._draw({ updateSummary: true, interactionOnly: true });
   }
 
   _syncAutoRefresh() {
@@ -2560,6 +2561,9 @@ class KC761SpectrumCard extends HTMLElement {
       const device = await this._call({ type: "kc761/info", entry_id: entryId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._device = device;
+      this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => {
+        button.hidden = !Boolean(device.destructive_actions_enabled);
+      });
       const source = this.shadowRoot.querySelector("#source");
       source.replaceChildren();
       ["Gamma", "Neutron", "PIN"].forEach((name, index) => {
@@ -2697,6 +2701,10 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _clear(kind) {
+    if (!this._device?.destructive_actions_enabled) {
+      this._setStatus("Destructive actions are disabled in KC761 integration options", true);
+      return;
+    }
     const source = Number(this.shadowRoot.querySelector("#source").value);
     const channel = ["Gamma", "Neutron", "PIN"][source];
     const label = { spectrum: "spectrum and accumulation time", dose_curve: "dose-time curve", cumulative_dose: "cumulative dose and runtime" }[kind];
@@ -2965,21 +2973,71 @@ class KC761SpectrumCard extends HTMLElement {
     return cache.lineData.get(key);
   }
 
+  _seriesOverlays(cache, xMode, logarithmic) {
+    const points = cache.points;
+    const [roiStart, roiEnd] = this._roi();
+    const roiStartPoint = this._pointForChannel(roiStart) || points[0];
+    const roiEndPoint = this._pointForChannel(roiEnd) || points[points.length - 1];
+    const cursorPoint = this._pointForChannel(this._cursor.data) || points[0];
+    const peak = cache.peak || points[0];
+    const xFor = (point) => this._xValue(point, xMode);
+    const cursorNearPeak = Math.abs(peak[0] - cursorPoint[0]) <= 16;
+    const foreground = this._themeValue("--primary-text-color", "#ddd");
+    const colors = this._colors || COLOR_FALLBACKS;
+    return {
+      markArea: {
+        silent: true,
+        itemStyle: { color: colors.roiStart, opacity: 0.16 },
+        data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]],
+      },
+      markLine: {
+        silent: true,
+        symbol: ["none", "none"],
+        label: { show: false },
+        data: [{
+          xAxis: xFor(cursorPoint),
+          lineStyle: { color: colors.dataCursor, type: "solid", width: 1 },
+        }],
+      },
+      markPoint: this._config?.show_peak === false ? { data: [] } : {
+        symbol: "pin",
+        symbolSize: 34,
+        itemStyle: { color: colors.peak },
+        label: {
+          color: foreground,
+          fontSize: 10,
+          position: "top",
+          distance: cursorNearPeak ? 28 : 8,
+          offset: cursorNearPeak ? [0, -8] : [0, 0],
+        },
+        data: [{
+          coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]],
+          value: peak[2],
+          name: `Peak CH ${peak[0]}`,
+        }],
+      },
+    };
+  }
+
+  _interactionOption() {
+    const cache = this._ensurePointCache();
+    const xMode = this._readXAxisMode();
+    const logarithmic = this._yAxis === "log";
+    return {
+      series: [{
+        id: "spectrum",
+        ...this._seriesOverlays(cache, xMode, logarithmic),
+      }],
+    };
+  }
+
   _option() {
     const cache = this._ensurePointCache();
     const points = cache.points;
     const xMode = this._readXAxisMode();
     const logarithmic = this._yAxis === "log";
     const lineData = this._lineData(cache, xMode, logarithmic);
-    const [roiStart, roiEnd] = this._roi();
-    const roiStartPoint = this._pointForChannel(roiStart) || points[0];
-    const roiEndPoint = this._pointForChannel(roiEnd) || points[points.length - 1];
-    const cursorPoint = this._pointForChannel(this._cursor.data) || points[0];
-    let peak = points[0];
-    peak = cache.peak || peak;
-    const xFor = (point) => this._xValue(point, xMode);
     const [xMinimum, xMaximum] = this._xRange(xMode);
-    const cursorNearPeak = Math.abs(peak[0] - cursorPoint[0]) <= 16;
     const foreground = this._themeValue("--primary-text-color", "#ddd");
     const secondary = this._themeValue("--secondary-text-color", foreground);
     const divider = this._themeValue("--divider-color", "#555");
@@ -3032,20 +3090,17 @@ class KC761SpectrumCard extends HTMLElement {
         splitLine: { lineStyle: { color: divider, opacity: 0.45 } },
       },
       series: [{
-        name: "Spectrum", type: "line", showSymbol: false, sampling: "lttb", data: lineData,
+        id: "spectrum", name: "Spectrum", type: "line", showSymbol: false, sampling: "lttb", data: lineData,
         lineStyle: { color: colors.curve, width: 1.5 }, itemStyle: { color: colors.curve },
-        markArea: { silent: true, itemStyle: { color: colors.roiStart, opacity: 0.16 }, data: [[{ xAxis: xFor(roiStartPoint) }, { xAxis: xFor(roiEndPoint) }]] },
-        markLine: { silent: true, symbol: ["none", "none"], label: { show: false }, data: [
-          { xAxis: xFor(cursorPoint), lineStyle: { color: colors.dataCursor, type: "solid", width: 1 } },
-        ] },
-        markPoint: this._config?.show_peak === false ? { data: [] } : { symbol: "pin", symbolSize: 34, itemStyle: { color: colors.peak }, label: { color: foreground, fontSize: 10, position: "top", distance: cursorNearPeak ? 28 : 8, offset: cursorNearPeak ? [0, -8] : [0, 0] }, data: [{ coord: [xFor(peak), logarithmic ? Math.max(1, peak[2]) : peak[2]], value: peak[2], name: `Peak CH ${peak[0]}` }] },
+        ...this._seriesOverlays(cache, xMode, logarithmic),
       }],
     };
   }
 
-  _draw({ updateSummary = false } = {}) {
+  _draw({ updateSummary = false, interactionOnly = false } = {}) {
     if (!this._data || !this._ensurePointCache().points.length || !this.shadowRoot.querySelector("#chart")) return;
     this._drawPending = true;
+    if (!interactionOnly || !this._chart) this._fullDrawPending = true;
     this._summaryUpdatePending = this._summaryUpdatePending || updateSummary;
     if (this._drawRaf !== null) return;
     const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
@@ -3053,6 +3108,8 @@ class KC761SpectrumCard extends HTMLElement {
       this._drawRaf = null;
       if (this._detached || !this._drawPending) return;
       this._drawPending = false;
+      const fullDraw = this._fullDrawPending;
+      this._fullDrawPending = false;
       if (this._summaryUpdatePending) {
         this._summaryUpdatePending = false;
         this._updateSummary();
@@ -3061,7 +3118,14 @@ class KC761SpectrumCard extends HTMLElement {
       diagnosticsRecord("draw-start", { generation: token });
       this._ensureChart().then(() => {
         if (token !== this._drawToken || !this._chart || this._detached) return;
-        this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
+        if (fullDraw) {
+          this._chart.setOption(this._option(), { notMerge: true, lazyUpdate: false });
+        } else {
+          this._chart.setOption(
+            this._interactionOption(),
+            { notMerge: false, lazyUpdate: true, silent: true },
+          );
+        }
       }).catch((error) => {
         diagnosticsRecordError("draw-failure", error);
         this._setStatus(`Chart load failed: ${error.message || error}`, true);
@@ -3075,6 +3139,7 @@ class KC761SpectrumCard extends HTMLElement {
     cancel(this._drawRaf);
     this._drawRaf = null;
     this._drawPending = false;
+    this._fullDrawPending = false;
     this._summaryUpdatePending = false;
   }
 

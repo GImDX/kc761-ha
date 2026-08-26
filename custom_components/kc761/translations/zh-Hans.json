@@ -66,10 +66,13 @@
     "step": {
       "init": {
         "title": "KC761x 选项",
+        "description": "设备写命令尚未完成实机验收，因此默认关闭。破坏性清空操作必须同时启用设备控制与破坏性操作。",
         "data": {
           "status_interval": "状态轮询间隔（秒）",
           "info_interval": "设备信息轮询间隔（秒）",
           "create_raw_entities": "创建高频原始读数实体",
+          "enable_device_controls": "启用尚未完成实机验收的设备控制",
+          "enable_destructive_actions": "启用破坏性清空操作（还需启用设备控制）",
           "time_sync_enabled": "启用定时同步设备时间",
           "time_sync_interval": "设备时间同步间隔（小时）",
           "spectrum_save_enabled": "启用定时保存谱图",

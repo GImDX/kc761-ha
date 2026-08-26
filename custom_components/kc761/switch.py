@@ -50,6 +50,8 @@ async def async_setup_entry(
 ) -> None:
     del hass
     coordinator: KC761Coordinator = entry.runtime_data
+    if not coordinator.device_controls_enabled:
+        return
     info = coordinator.device_info
     if info is None:
         return

@@ -21,12 +21,7 @@ class KC761ButtonDescription(ButtonEntityDescription):
     source: int | None = None
 
 
-BASE_DESCRIPTIONS = (
-    KC761ButtonDescription(
-        key="sync_device_time",
-        translation_key="sync_device_time",
-        action="sync_time",
-    ),
+READ_ONLY_DESCRIPTIONS = (
     KC761ButtonDescription(
         key="refresh_spectrum",
         translation_key="refresh_spectrum",
@@ -36,6 +31,14 @@ BASE_DESCRIPTIONS = (
         key="save_spectrum",
         translation_key="save_spectrum",
         action="save_spectrum",
+    ),
+)
+
+CONTROL_DESCRIPTIONS = (
+    KC761ButtonDescription(
+        key="sync_device_time",
+        translation_key="sync_device_time",
+        action="sync_time",
     ),
 )
 
@@ -50,20 +53,23 @@ async def async_setup_entry(
     info = coordinator.device_info
     if info is None:
         return
-    descriptions = list(BASE_DESCRIPTIONS)
-    for source, sensor_type in enumerate(info.sensor_types):
-        if not sensor_type:
-            continue
-        channel = CHANNEL_KEYS[source]
-        for action in ("spectrum", "dose_curve", "cumulative_dose"):
-            descriptions.append(
-                KC761ButtonDescription(
-                    key=f"clear_{channel}_{action}",
-                    translation_key=f"clear_{channel}_{action}",
-                    action=f"clear_{action}",
-                    source=source,
+    descriptions = list(READ_ONLY_DESCRIPTIONS)
+    if coordinator.device_controls_enabled:
+        descriptions.extend(CONTROL_DESCRIPTIONS)
+    if coordinator.destructive_actions_enabled:
+        for source, sensor_type in enumerate(info.sensor_types):
+            if not sensor_type:
+                continue
+            channel = CHANNEL_KEYS[source]
+            for action in ("spectrum", "dose_curve", "cumulative_dose"):
+                descriptions.append(
+                    KC761ButtonDescription(
+                        key=f"clear_{channel}_{action}",
+                        translation_key=f"clear_{channel}_{action}",
+                        action=f"clear_{action}",
+                        source=source,
+                    )
                 )
-            )
     async_add_entities([KC761Button(coordinator, description) for description in descriptions])
 
 

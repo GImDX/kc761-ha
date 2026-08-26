@@ -66,10 +66,13 @@
     "step": {
       "init": {
         "title": "KC761x options",
+        "description": "Device writes are hardware-unverified and disabled by default. Destructive clear actions require both control switches to be enabled.",
         "data": {
           "status_interval": "Status polling interval (seconds)",
           "info_interval": "Device information polling interval (seconds)",
           "create_raw_entities": "Create high-frequency raw reading entities",
+          "enable_device_controls": "Enable hardware-unverified device controls",
+          "enable_destructive_actions": "Enable destructive clear actions (also requires device controls)",
           "time_sync_enabled": "Enable scheduled device time synchronization",
           "time_sync_interval": "Time synchronization interval (hours)",
           "spectrum_save_enabled": "Enable scheduled spectrum saving",

@@ -21,6 +21,8 @@ from .const import (
     CONF_BLE_ADDRESS,
     CONF_BLE_SERVICE_UUID,
     CONF_CREATE_RAW_ENTITIES,
+    CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+    CONF_ENABLE_DEVICE_CONTROLS,
     CONF_INFO_INTERVAL,
     CONF_SPECTRUM_SAVE_ENABLED,
     CONF_SPECTRUM_SAVE_INTERVAL,
@@ -28,6 +30,8 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
+    DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
+    DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_STATUS_INTERVAL,
@@ -365,7 +369,11 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            normalized = dict(user_input)
+            if not normalized.get(CONF_ENABLE_DEVICE_CONTROLS, False):
+                normalized[CONF_ENABLE_DESTRUCTIVE_ACTIONS] = False
+                normalized[CONF_TIME_SYNC_ENABLED] = False
+            return self.async_create_entry(title="", data=normalized)
         options = self.config_entry.options
         schema = vol.Schema(
             {
@@ -386,6 +394,20 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_CREATE_RAW_ENTITIES,
                     default=options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
+                ): bool,
+                vol.Required(
+                    CONF_ENABLE_DEVICE_CONTROLS,
+                    default=options.get(
+                        CONF_ENABLE_DEVICE_CONTROLS,
+                        DEFAULT_ENABLE_DEVICE_CONTROLS,
+                    ),
+                ): bool,
+                vol.Required(
+                    CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+                    default=options.get(
+                        CONF_ENABLE_DESTRUCTIVE_ACTIONS,
+                        DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
+                    ),
                 ): bool,
                 vol.Required(
                     CONF_TIME_SYNC_ENABLED,

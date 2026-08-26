@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.2.0-alpha.39"
+VERSION = "0.2.0-rc.1"
 DEFAULT_PORT = 7601
 CONF_TRANSPORT = "transport"
 TRANSPORT_TCP = "tcp"
@@ -27,9 +27,9 @@ CONF_BLE_ADDRESS = "ble_address"
 CONF_BLE_SERVICE_UUID = "ble_service_uuid"
 BLE_RX_CHARACTERISTIC_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 BLE_TX_CHARACTERISTIC_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
-# Confirmed on the authorized KC761-2301-622158 test device. This is the
-# default constraint for explicit BLE-address connections; compatible
-# firmware may provide a different UUID through the config flow override.
+# Confirmed on one authorized KC761 device. This is the default constraint for
+# explicit BLE-address connections; compatible firmware may provide a
+# different UUID through the config flow override.
 BLE_VERIFIED_SERVICE_UUID = "59462f12-9543-9999-12c8-58b459a2712d"
 BLE_NOTIFICATION_QUEUE_SIZE = 32
 BLE_DEFAULT_WRITE_CHUNK_SIZE = 20
@@ -41,6 +41,10 @@ CONF_STATUS_INTERVAL = "status_interval"
 CONF_INFO_INTERVAL = "info_interval"
 CONF_CREATE_RAW_ENTITIES = "create_raw_entities"
 DEFAULT_CREATE_RAW_ENTITIES = False
+CONF_ENABLE_DEVICE_CONTROLS = "enable_device_controls"
+DEFAULT_ENABLE_DEVICE_CONTROLS = False
+CONF_ENABLE_DESTRUCTIVE_ACTIONS = "enable_destructive_actions"
+DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS = False
 CONF_TIME_SYNC_ENABLED = "time_sync_enabled"
 CONF_TIME_SYNC_INTERVAL = "time_sync_interval"
 DEFAULT_TIME_SYNC_ENABLED = False
