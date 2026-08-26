@@ -107,6 +107,15 @@ class FakeShadowRoot extends FakeNode {
     }
     return this.nodes.get(selector);
   }
+
+  querySelectorAll(selector) {
+    if (selector !== "[data-clear]") return [];
+    return ["spectrum", "dose_curve", "cumulative_dose"].map((kind) => {
+      const node = this.querySelector(`[data-clear=${kind}]`);
+      node.dataset.clear = kind;
+      return node;
+    });
+  }
 }
 
 class FakeHTMLElement {
@@ -872,11 +881,74 @@ assert.equal(drawCalls, 2, "a detached card cannot perform a late chart update")
 const protectedCard = new Card();
 protectedCard.setConfig({ entity: "sensor.protected_spectrum" });
 protectedCard._device = { model: "KC761", serial_number: "redacted", destructive_actions_enabled: false };
+protectedCard._setDestructiveActionsEnabled(false);
 let destructiveCall = false;
 protectedCard._call = async () => { destructiveCall = true; };
 await protectedCard._clear("spectrum");
 assert.equal(destructiveCall, false, "frontend never calls a destructive command when the backend gate is off");
 assert.match(protectedCard.shadowRoot.querySelector("#status").textContent, /disabled/i);
+
+const gatedCard = new Card();
+gatedCard.setConfig({ entity: "sensor.gated_spectrum" });
+const clearButtons = gatedCard.shadowRoot.querySelectorAll("[data-clear]");
+assert.ok(clearButtons.every((button) => button.hidden), "destructive buttons start hidden");
+gatedCard.hass = {
+  states: {
+    "sensor.gated_spectrum": {
+      state: "1",
+      attributes: {
+        codec_profile: "manual_v1_8_candidate",
+        config_entry_id: "entry-gated",
+        destructive_actions_enabled: true,
+        points: [],
+      },
+    },
+  },
+};
+assert.ok(clearButtons.every((button) => !button.hidden), "state attributes reveal enabled destructive buttons");
+gatedCard.hass = {
+  states: {
+    "sensor.gated_spectrum": { state: "unavailable", attributes: {} },
+  },
+};
+assert.ok(clearButtons.every((button) => button.hidden), "unavailable state fails the destructive UI gate closed");
+
+let resolveECharts;
+let chartInitCalls = 0;
+const concurrentChart = {
+  on() {}, off() {}, dispose() {}, resize() {},
+};
+const chartCard = new Card();
+chartCard.setConfig({ entity: "sensor.chart_init_spectrum" });
+chartCard._echartsPromise = new Promise((resolve) => { resolveECharts = resolve; });
+const firstChartInit = chartCard._ensureChart();
+const secondChartInit = chartCard._ensureChart();
+resolveECharts({
+  init: () => {
+    chartInitCalls += 1;
+    return concurrentChart;
+  },
+});
+const [firstChart, secondChart] = await Promise.all([firstChartInit, secondChartInit]);
+assert.equal(chartInitCalls, 1, "concurrent chart requests share one ECharts initialization");
+assert.equal(firstChart, concurrentChart);
+assert.equal(secondChart, concurrentChart);
+
+let resolveDetachedECharts;
+let detachedChartInitCalls = 0;
+const detachedChartCard = new Card();
+detachedChartCard.setConfig({ entity: "sensor.detached_chart_spectrum" });
+detachedChartCard._echartsPromise = new Promise((resolve) => { resolveDetachedECharts = resolve; });
+const detachedChartInit = detachedChartCard._ensureChart();
+detachedChartCard.disconnectedCallback();
+resolveDetachedECharts({
+  init: () => {
+    detachedChartInitCalls += 1;
+    return concurrentChart;
+  },
+});
+assert.equal(await detachedChartInit, null);
+assert.equal(detachedChartInitCalls, 0, "a detached card cannot initialize ECharts after import resolves");
 
 const zoomCard = new Card();
 zoomCard.setConfig({ entity: "sensor.zoom_spectrum" });
@@ -1122,6 +1194,7 @@ unavailableCard.setConfig({ entity: "sensor.unavailable_spectrum" });
 unavailableCard.preview = true;
 unavailableCard._entryId = "entry";
 unavailableCard._device = { model: "KC761" };
+unavailableCard._setDestructiveActionsEnabled(true);
 unavailableCard._data = { points: [[0, 1, 2]] };
 unavailableCard.hass = {
   states: {
@@ -1135,6 +1208,11 @@ assert.equal(unavailableCard.shadowRoot.querySelector("#status").textContent, "S
 assert.deepEqual(unavailableCard._data, { points: [[0, 1, 2]] }, "unavailable state keeps last valid spectrum");
 assert.equal(unavailableCard._entryId, "entry", "unavailable state keeps entity ownership");
 assert.equal(unavailableCard._device.model, "KC761", "unavailable state keeps device metadata");
+assert.equal(unavailableCard._destructiveActionsEnabled, false, "unavailable state closes the destructive UI gate");
+assert.ok(
+  unavailableCard.shadowRoot.querySelectorAll("[data-clear]").every((button) => button.hidden),
+  "unavailable state hides destructive buttons",
+);
 assert.equal(
   Card.isSpectrumEntityState({ state: "unavailable", attributes: {} }),
   false,

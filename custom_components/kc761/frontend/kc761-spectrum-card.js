@@ -1315,6 +1315,8 @@ class KC761SpectrumCard extends HTMLElement {
     this._chart = null;
     this._echarts = null;
     this._echartsPromise = null;
+    this._chartInitPromise = null;
+    this._chartGeneration = 0;
     this._resizeObserver = null;
     this._layoutResizeObserver = null;
     this._layoutResizeRaf = null;
@@ -1355,6 +1357,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._themeValues = {};
     this._colorsReady = false;
     this._diagnosticsEnabled = false;
+    this._destructiveActionsEnabled = false;
     diagnosticsRecord("constructor");
   }
 
@@ -1613,6 +1616,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (!this._config.entity) {
       this._entryId = null;
       this._device = null;
+      this._setDestructiveActionsEnabled(false);
       this._stopAutoRefresh();
       this._setStatus("Select a KC761 spectrum entity");
       return;
@@ -1627,6 +1631,7 @@ class KC761SpectrumCard extends HTMLElement {
       diagnosticsRecord("hass-readiness", { has_states: false, state_object: false });
       this._entryId = null;
       this._device = null;
+      this._setDestructiveActionsEnabled(false);
       this._stopAutoRefresh();
       this._setStatus("Waiting for Home Assistant state");
       return;
@@ -1637,6 +1642,7 @@ class KC761SpectrumCard extends HTMLElement {
     } catch (_error) {
       this._entryId = null;
       this._device = null;
+      this._setDestructiveActionsEnabled(false);
       this._stopAutoRefresh();
       this._setStatus("Waiting for Home Assistant state");
       return;
@@ -1644,6 +1650,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (!current) {
       diagnosticsRecord("hass-readiness", { has_states: true, state_object: true, state_present: false });
       this._setStatus(`Entity not found: ${this._config.entity}`, true);
+      this._setDestructiveActionsEnabled(false);
       this._stopAutoRefresh();
       return;
     }
@@ -1662,16 +1669,19 @@ class KC761SpectrumCard extends HTMLElement {
         // discard the last good spectrum or mislabel this transient state as
         // a different entity.  A later valid state will repopulate normally.
         this._stopAutoRefresh();
+        this._setDestructiveActionsEnabled(false);
         this._setStatus("Selected spectrum entity is unavailable", true);
         return;
       }
       this._entryId = null;
       this._device = null;
+      this._setDestructiveActionsEnabled(false);
       this._stopAutoRefresh();
       this._setStatus("Selected entity is not a KC761 spectrum entity", true);
       return;
     }
     this._entryId = current.attributes.config_entry_id;
+    this._setDestructiveActionsEnabled(current.attributes.destructive_actions_enabled);
     const historySelect = this.shadowRoot.querySelector("#history");
     if ((!historySelect || historySelect.value === "latest") && (current !== previous || !this._data)) {
       this._setData(this._fromEntity(current), { viewMode: "live" });
@@ -1781,6 +1791,7 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot.querySelector("#export-diagnostics").addEventListener("click", () => this._exportDiagnostics());
     this.shadowRoot.querySelector("#configure").addEventListener("click", () => this._openEditor());
     this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => button.addEventListener("click", () => this._clear(button.dataset.clear)));
+    this._setDestructiveActionsEnabled(this._destructiveActionsEnabled);
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._updateZoomReadout();
@@ -1934,6 +1945,13 @@ class KC761SpectrumCard extends HTMLElement {
     if (peakLegend) peakLegend.hidden = !peakVisible;
   }
 
+  _setDestructiveActionsEnabled(value) {
+    this._destructiveActionsEnabled = value === true;
+    this.shadowRoot?.querySelectorAll?.("[data-clear]")?.forEach((button) => {
+      button.hidden = !this._destructiveActionsEnabled;
+    });
+  }
+
   _resetEntityRuntime() {
     this._entityGeneration = (this._entityGeneration || 0) + 1;
     this._drawToken += 1;
@@ -1941,6 +1959,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._stopAutoRefresh();
     this._device = null;
     this._entryId = null;
+    this._setDestructiveActionsEnabled(false);
     this._data = null;
     this._history = [];
     this._historyLoaded = false;
@@ -2561,9 +2580,7 @@ class KC761SpectrumCard extends HTMLElement {
       const device = await this._call({ type: "kc761/info", entry_id: entryId });
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._device = device;
-      this.shadowRoot.querySelectorAll("[data-clear]").forEach((button) => {
-        button.hidden = !Boolean(device.destructive_actions_enabled);
-      });
+      this._setDestructiveActionsEnabled(device.destructive_actions_enabled);
       const source = this.shadowRoot.querySelector("#source");
       source.replaceChildren();
       ["Gamma", "Neutron", "PIN"].forEach((name, index) => {
@@ -2701,7 +2718,7 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _clear(kind) {
-    if (!this._device?.destructive_actions_enabled) {
+    if (!this._destructiveActionsEnabled) {
       this._setStatus("Destructive actions are disabled in KC761 integration options", true);
       return;
     }
@@ -3144,6 +3161,8 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _disposeChart() {
+    this._chartGeneration = (this._chartGeneration || 0) + 1;
+    this._chartInitPromise = null;
     this._cancelDraw();
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._resizeObserver = null;
@@ -3157,6 +3176,20 @@ class KC761SpectrumCard extends HTMLElement {
   async _ensureChart() {
     if (this._chart) return this._chart;
     if (this._detached) return null;
+    if (this._chartInitPromise) return this._chartInitPromise;
+    const generation = this._chartGeneration;
+    const pending = this._initializeChart(generation);
+    this._chartInitPromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this._chartInitPromise === pending) this._chartInitPromise = null;
+    }
+  }
+
+  async _initializeChart(generation) {
+    if (this._chart) return this._chart;
+    if (this._detached || generation !== this._chartGeneration) return null;
     if (!this._echartsPromise) {
       diagnosticsRecord("dynamic-import-start");
       this._echartsPromise = import(ECHARTS_URL);
@@ -3169,6 +3202,8 @@ class KC761SpectrumCard extends HTMLElement {
       diagnosticsRecordError("dynamic-import-failure", error);
       throw error;
     }
+    if (this._detached || generation !== this._chartGeneration) return null;
+    if (this._chart) return this._chart;
     const chartElement = this.shadowRoot.querySelector("#chart");
     if (!chartElement) return null;
     this._echarts = module.default || module;

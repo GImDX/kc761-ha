@@ -106,6 +106,7 @@ class SpectrumUploadAssembler:
     source: int | None = None
     counts: list[int | None] = field(default_factory=list)
     segment_count: int = 0
+    filled: int = 0
     complete: bool = False
 
     def __post_init__(self) -> None:
@@ -124,6 +125,7 @@ class SpectrumUploadAssembler:
         self.source = None
         self.counts = [None] * self.channel_count
         self.segment_count = 0
+        self.filled = 0
         self.complete = False
 
     def add(self, segment: SpectrumSegment) -> SpectrumData | None:
@@ -149,9 +151,10 @@ class SpectrumUploadAssembler:
             if self.counts[channel] is None:
                 added_new_channel = True
                 self.counts[channel] = segment.counts[channel - segment.offset]
+                self.filled += 1
         if added_new_channel:
             self.segment_count += 1
-        if any(count is None for count in self.counts):
+        if self.filled < self.channel_count:
             return None
         self.complete = True
         return SpectrumData(

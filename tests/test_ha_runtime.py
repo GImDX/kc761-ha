@@ -1548,6 +1548,8 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.snapshot = snapshot
         coordinator.hardware_verified = False
         coordinator.create_raw_entities = False
+        coordinator.device_controls_enabled = False
+        coordinator.destructive_actions_enabled = False
         coordinator.calibration = make_calibration()
         coordinator.latest_spectrum = None
         coordinator.async_add_listener = MagicMock()
@@ -1618,6 +1620,8 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
             )
             assert spectrum_entity.native_value is None
             assert spectrum_entity.extra_state_attributes["points"] == []
+            assert spectrum_entity.extra_state_attributes["device_controls_enabled"] is False
+            assert spectrum_entity.extra_state_attributes["destructive_actions_enabled"] is False
 
             coordinator.create_raw_entities = True
             raw_entities = []
@@ -1898,6 +1902,8 @@ def test_spectrum_entity_skips_unchanged_coordinator_updates() -> None:
         ),
         hardware_verified=False,
         last_update_success=True,
+        device_controls_enabled=False,
+        destructive_actions_enabled=False,
         entry=SimpleNamespace(entry_id="entry-1"),
     )
     with patch.object(
@@ -1927,3 +1933,11 @@ def test_spectrum_entity_skips_unchanged_coordinator_updates() -> None:
     coordinator.last_update_success = False
     entity._handle_coordinator_update()
     assert entity.async_write_ha_state.call_count == 3
+
+    coordinator.device_controls_enabled = True
+    entity._handle_coordinator_update()
+    assert entity.async_write_ha_state.call_count == 4
+
+    coordinator.destructive_actions_enabled = True
+    entity._handle_coordinator_update()
+    assert entity.async_write_ha_state.call_count == 5

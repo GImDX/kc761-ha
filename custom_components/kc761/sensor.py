@@ -354,6 +354,8 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         self._last_available = None
         self._last_hardware_verified = None
         self._last_device_id = None
+        self._last_device_controls_enabled = None
+        self._last_destructive_actions_enabled = None
 
     def _handle_coordinator_update(self) -> None:
         """Avoid a large state serialization when the spectrum did not change."""
@@ -362,12 +364,16 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         info = self.coordinator.device_info
         hardware_verified = self.coordinator.hardware_verified
         device_id = None if info is None else info.device_id
+        device_controls_enabled = self.coordinator.device_controls_enabled
+        destructive_actions_enabled = self.coordinator.destructive_actions_enabled
         if (
             self._spectrum_update_seen
             and spectrum is self._last_spectrum
             and available == self._last_available
             and hardware_verified == self._last_hardware_verified
             and device_id == self._last_device_id
+            and device_controls_enabled == self._last_device_controls_enabled
+            and destructive_actions_enabled == self._last_destructive_actions_enabled
         ):
             return
         self._spectrum_update_seen = True
@@ -375,6 +381,8 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         self._last_available = available
         self._last_hardware_verified = hardware_verified
         self._last_device_id = device_id
+        self._last_device_controls_enabled = device_controls_enabled
+        self._last_destructive_actions_enabled = destructive_actions_enabled
         super()._handle_coordinator_update()
 
     @property
@@ -390,6 +398,8 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
                 "config_entry_id": self.coordinator.entry.entry_id,
                 "hardware_verified": self.coordinator.hardware_verified,
                 "codec_profile": CODEC_PROFILE,
+                "device_controls_enabled": self.coordinator.device_controls_enabled,
+                "destructive_actions_enabled": self.coordinator.destructive_actions_enabled,
                 "points": [],
             }
         return {
@@ -397,4 +407,6 @@ class KC761SpectrumSensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
             "config_entry_id": self.coordinator.entry.entry_id,
             "hardware_verified": self.coordinator.hardware_verified,
             "codec_profile": CODEC_PROFILE,
+            "device_controls_enabled": self.coordinator.device_controls_enabled,
+            "destructive_actions_enabled": self.coordinator.destructive_actions_enabled,
         }

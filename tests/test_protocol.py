@@ -726,10 +726,12 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         assembler = SpectrumUploadAssembler()
         assembler.begin_round(0)
         self.assertEqual(len(assembler.counts), 2048)
+        self.assertEqual(assembler.filled, 0)
         self.assertIsNone(
             assembler.add(SpectrumSegment(0, -1, 1, (1,), FLAG_MC_DATA_UPLOAD))
         )
         self.assertIsNone(assembler.source)
+        self.assertEqual(assembler.filled, 0)
         assembler.begin_round(0)
         self.assertIsNone(
             assembler.add(SpectrumSegment(1, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
@@ -737,12 +739,15 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         first = tuple(range(1024, 1536))
         self.assertIsNone(assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD)))
         self.assertEqual(assembler.segment_count, 1)
+        self.assertEqual(assembler.filled, 512)
         self.assertIsNone(assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD)))
         self.assertEqual(assembler.segment_count, 1)
+        self.assertEqual(assembler.filled, 512)
         self.assertIsNone(
             assembler.add(SpectrumSegment(0, 1024, 1, tuple(range(999, 1511)), FLAG_MC_DATA_UPLOAD))
         )
         self.assertIsNone(assembler.source)
+        self.assertEqual(assembler.filled, 0)
 
         assembler.begin_round(0)
         self.assertIsNone(
@@ -761,10 +766,12 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(complete.segment_count, 4)
         self.assertEqual(complete.counts, tuple(range(2048)))
         self.assertTrue(assembler.complete)
+        self.assertEqual(assembler.filled, 2048)
         self.assertIsNone(
             assembler.add(SpectrumSegment(0, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
         )
         assembler.begin_round(1)
+        self.assertEqual(assembler.filled, 0)
         self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_UPLOAD)))
         self.assertIsNone(assembler.add(SpectrumSegment(1, 0, 1, (1,), FLAG_MC_DATA_QUERY)))
         self.assertFalse(assembler.complete)
