@@ -238,7 +238,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.1",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.3",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]

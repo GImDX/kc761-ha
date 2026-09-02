@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-rc.1";
+const CARD_VERSION = "0.2.0-rc.3";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
@@ -45,16 +45,16 @@ const DIAGNOSTICS_DEEP_BUDGET_MS = 100;
 const DIAGNOSTICS_REGISTRY_KEY = "__kc761SpectrumDiagnosticsRegistry";
 const DIAGNOSTICS_MODULE_EVALUATED_KEY = "__kc761SpectrumDiagnosticsModuleEvaluated";
 const REBUILD_REGISTRY_KEY = "__kc761SpectrumRebuildRegistry";
-const REBUILD_WINDOW_MS = 9000;
-// Alpha34 evidence showed about 112 accessible roots in the test dashboard;
-// keep a finite margin while ensuring the targeted error-card query runs
-// before the generic node walk for every root we attach.
+// Keep the recovery event-driven for the lifetime of the page.  The module is
+// loaded as a Home Assistant extra JS resource before the first Lovelace view
+// is necessarily created, so a short startup-only timer can expire before the
+// dashboard inserts its hui-card.  Root, node, event, and dispatch budgets
+// still bound the work and pagehide tears down every observer.
 const REBUILD_MAX_ROOTS = 160;
 const REBUILD_MAX_NODES = 8000;
 const REBUILD_MAX_EVENTS = 128;
 const REBUILD_MAX_DISPATCHES = 8;
 const REBUILD_MAX_TARGET_QUERIES = 256;
-const REBUILD_SCAN_DELAYS_MS = Object.freeze([250, 750, 1500, 3000, 5500, 8000]);
 const COLOR_FALLBACKS = {
   curve: "#4fc3f7",
   roiStart: "#00acc1",
@@ -520,14 +520,35 @@ function diagnosticsNodeTag(node) {
 
 function diagnosticsConfigTypeMatch(node) {
   const seen = new Set();
+  let typedConfigSeen = false;
+  const errorText = [];
   let current = node;
-  for (let depth = 0; current && depth < 8 && !seen.has(current); depth += 1) {
+  for (let depth = 0; current && depth < 16 && !seen.has(current); depth += 1) {
     seen.add(current);
     try {
-      const candidates = [current.config, current.error?.config, current.errorDetails?.config];
+      if (current === node) {
+        errorText.push(
+          current.config?.message,
+          current.error?.message,
+          current.errorDetails?.message,
+          current.shadowRoot?.textContent,
+          current.textContent,
+        );
+      }
+      const candidates = [
+        current.config,
+        current.config?.origConfig,
+        current.config?.originalConfig,
+        current._elementConfig,
+        current.error?.config,
+        current.error?.origConfig,
+        current.errorDetails?.config,
+        current.errorDetails?.origConfig,
+      ];
       for (const config of candidates) {
         if (config && typeof config === "object" && typeof config.type === "string") {
-          return config.type === "custom:kc761-spectrum-card";
+          typedConfigSeen = true;
+          if (config.type === "custom:kc761-spectrum-card") return true;
         }
       }
       current = current.parentElement || current.parentNode?.host || current.parentNode || null;
@@ -535,7 +556,18 @@ function diagnosticsConfigTypeMatch(node) {
       return "unknown";
     }
   }
-  return "unknown";
+  // HA's custom-card fallback stores only type="error" and the generated
+  // message on hui-error-card; the original card config is held by hui-card
+  // and is not guaranteed to be reachable while the DOM is being rebuilt.
+  // Match the stable custom-element tag, not a localized/full error sentence.
+  try {
+    if (errorText.some((value) => /(?:^|[^a-z0-9_-])kc761-spectrum-card(?:$|[^a-z0-9_-])/i.test(String(value || "")))) {
+      return true;
+    }
+  } catch (_error) {
+    return "unknown";
+  }
+  return typedConfigSeen ? false : "unknown";
 }
 
 function rebuildTargetWindow(node) {
@@ -561,6 +593,7 @@ function spectrumRebuildRegistry() {
     if (!hostWindow) return null;
     const current = hostWindow[REBUILD_REGISTRY_KEY];
     if (!current || typeof current !== "object" || current.version !== CARD_VERSION) {
+      if (current && typeof current === "object") rebuildCleanup(current, "replaced");
       hostWindow[REBUILD_REGISTRY_KEY] = {
         version: CARD_VERSION,
         cards: new WeakSet(),
@@ -579,7 +612,6 @@ function spectrumRebuildRegistry() {
         candidateSeenButBlocked: false,
         budgetReason: "",
         truncated: false,
-        deadline: 0,
         cleanupReason: "",
       };
     }
@@ -598,11 +630,11 @@ function rebuildCleanup(registry, reason) {
   if (!registry || (!registry.active && registry.cleanupReason)) return;
   registry.active = false;
   registry.cleanupReason = reason;
-  registry.timers.forEach((timer) => {
+  (Array.isArray(registry.timers) ? registry.timers : []).forEach((timer) => {
     try { clearTimeout(timer); } catch (_error) { /* restricted timer */ }
   });
   registry.timers = [];
-  registry.observers.forEach((observer) => {
+  (Array.isArray(registry.observers) ? registry.observers : []).forEach((observer) => {
     try { observer.disconnect?.(); } catch (_error) { /* restricted observer */ }
   });
   registry.observers = [];
@@ -627,7 +659,6 @@ function rebuildCleanup(registry, reason) {
 function rebuildDispatchErrorCard(registry, node, targeted = false) {
   if (!registry?.active || !node || registry.cards.has(node)) return false;
   if (diagnosticsNodeTag(node) !== "hui-error-card" || diagnosticsConfigTypeMatch(node) !== true) return false;
-  if (node.isConnected === false) return false;
   if (registry.dispatchedCount >= REBUILD_MAX_DISPATCHES) {
     registry.truncated = true;
     registry.budgetReason = "dispatches";
@@ -661,7 +692,7 @@ function rebuildDispatchErrorCard(registry, node, targeted = false) {
       target_registry_defined: targetRegistryDefined,
       dispatched_count: registry.dispatchedCount,
     });
-    rebuildCleanup(registry, "dispatched");
+    if (registry.dispatchedCount >= REBUILD_MAX_DISPATCHES) rebuildCleanup(registry, "budget");
     return true;
   } catch (_error) {
     diagnosticsRecord("registration-rebuild-dispatch", {
@@ -706,10 +737,6 @@ function rebuildQueryErrorCards(registry, root) {
     if (!registry.active || !node || seen.has(node) || registry.cards.has(node)) continue;
     seen.add(node);
     if (diagnosticsNodeTag(node) !== "hui-error-card") continue;
-    if (node.isConnected === false) {
-      rebuildRecordBlockedCandidate(registry, node, "detached");
-      continue;
-    }
     const configMatch = diagnosticsConfigTypeMatch(node);
     if (configMatch !== true) {
       rebuildRecordBlockedCandidate(registry, node, configMatch === false ? "non_kc761" : "unknown");
@@ -746,7 +773,7 @@ function rebuildObserveRoot(registry, root) {
       }
       records.forEach((record) => {
         if (!registry.active) return;
-        Array.from(record?.addedNodes || []).forEach((node) => rebuildScanNode(registry, node));
+        Array.from(record?.addedNodes || []).forEach((node) => rebuildScanAddedTree(registry, node));
       });
       if (registry.active) {
         diagnosticsRecord("registration-rebuild-scan", {
@@ -761,18 +788,14 @@ function rebuildObserveRoot(registry, root) {
     observer.observe(root, { childList: true, subtree: true });
     registry.observers.push(observer);
   } catch (_error) {
-    // A restricted root can still be covered by the bounded timer scans.
+    // A restricted root remains covered by other accessible roots; a later
+    // added subtree is also handled by the persistent document observer.
   }
   return true;
 }
 
 function rebuildScanNode(registry, node) {
   if (!registry?.active || !node) return false;
-  if (Date.now() > registry.deadline) {
-    registry.budgetReason = "time";
-    rebuildCleanup(registry, "timeout");
-    return false;
-  }
   if (registry.scannedNodes >= REBUILD_MAX_NODES) {
     registry.truncated = true;
     registry.budgetReason = "nodes";
@@ -793,11 +816,6 @@ function rebuildScanNode(registry, node) {
 
 function rebuildScanRoot(registry, root, recordScan = true) {
   if (!registry?.active || !root) return false;
-  if (Date.now() > registry.deadline) {
-    registry.budgetReason = "time";
-    rebuildCleanup(registry, "timeout");
-    return false;
-  }
   // Query the target tag before building the generic node list.  The alpha34
   // failure occurred because the broad walk exhausted the root budget before
   // it reached a late Shadow Root containing hui-error-card.
@@ -823,27 +841,38 @@ function rebuildScanRoot(registry, root, recordScan = true) {
   return registry.dispatchedCount > 0;
 }
 
+function rebuildScanAddedTree(registry, node) {
+  if (!registry?.active || !node) return false;
+  let dispatched = false;
+  try {
+    // A hui-card can be inserted together with its already-created
+    // hui-error-card child.  In that case MutationObserver reports only the
+    // outer hui-card, so inspect the added subtree before walking its hosts.
+    dispatched = rebuildQueryErrorCards(registry, node) || dispatched;
+    dispatched = rebuildScanNode(registry, node) || dispatched;
+    const descendants = node.querySelectorAll?.("*") || [];
+    for (const descendant of descendants) {
+      if (!registry.active) break;
+      dispatched = rebuildScanNode(registry, descendant) || dispatched;
+    }
+  } catch (_error) {
+    // A restricted DOM implementation is covered by the persistent root
+    // observer and the next added subtree.
+  }
+  return dispatched;
+}
+
 function scheduleKC761ErrorCardRebuild() {
   const registry = spectrumRebuildRegistry();
   const documentRoot = globalThis.document || globalThis.window?.document;
   if (!registry || !documentRoot || registry.started) return;
   registry.started = true;
   registry.active = true;
-  registry.deadline = Date.now() + REBUILD_WINDOW_MS;
   const hostWindow = globalThis.window;
   registry.pagehideListener = () => rebuildCleanup(registry, "unload");
   try { hostWindow?.addEventListener?.("pagehide", registry.pagehideListener, { once: true }); } catch (_error) { /* restricted window */ }
   rebuildObserveRoot(registry, documentRoot);
   rebuildScanRoot(registry, documentRoot);
-  if (!registry.active) return;
-  REBUILD_SCAN_DELAYS_MS.forEach((delay) => {
-    registry.timers.push(setTimeout(() => {
-      if (registry.active) rebuildScanRoot(registry, documentRoot);
-    }, delay));
-  });
-  registry.timers.push(setTimeout(() => {
-    if (registry.active) rebuildCleanup(registry, "timeout");
-  }, REBUILD_WINDOW_MS));
 }
 
 function diagnosticsNodePath(node) {
@@ -1358,6 +1387,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._colorsReady = false;
     this._diagnosticsEnabled = false;
     this._destructiveActionsEnabled = false;
+    this._sourceSelectionExplicit = false;
     diagnosticsRecord("constructor");
   }
 
@@ -1771,7 +1801,13 @@ class KC761SpectrumCard extends HTMLElement {
       this._xAxisMode = event.target.value === "channel" ? "channel" : "energy";
       this._draw();
     });
-    this.shadowRoot.querySelector("#source").addEventListener("change", () => this._capture());
+    this.shadowRoot.querySelector("#source").addEventListener("change", () => {
+      // A user-selected channel must win over the device snapshot until the
+      // card is deliberately rebound to another entity.  Initial loading is
+      // the only path allowed to replace a stale latest source implicitly.
+      this._sourceSelectionExplicit = true;
+      void this._capture();
+    });
     this.shadowRoot.querySelector("#yaxis").addEventListener("change", (event) => {
       this._setYAxis(event.target.value);
       this._persistYAxis();
@@ -1962,6 +1998,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._setDestructiveActionsEnabled(false);
     this._data = null;
     this._history = [];
+    this._sourceSelectionExplicit = false;
     this._historyLoaded = false;
     this._historyLoadPromise = null;
     this._historySelectionToken += 1;
@@ -2590,7 +2627,31 @@ class KC761SpectrumCard extends HTMLElement {
         option.textContent = name;
         source.append(option);
       });
-      if (this._data) source.value = String(this._data.source);
+      const isInstalled = (value) => (
+        Number.isInteger(value)
+        && value >= 0
+        && value <= 2
+        && Boolean(this._device.sensor_types[value])
+      );
+      const currentSource = Number(this._data?.source);
+      const selectedSource = Number(source.value);
+      const history = this.shadowRoot.querySelector("#history");
+      const latestSelected = !history || history.value === "latest";
+      if (!this._sourceSelectionExplicit && latestSelected && isInstalled(currentSource)) {
+        // The spectrum entity's latest snapshot may belong to the previous
+        // channel (for example PIN) after a device replacement.  Omitting
+        // source asks the read-only capture API to use the device's current
+        // active sensor, then _capture mirrors the returned source into the
+        // selector.  This avoids guessing from a stale/persisted snapshot.
+        await this._capture({ silent: true, useActiveSensor: true });
+      } else if (this._sourceSelectionExplicit && isInstalled(selectedSource)) {
+        source.value = String(selectedSource);
+      } else if (isInstalled(currentSource)) {
+        source.value = String(currentSource);
+      } else {
+        const firstInstalled = [0, 1, 2].find((index) => isInstalled(index));
+        source.value = firstInstalled === undefined ? "" : String(firstInstalled);
+      }
       if (this._shouldLoadHistory()) await this._requestHistoryLoad();
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._setStatus("");
@@ -2678,14 +2739,20 @@ class KC761SpectrumCard extends HTMLElement {
     }
   }
 
-  async _capture({ silent = false } = {}) {
+  async _capture({ silent = false, useActiveSensor = false } = {}) {
     if (this._busyState || !this._entryId) return;
     const generation = this._entityGeneration;
     const entryId = this._entryId;
     await this._busy(async () => {
-      const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
+      const message = { type: "kc761/spectrum/capture", entry_id: entryId };
+      if (!useActiveSensor) message.source = Number(this.shadowRoot.querySelector("#source").value);
+      const data = await this._call(message);
       if (generation !== this._entityGeneration || entryId !== this._entryId) return;
       this._setData(data, { viewMode: "live" });
+      const source = Number(data?.source);
+      if (Number.isInteger(source) && source >= 0 && source <= 2) {
+        this.shadowRoot.querySelector("#source").value = String(source);
+      }
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
       this._draw();
@@ -3330,7 +3397,7 @@ function registerKC761SpectrumCard() {
     name: "KC761 Spectrum",
     description: "Current and saved KC761 spectra",
     documentationURL: CARD_DOCUMENTATION_URL,
-    preview: false,
+    preview: true,
     getEntitySuggestion: (hass, entityId) => KC761SpectrumCard.getEntitySuggestion(hass, entityId),
   };
   const existing = cards.findIndex((card) => card.type === "kc761-spectrum-card");

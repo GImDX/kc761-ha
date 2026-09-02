@@ -59,7 +59,19 @@ class FakeNode {
   setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = String(value); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
   querySelector(selector) { return selector === ".caption" ? new FakeNode(selector) : new FakeNode(selector); }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (node) => {
+      for (const child of node.children || []) {
+        if (selector === "*" || (selector === "hui-error-card" && child.localName === "hui-error-card")) {
+          matches.push(child);
+        }
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
   replaceChildren(...items) { this.options = [...items]; }
   append(...items) {
     this.options.push(...items);
@@ -208,7 +220,7 @@ documentBody.isConnected = true;
 const preExistingCardHost = new FakeNode("hui-card");
 preExistingCardHost.config = { type: "custom:kc761-spectrum-card" };
 const preExistingErrorCard = new FakeNode("hui-error-card");
-preExistingErrorCard.textContent = "配置错误";
+preExistingErrorCard.textContent = "Configuration error";
 preExistingCardHost.append(preExistingErrorCard);
 preExistingErrorCard.isConnected = false;
 const documentNodes = [preExistingCardHost, preExistingErrorCard];
@@ -217,7 +229,7 @@ globalThis.document = {
   visibilityState: "visible",
   _listeners: new Map(),
   createElement: (selector) => new FakeNode(selector),
-  querySelectorAll: () => documentNodes,
+  querySelectorAll: () => documentNodes.filter((node) => node.isConnected !== false),
   addEventListener(type, callback) {
     this._listeners.set(type, callback);
   },
@@ -276,23 +288,25 @@ const rebuildRegistry = window.__kc761SpectrumRebuildRegistry;
 const rebuildObserver = MutationObserver.instances.at(-1);
 assert.ok(rebuildRegistry.active, "late registration window remains active");
 assert.equal(preExistingErrorCard.dispatchCount || 0, 0, "a detached error card waits for insertion");
-advanceTimers(6000);
-assert.ok(rebuildRegistry.active, "window covers a six-second delayed error card");
+advanceTimers(12000);
+assert.ok(rebuildRegistry.active, "recovery remains active after the dashboard appears later");
 const nonKC761RebuildCard = new FakeNode("hui-error-card");
 nonKC761RebuildCard.config = { type: "markdown" };
 nonKC761RebuildCard.isConnected = true;
 const detachedRebuildCard = new FakeNode("hui-error-card");
-detachedRebuildCard.config = { type: "custom:kc761-spectrum-card" };
+detachedRebuildCard.config = { type: "error", message: "Custom element doesn't exist: kc761-spectrum-card." };
+detachedRebuildCard.textContent = "Custom element doesn't exist: kc761-spectrum-card.";
 detachedRebuildCard.isConnected = false;
+preExistingCardHost.isConnected = true;
 preExistingErrorCard.isConnected = true;
-rebuildObserver.trigger([{ addedNodes: [nonKC761RebuildCard, detachedRebuildCard, preExistingErrorCard] }]);
+rebuildObserver.trigger([{ addedNodes: [nonKC761RebuildCard, detachedRebuildCard, preExistingCardHost] }]);
 assert.equal(nonKC761RebuildCard.dispatchCount || 0, 0, "non-KC761 error card is ignored");
-assert.equal(detachedRebuildCard.dispatchCount || 0, 0, "detached error card is ignored");
+assert.equal(detachedRebuildCard.dispatchCount, 1, "detached KC761 error card is rebuilt through its direct listener");
 assert.equal(preExistingErrorCard.dispatchCount, 1, "late registration rebuilds an attached KC761 error card once");
 assert.equal(preExistingErrorCard.lastEvent?.type, "ll-rebuild");
 assert.equal(preExistingErrorCard.lastEvent?.bubbles, true);
 assert.equal(preExistingErrorCard.lastEvent?.composed, true);
-assert.equal(rebuildRegistry.active, false, "successful rebuild cleans the bounded window");
+assert.equal(rebuildRegistry.active, true, "the page-lifetime observer remains available for later cards");
 rebuildObserver.trigger([{ addedNodes: [preExistingErrorCard] }]);
 assert.equal(preExistingErrorCard.dispatchCount, 1, "a rebuilt error-card node is not retriggered");
 documentNodes.splice(0);
@@ -328,8 +342,8 @@ targetedRegistry.budgetReason = "";
 targetedRegistry.truncated = false;
 rebuildObserver.trigger([{ addedNodes: lateRootHosts }]);
 assert.equal(lateTargetCard.dispatchCount, 1, "targeted query reaches a card after 96 roots");
-assert.equal(targetedRegistry.active, false, "targeted dispatch cleans the bounded window");
-assert.equal(targetedRegistry.cleanupReason, "dispatched");
+assert.equal(targetedRegistry.active, true, "targeted dispatch keeps the page-lifetime observer available");
+assert.equal(targetedRegistry.cleanupReason, "");
 assert.equal(targetedRegistry.targetedQueryHit, true);
 assert.equal(targetedRegistry.candidateSeenButBlocked, false);
 assert.ok(targetedRegistry.scanRoots > 96 && targetedRegistry.scanRoots <= 160);
@@ -340,6 +354,11 @@ const Card = customElements.get("kc761-spectrum-card");
 assert.ok(Card);
 assert.equal(Card.getStubConfig().entity, undefined);
 assert.equal(Card.getStubConfig().show_peak, true);
+assert.equal(
+  window.customCards.find((item) => item.type === "kc761-spectrum-card")?.preview,
+  true,
+  "the card picker renders the real card preview",
+);
 
 const form = Card.getConfigForm();
 const schemaNames = [];
@@ -373,6 +392,9 @@ card.setConfig({ entity: "sensor.real_spectrum", future_option: { keep: true }, 
 assert.deepEqual(card._config.future_option, { keep: true });
 assert.deepEqual(card._config.visibility, [{ condition: "state" }]);
 assert.equal(card.shadowRoot.querySelector("#source").listenerCount("change"), 1);
+assert.equal(card._sourceSelectionExplicit, false);
+card.shadowRoot.querySelector("#source").emit("change");
+assert.equal(card._sourceSelectionExplicit, true, "a user channel change is tracked as explicit");
 assert.equal(card.shadowRoot.querySelector("#roi-start").listenerCount("input"), 1);
 assert.equal(card.shadowRoot.querySelector("#roi-end").listenerCount("input"), 1);
 assert.equal(card.shadowRoot.querySelector("#data-cursor-slider").listenerCount("input"), 1);
@@ -391,6 +413,55 @@ assert.equal(card.shadowRoot.querySelector("#configure").hidden, false);
 assert.equal(card.shadowRoot.querySelector(".summary").hidden, false);
 assert.equal(card.shadowRoot.querySelector('[data-summary="peak"]').hidden, true);
 assert.equal(card.shadowRoot.querySelector('[data-legend="peak"]').hidden, true);
+
+// A latest entity can retain a spectrum captured from the previous channel
+// after a device replacement.  Initial loading must ask the read-only capture
+// API for the device's active channel, while a user-selected channel remains
+// authoritative.
+const activeSourceCard = new Card();
+activeSourceCard.setConfig({ entity: "sensor.active_source_spectrum" });
+activeSourceCard.isConnected = true;
+activeSourceCard._entryId = "entry-active-source";
+activeSourceCard._data = { source: 2, points: [[0, 1, 2]] };
+activeSourceCard._draw = () => {};
+activeSourceCard._updateSummary = () => {};
+const activeSourceCalls = [];
+activeSourceCard._hass = {
+  callWS: async (message) => {
+    activeSourceCalls.push(message);
+    if (message.type === "kc761/info") return { sensor_types: [1, 0, 1], destructive_actions_enabled: false };
+    if (message.type === "kc761/spectrum/capture") {
+      assert.equal("source" in message, false, "active-source initialization omits a stale source");
+      return { source: 0, points: [[0, 1, 2]], acquired_at: "2026-08-25T00:00:00Z", total_counts: 3 };
+    }
+    throw new Error(`unexpected active-source websocket call ${message.type}`);
+  },
+};
+await activeSourceCard._loadInitial();
+assert.deepEqual(activeSourceCalls.map((message) => message.type), ["kc761/info", "kc761/spectrum/capture"]);
+assert.equal(activeSourceCard._data.source, 0, "Latest follows the device active sensor");
+assert.equal(activeSourceCard.shadowRoot.querySelector("#source").value, "0");
+
+const explicitSourceCard = new Card();
+explicitSourceCard.setConfig({ entity: "sensor.explicit_source_spectrum" });
+explicitSourceCard.isConnected = true;
+explicitSourceCard._entryId = "entry-explicit-source";
+explicitSourceCard._data = { source: 2, points: [[0, 1, 2]] };
+explicitSourceCard._draw = () => {};
+explicitSourceCard._updateSummary = () => {};
+explicitSourceCard._sourceSelectionExplicit = true;
+explicitSourceCard.shadowRoot.querySelector("#source").value = "2";
+const explicitSourceCalls = [];
+explicitSourceCard._hass = {
+  callWS: async (message) => {
+    explicitSourceCalls.push(message);
+    if (message.type === "kc761/info") return { sensor_types: [1, 1, 1], destructive_actions_enabled: false };
+    throw new Error(`unexpected explicit-source websocket call ${message.type}`);
+  },
+};
+await explicitSourceCard._loadInitial();
+assert.deepEqual(explicitSourceCalls.map((message) => message.type), ["kc761/info"]);
+assert.equal(explicitSourceCard.shadowRoot.querySelector("#source").value, "2", "explicit channel selection is preserved");
 
 // Diagnostics are opt-in, session-only, bounded, redacted, and must not add
 // storage writes or UI when disabled.
