@@ -1290,10 +1290,10 @@ assert.equal(
   "unavailable state remains outside strict spectrum validation",
 );
 
-// The normal dashboard path exposes one compact saved-spectrum selector but
-// does not request history until the user opens it.  Focus/pointerdown share a
-// single lazy request, and selecting a saved record or Live never mutates the
-// Lovelace config.
+// The normal dashboard path exposes one compact saved-spectrum selector.  A
+// pointer entering the control prefetches the options before the native picker
+// opens; focus/pointerdown remain fallback triggers and share that request.
+// Selecting a saved record or Live never mutates the Lovelace config.
 const runtimeHistoryCard = new Card();
 runtimeHistoryCard.setConfig({ entity: "sensor.runtime_history_spectrum" });
 runtimeHistoryCard.isConnected = true;
@@ -1322,15 +1322,19 @@ runtimeHistoryCard._hass = {
 const runtimeHistorySelect = runtimeHistoryCard.shadowRoot.querySelector("#history");
 assert.equal(runtimeHistoryCard.shadowRoot.querySelector("#history-control").hidden, false, "normal view shows saved spectrum control");
 assert.equal(runtimeHistoryCard.shadowRoot.querySelector("#editor-controls").hidden, true, "normal view keeps editor controls hidden");
+assert.equal(runtimeHistorySelect.listenerCount("pointerenter"), 1, "history prefetches when the pointer enters");
 assert.equal(runtimeHistorySelect.listenerCount("focus"), 1, "history opens from keyboard focus");
 assert.equal(runtimeHistorySelect.listenerCount("pointerdown"), 1, "history opens from pointer interaction");
 assert.deepEqual(runtimeHistoryCalls, [], "normal view starts with no history websocket request");
-runtimeHistorySelect.emit("focus");
+runtimeHistorySelect.emit("pointerenter");
 const runtimeHistoryRequest = runtimeHistoryCard._historyLoadPromise;
+assert.ok(runtimeHistoryRequest, "pointer entry starts the history request before the picker opens");
+runtimeHistorySelect.emit("focus");
 runtimeHistorySelect.emit("pointerdown");
 assert.equal(runtimeHistoryCard._historyLoadPromise, runtimeHistoryRequest, "focus and pointerdown deduplicate history loading");
 await runtimeHistoryRequest;
 assert.deepEqual(runtimeHistoryCalls.map((message) => message.type), ["kc761/spectrum/list"]);
+assert.equal(runtimeHistorySelect.options.length, 2, "prefetch populates all picker options before selection");
 const runtimeCardEvents = [];
 runtimeHistoryCard.dispatchEvent = (event) => runtimeCardEvents.push(event);
 runtimeHistorySelect.emit("change", { target: { value: "saved-runtime" } });

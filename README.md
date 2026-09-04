@@ -2,7 +2,7 @@
 
 KC761x 是一个面向 Home Assistant 的 HACS 自定义集成，支持通过局域网 TCP 或 Home Assistant Bluetooth 连接 KC761 系列便携式核辐射分析仪。
 
-当前版本：`0.2.0-rc.1` 预发布候选。最低 Home Assistant 版本为 `2026.7.0`。
+当前版本：`0.2.0-rc.4` 预发布候选。最低 Home Assistant 版本为 `2026.7.0`。
 
 > 这是 RC，不是稳定版。协议档案仍固定公开 `hardware_verified=false`。真实设备写命令尚未完成系统性实机验收，默认关闭；生产环境不应使用本候选执行设备控制或清空操作。
 

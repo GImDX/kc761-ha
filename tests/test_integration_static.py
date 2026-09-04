@@ -396,6 +396,7 @@ class IntegrationStaticTests(unittest.TestCase):
             "aria-label",
             "title = text",
             "white-space:nowrap",
+            "pointerenter",
             "registerKC761SpectrumCard",
             'globalThis.customElements',
             'Array.isArray(hostWindow.customCards)',
