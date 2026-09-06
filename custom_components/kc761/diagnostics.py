@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -13,13 +14,25 @@ from .const import (
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_GAMMA_SPECTRUM_CHANNELS,
+    CONF_INFO_INTERVAL,
     CONF_NEUTRON_SPECTRUM_CHANNELS,
     CONF_PIN_SPECTRUM_CHANNELS,
     CONF_SPECTRUM_SAVE_ENABLED,
     CONF_SPECTRUM_SAVE_INTERVAL,
+    CONF_STATUS_INTERVAL,
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
+    DEFAULT_DOSE_DISPLAY_UNIT,
+    DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
+    DEFAULT_ENABLE_DEVICE_CONTROLS,
+    DEFAULT_INFO_INTERVAL,
+    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
+    DEFAULT_SPECTRUM_SAVE_INTERVAL,
+    DEFAULT_SPECTRUM_SAVE_ENABLED,
+    DEFAULT_STATUS_INTERVAL,
+    DEFAULT_TIME_SYNC_ENABLED,
+    DEFAULT_TIME_SYNC_INTERVAL,
     MODEL_NAMES,
     VERSION,
 )
@@ -31,7 +44,9 @@ from .protocol.models import redacted_device_id_suffix
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Return bounded diagnostics without host, full ID, payload, or secrets."""
     del hass
-    coordinator: KC761Coordinator = entry.runtime_data
+    coordinator: KC761Coordinator | None = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        return _diagnostics_without_runtime(entry)
     info = coordinator.device_info
     client = coordinator.client
     parser = getattr(client, "parser", None)
@@ -153,3 +168,92 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "recent_errors": list(parser.recent_errors),
         },
     }
+
+
+def _diagnostics_without_runtime(entry: ConfigEntry) -> dict[str, Any]:
+    """Return a safe, bounded snapshot for disabled, failed, or unloaded entries."""
+    raw_options = getattr(entry, "options", {})
+    options = raw_options if isinstance(raw_options, Mapping) else {}
+    raw_data = getattr(entry, "data", {})
+    data = raw_data if isinstance(raw_data, Mapping) else {}
+    transport = str(data.get("transport", "tcp")).strip().lower()
+    if transport not in {"tcp", "ble"}:
+        transport = "tcp"
+    channel_counts = _entry_channel_counts(options)
+    return {
+        "integration_version": VERSION,
+        "config_version": getattr(entry, "version", None),
+        "protocol_profile": CODEC_PROFILE,
+        "hardware_verified": HARDWARE_VERIFIED,
+        "options": {
+            CONF_STATUS_INTERVAL: _option_int(options, CONF_STATUS_INTERVAL, DEFAULT_STATUS_INTERVAL),
+            CONF_INFO_INTERVAL: _option_int(options, CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
+            CONF_CREATE_RAW_ENTITIES: bool(options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES)),
+            CONF_DOSE_DISPLAY_UNIT: options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT),
+            CONF_GAMMA_SPECTRUM_CHANNELS: channel_counts[0],
+            CONF_NEUTRON_SPECTRUM_CHANNELS: channel_counts[1],
+            CONF_PIN_SPECTRUM_CHANNELS: channel_counts[2],
+            CONF_ENABLE_DEVICE_CONTROLS: bool(
+                options.get(CONF_ENABLE_DEVICE_CONTROLS, DEFAULT_ENABLE_DEVICE_CONTROLS)
+            ),
+            CONF_ENABLE_DESTRUCTIVE_ACTIONS: bool(
+                options.get(CONF_ENABLE_DESTRUCTIVE_ACTIONS, DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS)
+            ),
+            CONF_TIME_SYNC_ENABLED: bool(options.get(CONF_TIME_SYNC_ENABLED, DEFAULT_TIME_SYNC_ENABLED)),
+            CONF_TIME_SYNC_INTERVAL: options.get(CONF_TIME_SYNC_INTERVAL, DEFAULT_TIME_SYNC_INTERVAL),
+            CONF_SPECTRUM_SAVE_ENABLED: bool(
+                options.get(CONF_SPECTRUM_SAVE_ENABLED, DEFAULT_SPECTRUM_SAVE_ENABLED)
+            ),
+            CONF_SPECTRUM_SAVE_INTERVAL: options.get(
+                CONF_SPECTRUM_SAVE_INTERVAL, DEFAULT_SPECTRUM_SAVE_INTERVAL
+            ),
+        },
+        "device": None,
+        "connection": {
+            "transport": transport,
+            "connected": False,
+            "last_success": None,
+            "consecutive_failures": 0,
+            "reconnects": 0,
+            "protocol_errors": 0,
+            "data_errors": 0,
+            "consecutive_protocol_errors": 0,
+            "responses": 0,
+            "push_frames": 0,
+            "late_responses": 0,
+            "unhandled_frames": 0,
+            "identity_mismatches": 0,
+            "retry_delay": None,
+            "last_error": None,
+            "last_frame": None,
+        },
+        "controls": {"commands": 0, "last_time_sync": None},
+        "spectrum": {
+            "channel_counts": list(channel_counts),
+            "latest": None,
+            "last_saved": None,
+        },
+        "framing": None,
+    }
+
+
+def _option_int(options: Mapping[str, Any], key: str, default: int) -> int:
+    """Read a bounded diagnostic option without exposing arbitrary values."""
+    try:
+        return int(options.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _entry_channel_counts(options: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Normalize persisted channel lengths when no coordinator is available."""
+    values: list[int] = []
+    keys = (
+        CONF_GAMMA_SPECTRUM_CHANNELS,
+        CONF_NEUTRON_SPECTRUM_CHANNELS,
+        CONF_PIN_SPECTRUM_CHANNELS,
+    )
+    for key, default in zip(keys, DEFAULT_SPECTRUM_CHANNEL_COUNTS, strict=True):
+        value = _option_int(options, key, default)
+        values.append(value if value in (1024, 2048, 4096) else default)
+    return tuple(values)  # type: ignore[return-value]

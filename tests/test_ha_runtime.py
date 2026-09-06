@@ -1923,6 +1923,43 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), entry)
         assert result["connection"]["last_success"] is not None
 
+        disabled_entry = SimpleNamespace(
+            version=7,
+            data={
+                "transport": "tcp",
+                "host": "secret.example",
+                "port": 7601,
+                "device_id": "7601-0000-000001",
+            },
+            options={
+                CONF_GAMMA_SPECTRUM_CHANNELS: "1024",
+                CONF_NEUTRON_SPECTRUM_CHANNELS: 4096,
+                CONF_PIN_SPECTRUM_CHANNELS: "invalid",
+            },
+        )
+        result = await diagnostics_module.async_get_config_entry_diagnostics(
+            MagicMock(), disabled_entry
+        )
+        assert result["device"] is None
+        assert result["connection"]["connected"] is False
+        assert result["connection"]["transport"] == "tcp"
+        assert result["spectrum"]["channel_counts"] == [1024, 4096, 2048]
+        assert "secret.example" not in str(result)
+        assert "7601-0000-000001" not in str(result)
+
+        unloaded_entry = make_entry()
+        unloaded_entry.data = {
+            "transport": "ble",
+            "ble_address": "AA:BB:CC:DD:EE:FF",
+            "ble_service_uuid": "secret-uuid",
+        }
+        unloaded_entry.runtime_data = None
+        result = await diagnostics_module.async_get_config_entry_diagnostics(
+            MagicMock(), unloaded_entry
+        )
+        assert result["connection"]["transport"] == "ble"
+        assert result["framing"] is None
+
         empty = SimpleNamespace(
             device_info=None,
             status_interval=5,
