@@ -1,6 +1,6 @@
 # Home Assistant 实体模型
 
-状态：`0.2.0-rc.1` 当前实现
+状态：发布前补全候选；验证与部署状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
 
 ## 1. 通用规则
 
@@ -25,7 +25,7 @@
 | serial_number | 原始 `DEVICE_ID` |
 | manufacturer | 暂不填写；现有资料不足以确认标准制造商名称 |
 
-协处理器版本和三通道传感器型号使用普通 sensor 显示。
+协处理器版本和三通道传感器型号使用默认启用的普通 sensor 显示。`coprocessor_firmware` 保留既有 unique ID；已观察到原始 `CO_FW_VER=11` 时显示 `V1.1`，不是主固件的 `/100` 显示规则。用户历史手动禁用状态不被升级强制覆盖。
 
 ## 3. 设备级只读传感器
 
@@ -58,16 +58,39 @@
 
 这些值只从 `0x55`/A6 读取。集成不实现 `0x64`，因此不创建校准 number、select 或写按钮。
 
-以下 A6 字段已经解析并用于能量换算或谱图元数据，但没有独立 HA 实体：
+补全候选新增以下 34 个默认启用的普通只读 sensor，与上表 7 项合计 41 项 A6 业务字段：
 
-- `FAC_CAL_VER`、`RAD0_ENERGY_CAL_SELECT`；
-- `RAD0/1/2_ENERGY_ZOOM`、`RAD0/1/2_ENERGY_OFFSET`；
-- `RAD0_CUSTOM_ENERGY_CAL` 的 4 个系数；
-- `RAD1_FAC_ENERGY_CAL`、`RAD2_FAC_ENERGY_CAL` 各 4 个系数；
-- `RAD0_FAC_ENERGY_CAL_L/M/H` 各 4 个系数；
-- `RAD0_FAC_ENERGY_CAL_NODE1`、`RAD0_FAC_ENERGY_CAL_NODE2`。
+| key / key 组 | 内容 | 数量 |
+| --- | --- | --- |
+| `energy_calibration_version` | 工厂校准版本 | 1 |
+| `energy_calibration_selection` | 工厂/自定义能量刻度选择 | 1 |
+| `<channel>_energy_zoom`、`<channel>_energy_offset` | 三通道能量倍率和偏移 | 6 |
+| `gamma_custom_coefficient_a/b/c/d` | Gamma 自定义系数 | 4 |
+| `neutron_factory_coefficient_a/b/c/d` | Neutron 工厂系数 | 4 |
+| `pin_factory_coefficient_a/b/c/d` | PIN 工厂系数 | 4 |
+| `gamma_factory_low/middle/high_coefficient_a/b/c/d` | Gamma 工厂低、中、高三段系数 | 12 |
+| `gamma_factory_energy_node1/2` | Gamma 工厂分界道址 | 2 |
 
-其中 `FAC_CAL_VER` 会间接进入谱图的 `calibration_profile`，其余能量字段会反映在每个谱图点的 `energy_kev` 中；“未独立实体化”不表示解码器丢弃了这些字段。
+表中的 `/` 表示分别独立的实体 key，不是数组属性。系数遵循现有多项式 `((a * ch + b) * ch + c) * ch + d` 顺序；不将它们标成辐射读数，也不设置长期统计 state class。字段来自设备级完整 A6 档案，即使某组刻度未被选用也可读取；有值不等于正在参与当前通道换算。
+
+### 4.1 独立只读状态
+
+状态直接读取已有 A2/A3 快照，不执行额外网络 I/O，不依赖 `enable_device_controls`，也不使用诊断分类。默认启用以下实体：
+
+| 平台 | key | 内容 |
+| --- | --- | --- |
+| sensor | `active_sensor_state` | 活动通道 |
+| sensor | `global_volume_state` | 全局音量档位 |
+| sensor | `backlight_brightness_state` | 背光亮度档位 |
+| binary_sensor | `auto_upload_status` | 自动上传 |
+| binary_sensor | `key_tone_status` | 按键音 |
+| binary_sensor | `count_tone_status` | 计数音 |
+| binary_sensor | `dense_count_effect_status` | 密集计数效果 |
+| binary_sensor | `count_flash_status` | 计数闪光 |
+| binary_sensor | `backlight_status` | 背光 |
+| binary_sensor | `<channel>_spectrum_accumulating_status` | 各已安装通道的谱图累积 |
+
+独立的 `_state`/`_status` 标识避免与可选 select/switch 或旧版实体迁移键混淆。开启控制后，只读状态和控制实体可以同时存在。
 
 ## 5. 每通道测量传感器
 
@@ -99,17 +122,25 @@
 
 这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。2026-09-06 用户确认累计原始数值单位为 `mGy/mSv`，本项目保留当前标签、原始值与历史；撤回此前“仅改为 µGy/µSv 标签”的方案。PDF 表格、正文和官方 UI 的矛盾作为原始证据保留，不表述为本轮已消除的跨固件疑点。可选微单位显示须将数值乘 1000，并在 Recorder 验证后确定同实体切换或独立换算实体策略，详见 D-012 和 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
 
+### 6.1 剂量显示单位选项
+
+`dose_display_unit=raw` 为默认，保留既有 mGy/mSv（及对应每小时速率）实体。选择 `micro` 时保留原始实体，并增加独立微单位实体；对应值为原始值乘 1000，Gy 不转成 Sv。两套实体各有固定单位和独立稳定标识，避免同一统计序列混合单位。CPS、时间和校准系数不换算；RAW 剂量率换算实体仍受“创建 raw 实体”条件约束。
+
+微单位速率实体使用 `measurement`，微单位累计量不设置 state class。选项不重写既有 Recorder 历史，也不改变协议、协调器快照或原始诊断。HA 2026.7.4 统计单位处理限制与验证范围见 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
+
 ## 7. 结构化谱图实体
 
 每台设备创建一个 `spectrum` sensor：
 
 - state：当前完整谱图的总计数；
-- 属性：source、获取时间、累计时间、校准档案、segment 数及 2048 个 `[channel, energy_kev, counts]` 点；
+- 属性：source、获取时间、累计时间、校准档案、segment 数、`point_count` 及对应数量的 `[channel, energy_kev, counts]` 点；道数支持 1024、2048、4096；
 - `points` 被列入 `_unrecorded_attributes`，Recorder 不保存点阵；
 - 没有完整谱图时 state 为 `unknown`、`points=[]`；
 - A0 主动谱图和完整 A3/A1 自动上传轮次复用同一实体。
 
 谱图卡、WebSocket、CSV 和本地历史存档消费相同的 `SpectrumSnapshot`，不为每个道址创建实体。
+
+每个通道通过 `gamma_spectrum_channels`、`neutron_spectrum_channels`、`pin_spectrum_channels` 显式配置道数；缺省为 2048。A0/A1 无总道数字段，不根据暂时收到的数据推断完整长度。不同通道可以配置不同道数；历史存档使用自身保存的长度，不用当前实时配置强行裁剪旧谱图。
 
 ## 8. 始终可用的按钮
 
@@ -157,5 +188,5 @@ CSV 导出由谱图卡/已认证 WebSocket 执行，不创建额外实体。
 
 - 电池只接受 0–100；NaN/Inf 拒绝；时间戳必须可解析。
 - 未安装通道不创建实体；通道清单变化通过受控 reload 更新集合。
-- 旧 binary sensor 条目会迁移移除；当前设备信息/AVG 实体恢复为普通可见实体，但不覆盖用户自己禁用的选择。
+- 旧版被弃用的 binary sensor 条目按原迁移规则处理；新增 `_status` 只读实体必须保留。当前设备信息/AVG 实体恢复为普通可见实体，但不覆盖用户自己禁用的选择。
 - 关闭“创建 raw 实体”时，旧 raw registry 项按迁移规则清理；重新启用后使用同一稳定 unique ID 创建。

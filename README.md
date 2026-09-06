@@ -2,15 +2,17 @@
 
 KC761x 是一个面向 Home Assistant 的 HACS 自定义集成，支持通过局域网 TCP 或 Home Assistant Bluetooth 连接 KC761 系列便携式核辐射分析仪。
 
-当前版本：`0.2.0-rc.4` 预发布候选。最低 Home Assistant 版本为 `2026.7.0`。
+当前开发候选：`0.2.0-rc.5`。最低 Home Assistant 版本为 `2026.7.0`；本轮补全的验证和部署状态见[发布前补全记录](docs/PRE_RELEASE_COVERAGE.md)。
 
 > 这是 RC，不是稳定版。协议档案仍固定公开 `hardware_verified=false`。真实设备写命令尚未完成系统性实机验收，默认关闭；生产环境不应使用本候选执行设备控制或清空操作。
 
 ## 功能
 
 - TCP 和 Bluetooth LE 配置流；TCP 仅显示主机与端口，BLE 可从 HA 的可连接广播列表选择地址，也可手动输入。
-- 设备信息、环境数据、实时/平均辐射读数、累计时间与累计剂量、A6 校准只读字段。
-- 2048 道结构化谱图、内置 ECharts 卡片、ROI、数据游标、Ctrl+滚轮横向缩放、线性/对数轴和 CSV 导出。
+- 设备信息、环境数据、实时/平均辐射读数、累计时间与累计剂量、41 项 A6 校准只读字段。
+- 独立只读状态实体，无需开启设备控制即可查看通道、音量、灯光及自动上传等状态。
+- 每通道可配置 1024、2048、4096 道结构化谱图，默认 2048；内置 ECharts 卡片、ROI、数据游标、Ctrl+滚轮横向缩放、线性/对数轴和 CSV 导出。
+- 剂量保留原始 mGy/mSv 单位；可选增加独立微单位实体，数值乘 1000，原始实体与历史保留。
 - 手动或定时保存谱图；历史谱图保存在配置条目的本地有界存档中，卡片按需读取。
 - `DataUpdateCoordinator` 管理单条连接、轮询、自动上传谱图重组、重连、卸载和 HA 停止。
 - 默认脱敏诊断：不输出主机、完整设备 ID、原始帧、谱图点阵或凭据。
@@ -41,8 +43,10 @@ KC761x 是一个面向 Home Assistant 的 HACS 自定义集成，支持通过局
 - 真实设备证据仅覆盖有限型号/固件和字段，不能外推为全部 KC761x；BLE 服务 UUID 的跨固件一致性仍未知。
 - 一台已验证设备的三个设备端 AVG 字段持续为 `0`，而官方上位机自行计算 30 秒平均值（`KI-AVG-001`）。需要实时数据时可在选项中创建 raw 实体。
 - 完整谱图点阵存在于当前谱图实体属性和已认证 WebSocket 响应中，但以 `_unrecorded_attributes` 排除 Recorder；本地历史存档最多保留 256 份。
-- 累计值可由设备清零，因此作为普通传感器发布，不声明 `total_increasing`。DEVICE_INFO 表和官方 UI 支持 `µGy/µSv`，但当前 RC 代码仍把相同 A5 数值标为 `mGy/mSv`，这是已知的 1000 倍量纲标签缺陷；修复前不要把累计实体用于剂量报告。A2 速率实体的 `mGy/h`、`mSv/h` 已由 Recorder 量级复核，未受此问题影响。
-- 串口、科创云、区间谱和校准写入不在本版本范围内。
+- 累计值可由设备清零，因此作为普通传感器发布，不声明 `total_increasing`。2026-09-06 用户确认原始累计量为 `mGy/mSv`，项目据此保留数值和单位；手册/UI 矛盾仍作为历史证据保留，不据此提升跨固件认证。
+- 1024/4096 道使用显式配置，不能自动从 A0/A1 响应头识别；这些规格的软件模拟测试不代表实机验证。
+- 偶发 Lovelace“配置错误”仍记为开放问题 `KI-FE-001`，一次冷启动成功不等于已根治。
+- A4 脉冲流、串口、科创云、区间谱和校准写入不在本版本范围内。
 
 ## 开发验证
 
@@ -53,7 +57,7 @@ node --check custom_components/kc761/frontend/kc761-spectrum-card.js
 node tests/frontend_card_contract.mjs
 ```
 
-CI 还运行 JSON/编译、Hassfest 和 HACS 验证。当前候选的本地结果与尚未通过的门禁见[发布说明](docs/RELEASE_NOTES_0.2.0_RC1.md)。
+CI 还运行 JSON/编译、Hassfest 和 HACS 验证。当前候选的本地结果与尚未通过的门禁见[发布前补全记录](docs/PRE_RELEASE_COVERAGE.md)；历史发布说明不代替当前候选 CI。
 
 ## 文档
 
@@ -63,6 +67,7 @@ CI 还运行 JSON/编译、Hassfest 和 HACS 验证。当前候选的本地结�
 - [安全模型](docs/SAFETY.md)
 - [协议证据与待验证项](docs/PROTOCOL_EVIDENCE.md)
 - [测试与发布计划](docs/TEST_RELEASE_PLAN.md)
+- [发布前功能补全与验证](docs/PRE_RELEASE_COVERAGE.md)
 - [0.2.0-rc.1 发布说明](docs/RELEASE_NOTES_0.2.0_RC1.md)
 
 厂商原始 PDF、上位机截图、真实通信捕获、设备完整标识和测试凭据不属于公开发布物。仓库中的协议转录与脱敏结论不代表厂商背书。

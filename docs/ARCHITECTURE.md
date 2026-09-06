@@ -1,6 +1,6 @@
 # KC761x Home Assistant 集成架构
 
-状态：`0.2.0-rc.1` 当前规范
+状态：发布前补全候选规范，验证状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
 
 ## 1. 范围
 
@@ -28,7 +28,7 @@ protocol/client.py          SYNC、事务匹配、推送路由、超时
 protocol/codec.py/models.py 字段编解码和不可变值对象
         │
 coordinator.py              单连接所有权、轮询、谱图、写锁、生命周期
-        ├── sensor.py / switch.py / select.py / button.py
+        ├── sensor.py / binary_sensor.py / switch.py / select.py / button.py
         ├── websocket_api.py ── frontend/kc761-spectrum-card.js
         └── diagnostics.py
 ```
@@ -56,7 +56,7 @@ TCP 和 BLE 通知都被当作字节流，解析器支持分片、粘包、未�
 - 写 ACK 额外校验回显命令；
 - 超时事务使用代次/冷却隔离迟到帧；
 - A0 谱图片段按请求、source 和 offset 重组；
-- A3 开启一个 A1 自动上传轮次，只有同 source 的完整 2048 道才发布；缺片、冲突、越界、断线或新轮次会丢弃未完成数据；
+- A3 开启一个 A1 自动上传轮次，只有同 source 的完整配置道数才发布（1024/2048/4096，默认 2048）；缺片、冲突、越界、断线或新轮次会丢弃未完成数据；
 - A4 保持有界分类但不解释、不发布。
 
 真实上位机流已证明请求和谱图片段会交错，因此客户端不依赖“一个请求的全部帧连续到达”。
@@ -87,6 +87,8 @@ Options Flow 当前包含：
 
 - 状态轮询间隔、设备信息轮询间隔；
 - 是否创建高频 raw 实体；
+- 是否增加固定微单位剂量实体（原始实体保留）；
+- Gamma、Neutron、PIN 各自的谱图道数，支持 1024/2048/4096，默认 2048；
 - 是否启用设备控制；
 - 是否启用破坏性清空；
 - 定时校时开关和 1–168 小时间隔；
@@ -104,13 +106,13 @@ Options Flow 当前包含：
 
 只为已安装通道创建通道实体。关闭通道的测量字段 `-1` 转为 `unknown`；温度等其它合法负数保留。未知但结构兼容的型号/传感器值保留原值或 `Unknown (0xNN)`，不伪装成未安装。
 
-A2 剂量率字段保留线协议原生单位 `mGy/h`、`mSv/h`；A5 累计剂量/剂量当量依照 2026-09-06 用户确认保留原始 `mGy`、`mSv` 数值与单位。可选微单位显示必须同时将数值乘 1000、单位换成对应 `µGy`、`µSv`（速率保留 `/h`）；不能仅替换标签，也不在协议层缩放。历史单位切换兼容性应先验证，不自动改写 Recorder 历史；验证不通过则使用独立换算实体。手册/UI 单位矛盾与本次裁定的证据等级见 D-012；实施状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
+A2 剂量率字段保留线协议原生单位 `mGy/h`、`mSv/h`；A5 累计剂量/剂量当量依照 2026-09-06 用户确认保留原始 `mGy`、`mSv` 数值与单位。可选微单位显示同时将数值乘 1000、单位换成对应 `µGy`、`µSv`（速率保留 `/h`）；不能仅替换标签，也不在协议层缩放。补全候选采用独立固定微单位实体，保留原始实体与历史，避免 HA 不支持的同实体自定义统计单位切换。手册/UI 单位矛盾与本次裁定的证据等级见 D-012；验证范围和实施状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
 
 实体完整列表及默认门禁见 [ENTITY_MODEL.md](ENTITY_MODEL.md)。
 
 ## 8. 谱图
 
-`SpectrumSnapshot` 包含获取时间、source、累计秒数、总计数、校准档案和 2048 个 `[channel, energy_kev, counts]` 点。
+发布前补全候选的 `SpectrumSnapshot` 包含获取时间、source、累计秒数、总计数、校准档案、`point_count` 和对应数量的 `[channel, energy_kev, counts]` 点。支持 1024、2048、4096 道，由每个辐射通道的 Options 显式配置；既有配置默认 2048。A0/A1 无总道数字段，完整性按配置道数和片段覆盖判定，不以首次收到 1024 道、全零尾段或超时猜测完整谱图。旧存档根据自身数据读取，道数配置变化不改写历史。
 
 - 最新谱图实体的 state 是总计数，`points` 位于属性中；
 - `_unrecorded_attributes = {"points"}` 阻止 Recorder 保存点阵；
@@ -119,7 +121,7 @@ A2 剂量率字段保留线协议原生单位 `mGy/h`、`mSv/h`；A5 累计剂�
 - `.metadata.json` 是可重建索引，gzip 是数据权威；保存和索引更新使用同目录临时文件加原子替换；
 - WebSocket API 只对已认证用户开放，捕获、保存和清空要求管理员；清空还必须通过后端破坏性门禁。
 
-内置卡片使用本地 vendored ECharts，不访问 CDN。普通数据更新重建完整 option；ROI/Data cursor 高频交互仅合并 markArea/markLine/markPoint overlay，不重复提交 2048 点数组。
+内置卡片使用本地 vendored ECharts，不访问 CDN。普通数据更新重建完整 option；ROI/Data cursor 高频交互仅合并 markArea/markLine/markPoint overlay，不重复提交全谱点数组。ROI、数据游标和缩放恢复按实际道数限制有效范围；测试和部署门禁见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
 
 ## 9. 写入安全
 
