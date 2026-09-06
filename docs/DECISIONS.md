@@ -115,13 +115,13 @@
 
 ## D-012 累计量作为可重置普通实体
 
-状态：Accepted（单位标签实现待修正）
+状态：Accepted（2026-09-06 原始单位裁定更新）
 
-决定：RAD0/RAD1/RAD2 的四个 A5 累计字段在通道已安装时创建普通 sensor。`MC_RUNTIME` 和 `SUM_DOSE_TIME` 使用秒 duration；在 `manual_v1_8_candidate` 档案中，`SUM_DOSE` 和 `SUM_DOSE_EQ` 的目标单位分别为 `µGy`、`µSv`，不对已解码浮点值追加 1000 倍缩放。所有累计实体不设置 state class，也不使用 `TOTAL_INCREASING`。A2 速率字段继续使用线协议原生 `mGy/h`、`mSv/h`，不受本决定的累计单位修正影响。
+决定：RAD0/RAD1/RAD2 的四个 A5 累计字段在通道已安装时创建普通 sensor。`MC_RUNTIME` 和 `SUM_DOSE_TIME` 使用秒 duration；2026-09-06 用户明确确认原始累计数值单位为 `mGy/mSv`，因此 `SUM_DOSE` 和 `SUM_DOSE_EQ` 保留当前 `mGy`、`mSv` 标签和数值。所有累计实体不设置 state class，也不使用 `TOTAL_INCREASING`。A2 速率字段继续使用线协议原生 `mGy/h`、`mSv/h`。
 
-理由：设备可由 `0x66` 清空并频繁重置累计值，不能将其承诺为单调累计量。PDF 的 DEVICE_INFO 表逐字段写 `uGy/uSv`，官方上位机也把相同 A5 数值显示为 `µGy/µSv`；下一页正文写成顺序颠倒的“mSv/mGy”，作为资料矛盾保留，不再据此覆盖表格和实机 UI。2026-08-27 Recorder 量级复核另行确认了 A2 `mSv/h` 原生速率数值与约 `0.1 µSv/h` 本底一致，不能用速率字段为累计量的 `mGy/mSv` 标签背书。
+理由：设备可由 `0x66` 清空并频繁重置累计值，不能将其承诺为单调累计量。PDF 的 DEVICE_INFO 表逐字段写 `uGy/uSv`，官方上位机截图显示 `µGy/µSv`，下一页正文写成顺序颠倒的“mSv/mGy”；这些原始材料仍原样保留。此前根据表格/UI 推导“只修正为微单位标签”的方案被本次用户确认取代。此次为用户确认的项目单位裁定，不伪装成本轮新取得的协议抓包或跨固件物理测量证据。2026-08-27 Recorder 速率复核仍仅证明 A2 的量级，不能独立验证 A5。
 
-实现状态：当前 RC 代码仍把 A5 累计实体标为 `mGy/mSv`，同一数值会产生 1000 倍量纲标签错误；本次只更新设计与证据文档，不修改代码。真实条目当前没有累计实体 Recorder 序列，修正后的迁移和运行验收仍是发布门禁。
+实现状态：当前 RC 原始累计实体的 `mGy/mSv` 标签符合本次裁定，不改写既有 Recorder 历史。用户另行接受可选微单位显示：`mGy→µGy`、`mSv→µSv` 及对应速率必须同时将数值乘 1000；Gy 与 Sv 不互换。实现前应验证目标 HA 的 Recorder/长期统计对同实体单位切换的兼容性；不兼容时保留原始实体并提供独立微单位实体，避免混用统计序列。内部协议、缓存与原始诊断始终保留原始数值。实施与验收记录见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)。
 
 ## D-013 Git 与发布边界
 

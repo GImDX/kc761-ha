@@ -94,10 +94,10 @@
 | --- | --- | --- | --- | --- |
 | `<channel>_spectrum_runtime` | 谱图累计时间 | `s` duration | `s` | 无 |
 | `<channel>_dose_runtime` | 剂量累计时间 | `s` duration | `s` | 无 |
-| `<channel>_cumulative_dose` | 累计剂量 | `µGy` | `mGy`（已知错误） | 无 |
-| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `µSv` | `mSv`（已知错误） | 无 |
+| `<channel>_cumulative_dose` | 累计剂量 | `mGy` | `mGy` | 无 |
+| `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `mSv` | `mSv` | 无 |
 
-这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。PDF 原页复核确认 DEVICE_INFO 表逐字段写 `uGy/uSv`，下一页正文却以颠倒顺序写“单位 mSv/mGy”；官方上位机把实帧数值 `36.864582/40.960648` 显示为约 `36.89 µGy/40.99 µSv`，支持表格单位。目标实现只修正单位标签，不对 A5 原始浮点值再乘或除 1000。真实条目的累计传感器尚无 Recorder 序列，因此该 Recorder 门禁仍待条目成功加载后补测。
+这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。2026-09-06 用户确认累计原始数值单位为 `mGy/mSv`，本项目保留当前标签、原始值与历史；撤回此前“仅改为 µGy/µSv 标签”的方案。PDF 表格、正文和官方 UI 的矛盾作为原始证据保留，不表述为本轮已消除的跨固件疑点。可选微单位显示须将数值乘 1000，并在 Recorder 验证后确定同实体切换或独立换算实体策略，详见 D-012 和 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
 
 ## 7. 结构化谱图实体
 
