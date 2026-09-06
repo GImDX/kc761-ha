@@ -381,6 +381,22 @@ const suggestion = Card.getEntitySuggestion({ states: { "sensor.real_spectrum": 
 assert.deepEqual(Object.keys(suggestion), ["config"]);
 assert.deepEqual(Object.keys(suggestion.config).sort(), ["diagnostics", "entity", "refresh_interval", "show_actions", "show_controls", "show_legend", "show_peak", "show_summary", "title", "type", "x_axis", "y_axis"].sort());
 assert.equal(suggestion.config.entity, "sensor.real_spectrum");
+for (const pointCount of [1024, 2048, 4096]) {
+  const entityId = `sensor.spectrum_${pointCount}`;
+  const sizedState = {
+    attributes: {
+      config_entry_id: "entry",
+      codec_profile: "manual_v1_8_candidate",
+      point_count: pointCount,
+      points: Array.from({ length: pointCount }, (_, i) => [i, i / 2, i]),
+    },
+  };
+  assert.equal(
+    Card.getEntitySuggestion({ states: { [entityId]: sizedState } }, entityId)?.config.entity,
+    entityId,
+    `entity suggestion accepts ${pointCount}-point spectra`,
+  );
+}
 assert.equal(Card.getEntitySuggestion({ states: { "sensor.other": { attributes: { points: [[0, 0, 1]] } } } }, "sensor.other"), null);
 assert.equal(Card.getEntitySuggestion({ states: { "sensor.mismatch": {
   attributes: { config_entry_id: "entry", point_count: 4096, points: Array.from({ length: 2048 }, (_, i) => [i, i / 2, i]) },
@@ -1060,6 +1076,80 @@ assert.equal(wideCard.shadowRoot.querySelector("#data-cursor-slider").max, "4095
 assert.equal(wideCard._dataCursorChannel(4095), 4095, "data cursor accepts the last 4096-point channel");
 wideCard._setData({ snapshot_id: "mismatch", source: 2, channel: 2, point_count: 4096, points: widePoints.slice(0, 1024) });
 assert.equal(wideCard._maxChannel(), 1023, "non-empty payload length bounds stale point metadata");
+
+// Every supported resolution must expose its inclusive last channel to the
+// ROI/data controls and restore its own view state.  Omitted point_count is
+// also valid for non-2048 payloads because the point array is authoritative.
+for (const pointCount of [1024, 2048, 4096]) {
+  const sizedCard = new Card();
+  sizedCard.setConfig({ entity: `sensor.sized_${pointCount}` });
+  const sizedPoints = Array.from({ length: pointCount }, (_, index) => [index, index / 2, index + 1]);
+  const sizedData = { snapshot_id: `sized-${pointCount}`, source: 0, channel: 0, points: sizedPoints };
+  if (pointCount === 2048) sizedData.point_count = pointCount;
+  sizedCard._setData(sizedData, { viewMode: "live" });
+  const last = pointCount - 1;
+  assert.equal(sizedCard._maxChannel(), last, `${pointCount}-point payload derives the inclusive last channel`);
+  assert.equal(sizedCard.shadowRoot.querySelector("#roi-end").max, String(last));
+  assert.equal(sizedCard.shadowRoot.querySelector("#data-cursor-slider").max, String(last));
+  sizedCard._setCursorChannel("roiStart", last);
+  sizedCard._setCursorChannel("roiEnd", last);
+  sizedCard._setCursorChannel("data", last);
+  assert.equal(sizedCard._cursor.roiStart, last, `${pointCount}-point ROI start accepts its last channel`);
+  assert.equal(sizedCard._cursor.roiEnd, last, `${pointCount}-point ROI end accepts its last channel`);
+  assert.equal(sizedCard._cursor.data, last, `${pointCount}-point data cursor accepts its last channel`);
+  sizedCard._setCursorChannel("roiStart", Math.floor(pointCount / 4));
+  sizedCard._setCursorChannel("roiEnd", Math.floor(pointCount * 3 / 4));
+  sizedCard._setCursorChannel("data", last);
+  sizedCard._setZoomRange(15, 65);
+  const sizedZoomRange = sizedCard._zoomChannelRange();
+  flushTimers();
+  const restoredSizedCard = new Card();
+  restoredSizedCard.setConfig({ entity: `sensor.sized_${pointCount}` });
+  restoredSizedCard._setData(sizedData, { viewMode: "live" });
+  assert.equal(restoredSizedCard._cursor.roiStart, Math.floor(pointCount / 4), `${pointCount}-point ROI start restores`);
+  assert.equal(restoredSizedCard._cursor.roiEnd, Math.floor(pointCount * 3 / 4), `${pointCount}-point ROI end restores`);
+  assert.equal(restoredSizedCard._cursor.data, last, `${pointCount}-point data cursor restores`);
+  assert.deepEqual(restoredSizedCard._zoomChannelRange(), sizedZoomRange, `${pointCount}-point zoom restores`);
+}
+
+// A saved 4096-point spectrum, a 1024-point live spectrum and the same saved
+// record must each retain an independent view state.
+const mixedCard = new Card();
+mixedCard.setConfig({ entity: "sensor.mixed_resolution" });
+const mixed4096 = {
+  snapshot_id: "mixed-history-4096",
+  source: 2,
+  channel: "PIN",
+  point_count: 4096,
+  points: Array.from({ length: 4096 }, (_, index) => [index, index / 2, index + 1]),
+};
+const mixed1024 = {
+  snapshot_id: "mixed-live-1024",
+  source: 2,
+  channel: "PIN",
+  point_count: 1024,
+  points: Array.from({ length: 1024 }, (_, index) => [index, index / 2, index + 1]),
+};
+mixedCard._setData(mixed4096, { viewMode: "history:mixed-history-4096" });
+mixedCard._setCursorChannel("roiStart", 1000);
+mixedCard._setCursorChannel("roiEnd", 3000);
+mixedCard._setCursorChannel("data", 2500);
+mixedCard._setZoomRange(20, 80);
+flushTimers();
+const mixedHistoryRange = mixedCard._zoomChannelRange();
+mixedCard._setData(mixed1024, { viewMode: "live" });
+assert.equal(mixedCard._maxChannel(), 1023);
+assert.deepEqual(mixedCard._cursor, { roiStart: 0, roiEnd: 1023, data: 0 }, "new 1024-point live state starts independently");
+mixedCard._setCursorChannel("roiStart", 100);
+mixedCard._setCursorChannel("roiEnd", 900);
+mixedCard._setCursorChannel("data", 900);
+mixedCard._setZoomRange(30, 70);
+flushTimers();
+mixedCard._setData(mixed4096, { viewMode: "history:mixed-history-4096" });
+assert.equal(mixedCard._cursor.roiStart, 1000, "4096-point history ROI start survives a 1024-point live switch");
+assert.equal(mixedCard._cursor.roiEnd, 3000, "4096-point history ROI end survives a 1024-point live switch");
+assert.equal(mixedCard._cursor.data, 2500, "4096-point history data cursor survives a 1024-point live switch");
+assert.deepEqual(mixedCard._zoomChannelRange(), mixedHistoryRange, "4096-point history zoom survives a 1024-point live switch");
 const dispatches = [];
 zoomCard._chart = { dispatchAction: (action) => dispatches.push(action) };
 zoomCard._setZoomRange(10, 60);
@@ -1096,6 +1186,7 @@ assert.deepEqual(persistedView.roi, { start_channel: 120, end_channel: 880 });
 assert.equal(persistedView.data_cursor_channel, 777);
 assert.deepEqual(persistedView.zoom, { start_channel: 246, end_channel: 1351 });
 assert.equal(persistedView.mode, "live");
+assert.equal(persistedView.point_count, 2048);
 
 const liveRange = persistentCard._zoomChannelRange();
 persistentCard._setData({ ...persistentData, snapshot_id: "capture-2", points: fullPoints.map((point) => [point[0], point[1], point[2] + 5]) }, { viewMode: "live" });
@@ -1121,6 +1212,28 @@ isolatedCard.setConfig({ entity: "sensor.persist_spectrum" });
 isolatedCard._setData({ ...persistentData, source: 1, channel: "Neutron" }, { viewMode: "live" });
 assert.notEqual(isolatedCard._viewStateKey, liveViewKey);
 assert.deepEqual(isolatedCard._cursor, { roiStart: 0, roiEnd: 2047, data: 0 });
+
+// The same source/channel can legitimately change detector resolution.  Its
+// persisted ROI/cursor/zoom state must remain isolated by point count so a
+// 1024-point view cannot overwrite or seed the 2048-point view.
+const narrowPoints = Array.from({ length: 1024 }, (_, index) => [index, index / 2, index + 1]);
+const narrowCard = new Card();
+narrowCard.setConfig({ entity: "sensor.persist_spectrum" });
+narrowCard._setData({ ...persistentData, point_count: 1024, points: narrowPoints }, { viewMode: "live" });
+const narrowViewKey = narrowCard._viewStateKey;
+assert.notEqual(narrowViewKey, liveViewKey, "point count is part of the persisted view identity");
+assert.deepEqual(narrowCard._cursor, { roiStart: 0, roiEnd: 1023, data: 0 });
+narrowCard._setCursorChannel("roiStart", 100);
+narrowCard._setCursorChannel("roiEnd", 900);
+narrowCard._setCursorChannel("data", 800);
+flushTimers();
+assert.equal(JSON.parse(storage.get(narrowViewKey)).point_count, 1024);
+const restoredWideCard = new Card();
+restoredWideCard.setConfig({ entity: "sensor.persist_spectrum" });
+restoredWideCard._setData({ ...persistentData, point_count: 2048 }, { viewMode: "live" });
+assert.equal(restoredWideCard._cursor.roiStart, 120, "2048-point state remains independent of 1024-point state");
+assert.equal(restoredWideCard._cursor.roiEnd, 880);
+assert.equal(restoredWideCard._cursor.data, 777);
 isolatedCard._setCursorChannel("roiStart", 9);
 isolatedCard._setCursorChannel("roiEnd", 19);
 isolatedCard._setZoomRange(40, 60);

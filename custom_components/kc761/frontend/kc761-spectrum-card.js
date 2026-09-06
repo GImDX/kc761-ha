@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-rc.5";
+const CARD_VERSION = "0.2.0-rc.6";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const SUPPORTED_CHANNEL_COUNTS = Object.freeze([1024, 2048, 4096]);
 const MAX_CHANNEL = 2047;
@@ -2346,17 +2346,40 @@ class KC761SpectrumCard extends HTMLElement {
     const source = data?.source === undefined || data?.source === null ? "unknown" : String(data.source);
     const channel = data?.channel === undefined || data?.channel === null ? "unknown" : String(data.channel);
     const normalizedMode = this._normalizeViewStateMode(mode, data);
+    const pointCount = this._viewStatePointCount(data);
+    return `${VIEW_STATE_STORAGE_PREFIX}${[entity, channel, source, normalizedMode, pointCount].map((value) => encodeURIComponent(value)).join(":")}`;
+  }
+
+  _legacyViewStateKeyFor(data = this._data, mode = null) {
+    const entity = this._config?.entity;
+    if (!entity) return null;
+    const source = data?.source === undefined || data?.source === null ? "unknown" : String(data.source);
+    const channel = data?.channel === undefined || data?.channel === null ? "unknown" : String(data.channel);
+    const normalizedMode = this._normalizeViewStateMode(mode, data);
     return `${VIEW_STATE_STORAGE_PREFIX}${[entity, channel, source, normalizedMode].map((value) => encodeURIComponent(value)).join(":")}`;
+  }
+
+  _viewStatePointCount(data = this._data) {
+    const points = Array.isArray(data?.points) ? data.points.length : 0;
+    if (SUPPORTED_CHANNEL_COUNTS.includes(points)) return points;
+    const declared = Number(data?.point_count);
+    return Number.isInteger(declared) && SUPPORTED_CHANNEL_COUNTS.includes(declared) ? declared : "unknown";
   }
 
   _readViewState(key = this._viewStateKey) {
     const storage = spectrumViewStateStorage();
     if (!storage || !key) return null;
     try {
-      const raw = storage.getItem(key);
-      if (!raw) return null;
-      const state = JSON.parse(raw);
-      return state && state.schema === VIEW_STATE_SCHEMA_VERSION ? state : null;
+      const keys = [key];
+      const legacyKey = this._legacyViewStateKeyFor();
+      if (legacyKey && legacyKey !== key) keys.push(legacyKey);
+      for (const candidate of keys) {
+        const raw = storage.getItem(candidate);
+        if (!raw) continue;
+        const state = JSON.parse(raw);
+        if (state && state.schema === VIEW_STATE_SCHEMA_VERSION) return state;
+      }
+      return null;
     } catch (_error) {
       // Corrupt JSON and blocked localStorage are both safe no-op cases.
       return null;
@@ -2373,7 +2396,17 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _restoreViewState() {
-    const state = this._readViewState();
+    let state = this._readViewState();
+    const currentPointCount = this._viewStatePointCount(this._data);
+    const savedPointCount = Number(state?.point_count);
+    // Records written before point-count isolation had no point_count field;
+    // they are safe to reuse only for the historical 2048-point default.  A
+    // record from another supported size must never seed a different dataset.
+    if (state && (!Number.isInteger(savedPointCount) || !SUPPORTED_CHANNEL_COUNTS.includes(savedPointCount))) {
+      state = currentPointCount === 2048 ? state : null;
+    } else if (state && currentPointCount !== "unknown" && savedPointCount !== currentPointCount) {
+      state = null;
+    }
     const roiStart = Number(state?.roi?.start_channel);
     const roiEnd = Number(state?.roi?.end_channel);
     const dataCursor = Number(state?.data_cursor_channel);
@@ -2405,6 +2438,7 @@ class KC761SpectrumCard extends HTMLElement {
       channel: data.channel === undefined || data.channel === null ? "unknown" : String(data.channel),
       source: data.source === undefined || data.source === null ? "unknown" : String(data.source),
       mode: this._dataMode,
+      point_count: this._viewStatePointCount(data),
       roi: { start_channel: roiStart, end_channel: roiEnd },
       data_cursor_channel: this._dataCursorChannel(this._cursor.data),
       zoom: { start_channel: zoomStart, end_channel: zoomEnd },
