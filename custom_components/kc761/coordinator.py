@@ -16,6 +16,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_DOSE_DISPLAY_UNIT,
+    CONF_GAMMA_SPECTRUM_CHANNELS,
+    CONF_NEUTRON_SPECTRUM_CHANNELS,
+    CONF_PIN_SPECTRUM_CHANNELS,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_BLE_ADDRESS,
@@ -27,15 +31,19 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
+    DEFAULT_DOSE_DISPLAY_UNIT,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_SPECTRUM_SAVE_ENABLED,
     DEFAULT_SPECTRUM_SAVE_INTERVAL,
+    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
     DEFAULT_STATUS_INTERVAL,
     DEFAULT_TIME_SYNC_ENABLED,
     DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
+    DOSE_DISPLAY_UNIT_MICRO,
+    DOSE_DISPLAY_UNIT_RAW,
     FLAG_MC_DATA_UPLOAD,
     FLAG_STATUS_UPLOAD,
     MAX_INFO_INTERVAL,
@@ -51,6 +59,7 @@ from .const import (
     MODEL_NAMES,
     RECONNECT_JITTER_MAX,
     RECONNECT_JITTER_MIN,
+    SPECTRUM_CHANNEL_COUNT_OPTIONS,
     CONF_TRANSPORT,
     TRANSPORT_BLE,
     TRANSPORT_TCP,
@@ -112,6 +121,12 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             MAX_INFO_INTERVAL,
         )
         self.create_raw_entities = bool(entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES))
+        dose_display_unit = entry.options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT)
+        self.dose_display_unit = (
+            dose_display_unit
+            if dose_display_unit in (DOSE_DISPLAY_UNIT_RAW, DOSE_DISPLAY_UNIT_MICRO)
+            else DEFAULT_DOSE_DISPLAY_UNIT
+        )
         self.device_controls_enabled = bool(
             entry.options.get(
                 CONF_ENABLE_DEVICE_CONTROLS,
@@ -140,12 +155,15 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             MIN_SPECTRUM_SAVE_INTERVAL,
             MAX_SPECTRUM_SAVE_INTERVAL,
         )
+        self.spectrum_channel_counts = _spectrum_channel_counts(entry.options)
         self.client = self._new_client(self.host, self.port)
         self._device_info: DeviceInfo | None = None
         self._last_info_at: datetime | None = None
         self._snapshot: KC761Snapshot | None = None
         self._calibration: CalibrationData | None = None
-        self._auto_upload_spectrum = SpectrumUploadAssembler()
+        self._auto_upload_spectrum = SpectrumUploadAssembler(
+            channel_counts=self.spectrum_channel_counts
+        )
         self._latest_spectrum: SpectrumSnapshot | None = None
         self._archive: SpectrumArchive | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -320,7 +338,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             await self.client.async_close()
 
     async def async_capture_spectrum(self, source: int | None = None) -> SpectrumSnapshot:
-        """Capture one complete 2048-channel spectrum and publish the single entity payload."""
+        """Capture one complete configured spectrum and publish the single entity payload."""
         async with self._write_lock:
             if self._snapshot is None or self._device_info is None:
                 raise RuntimeError("KC761 has no current status snapshot")
@@ -683,12 +701,14 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 address,
                 0,
                 transport=transport,
+                spectrum_channel_counts=self.spectrum_channel_counts,
                 on_push=self._async_push if on_push else None,
                 task_creator=self._create_hass_task,
             )
         return KC761Client(
             host,
             port,
+            spectrum_channel_counts=self.spectrum_channel_counts,
             on_push=self._async_push if on_push else None,
             task_creator=self._create_hass_task,
         )
@@ -755,6 +775,25 @@ def _bounded(value: Any, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = minimum
     return max(minimum, min(maximum, number))
+
+
+def _spectrum_channel_counts(options: dict[str, Any]) -> tuple[int, int, int]:
+    """Normalize the three explicit per-channel spectrum lengths."""
+    keys = (
+        CONF_GAMMA_SPECTRUM_CHANNELS,
+        CONF_NEUTRON_SPECTRUM_CHANNELS,
+        CONF_PIN_SPECTRUM_CHANNELS,
+    )
+    values: list[int] = []
+    for index, key in enumerate(keys):
+        try:
+            value = int(options.get(key, DEFAULT_SPECTRUM_CHANNEL_COUNTS[index]))
+        except (TypeError, ValueError):
+            value = DEFAULT_SPECTRUM_CHANNEL_COUNTS[index]
+        if value not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
+            value = DEFAULT_SPECTRUM_CHANNEL_COUNTS[index]
+        values.append(value)
+    return tuple(values)  # type: ignore[return-value]
 
 
 def _device_signature(info: DeviceInfo) -> tuple[Any, ...]:

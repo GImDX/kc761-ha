@@ -51,6 +51,7 @@ class SimulatorScenario:
     ack_command_override: int | None = None
     spectrum_fragment_size: int = 512
     spectrum_reverse_order: bool = False
+    spectrum_channel_counts: tuple[int, int, int] = (2048, 2048, 2048)
 
 
 class Kc761Simulator:
@@ -208,7 +209,8 @@ class Kc761Simulator:
 
     def _build_spectrum_response(self, sync: int, source: int) -> bytes:
         step = self.scenario.spectrum_fragment_size
-        offsets = list(range(0, 2048, step))
+        channel_count = self.scenario.spectrum_channel_counts[source]
+        offsets = list(range(0, channel_count, step))
         if self.scenario.spectrum_reverse_order:
             offsets.reverse()
         return b"".join(
@@ -216,7 +218,7 @@ class Kc761Simulator:
                 sync,
                 source=source,
                 offset=offset,
-                counts=tuple(offset + index for index in range(min(step, 2048 - offset))),
+                counts=tuple(offset + index for index in range(min(step, channel_count - offset))),
             )
             for offset in offsets
         )
@@ -224,7 +226,8 @@ class Kc761Simulator:
     def _build_auto_upload_spectrum(self) -> bytes:
         source = self.scenario.auto_upload_source
         step = self.scenario.spectrum_fragment_size
-        offsets = list(range(0, 2048, step))
+        channel_count = self.scenario.spectrum_channel_counts[source]
+        offsets = list(range(0, channel_count, step))
         if self.scenario.auto_upload_reverse_order:
             offsets.reverse()
         frames = [
@@ -232,7 +235,7 @@ class Kc761Simulator:
                 0,
                 source=source,
                 offset=offset,
-                counts=tuple(offset + index for index in range(min(step, 2048 - offset))),
+                counts=tuple(offset + index for index in range(min(step, channel_count - offset))),
                 upload=True,
             )
             for offset in offsets

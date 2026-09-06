@@ -21,6 +21,10 @@ from .const import (
     CONF_BLE_ADDRESS,
     CONF_BLE_SERVICE_UUID,
     CONF_CREATE_RAW_ENTITIES,
+    CONF_DOSE_DISPLAY_UNIT,
+    CONF_GAMMA_SPECTRUM_CHANNELS,
+    CONF_NEUTRON_SPECTRUM_CHANNELS,
+    CONF_PIN_SPECTRUM_CHANNELS,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_INFO_INTERVAL,
@@ -30,6 +34,8 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
+    DEFAULT_DOSE_DISPLAY_UNIT,
+    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
@@ -40,6 +46,9 @@ from .const import (
     DEFAULT_TIME_SYNC_ENABLED,
     DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
+    DOSE_DISPLAY_UNIT_MICRO,
+    DOSE_DISPLAY_UNIT_RAW,
+    SPECTRUM_CHANNEL_COUNT_OPTIONS,
     MAX_INFO_INTERVAL,
     MAX_SPECTRUM_SAVE_INTERVAL,
     MAX_STATUS_INTERVAL,
@@ -71,7 +80,7 @@ except ImportError:  # pragma: no cover - protocol-only test environments
 class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle initial setup and endpoint reconfiguration."""
 
-    VERSION = 6
+    VERSION = 7
 
     def __init__(self) -> None:
         """Initialize the flow's transport selection state."""
@@ -373,6 +382,27 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
             if not normalized.get(CONF_ENABLE_DEVICE_CONTROLS, False):
                 normalized[CONF_ENABLE_DESTRUCTIVE_ACTIONS] = False
                 normalized[CONF_TIME_SYNC_ENABLED] = False
+            if normalized.get(CONF_DOSE_DISPLAY_UNIT) not in {
+                DOSE_DISPLAY_UNIT_RAW,
+                DOSE_DISPLAY_UNIT_MICRO,
+            }:
+                normalized[CONF_DOSE_DISPLAY_UNIT] = DEFAULT_DOSE_DISPLAY_UNIT
+            for key, default in zip(
+                (
+                    CONF_GAMMA_SPECTRUM_CHANNELS,
+                    CONF_NEUTRON_SPECTRUM_CHANNELS,
+                    CONF_PIN_SPECTRUM_CHANNELS,
+                ),
+                DEFAULT_SPECTRUM_CHANNEL_COUNTS,
+                strict=True,
+            ):
+                try:
+                    value = int(normalized.get(key, default))
+                except (TypeError, ValueError):
+                    value = default
+                normalized[key] = (
+                    value if value in SPECTRUM_CHANNEL_COUNT_OPTIONS else default
+                )
             return self.async_create_entry(title="", data=normalized)
         options = self.config_entry.options
         schema = vol.Schema(
@@ -395,6 +425,45 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                     CONF_CREATE_RAW_ENTITIES,
                     default=options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 ): bool,
+                vol.Required(
+                    CONF_DOSE_DISPLAY_UNIT,
+                    default=options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            {"value": DOSE_DISPLAY_UNIT_RAW, "label": "Original (mGy/mSv)"},
+                            {"value": DOSE_DISPLAY_UNIT_MICRO, "label": "Micro (µGy/µSv)"},
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_GAMMA_SPECTRUM_CHANNELS,
+                    default=str(
+                        options.get(
+                            CONF_GAMMA_SPECTRUM_CHANNELS,
+                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[0],
+                        )
+                    ),
+                ): _spectrum_channel_selector(),
+                vol.Required(
+                    CONF_NEUTRON_SPECTRUM_CHANNELS,
+                    default=str(
+                        options.get(
+                            CONF_NEUTRON_SPECTRUM_CHANNELS,
+                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[1],
+                        )
+                    ),
+                ): _spectrum_channel_selector(),
+                vol.Required(
+                    CONF_PIN_SPECTRUM_CHANNELS,
+                    default=str(
+                        options.get(
+                            CONF_PIN_SPECTRUM_CHANNELS,
+                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[2],
+                        )
+                    ),
+                ): _spectrum_channel_selector(),
                 vol.Required(
                     CONF_ENABLE_DEVICE_CONTROLS,
                     default=options.get(
@@ -543,3 +612,16 @@ def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     if transport == TRANSPORT_TCP or _has_endpoint_input(defaults):
         return _tcp_schema(defaults)
     return _transport_schema()
+
+
+def _spectrum_channel_selector() -> SelectSelector:
+    """Return the explicit per-channel spectrum length selector."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                {"value": str(value), "label": f"{value} channels"}
+                for value in SPECTRUM_CHANNEL_COUNT_OPTIONS
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )

@@ -1,5 +1,6 @@
-const CARD_VERSION = "0.2.0-rc.4";
+const CARD_VERSION = "0.2.0-rc.5";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
+const SUPPORTED_CHANNEL_COUNTS = Object.freeze([1024, 2048, 4096]);
 const MAX_CHANNEL = 2047;
 const DEFAULT_CARD_CONFIG = Object.freeze({
   title: "KC761 Spectrum",
@@ -1367,7 +1368,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._preview = false;
     this._detached = false;
     this._colors = { ...COLOR_FALLBACKS };
-    this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
+    this._cursor = { roiStart: 0, roiEnd: this._maxChannel(), data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
     this._zoomDatasetKey = null;
     this._zoomHandler = null;
@@ -1402,10 +1403,18 @@ class KC761SpectrumCard extends HTMLElement {
     const attributes = state?.attributes || {};
     const hasKC761Identity = typeof attributes.config_entry_id === "string" || typeof attributes.codec_profile === "string";
     const points = attributes.points;
-    return hasKC761Identity && (
-      Number(attributes.point_count) === 2048
-      || (Array.isArray(points) && (points.length === 0 || points.length === 2048))
-    );
+    if (!hasKC761Identity || !Array.isArray(points)) return false;
+    const hasDeclaredCount = attributes.point_count !== undefined && attributes.point_count !== null;
+    const declaredCount = Number(attributes.point_count);
+    if (hasDeclaredCount && !SUPPORTED_CHANNEL_COUNTS.includes(declaredCount)) return false;
+    if (points.length === 0) return true;
+    if (!SUPPORTED_CHANNEL_COUNTS.includes(points.length)) return false;
+    if (hasDeclaredCount && declaredCount !== points.length) return false;
+    return points.every((point, index) => {
+      if (!Array.isArray(point) || point.length < 3) return false;
+      const channel = Number(point[0]);
+      return Number.isFinite(channel) && channel === index;
+    });
   }
 
   static getEntitySuggestion(hass, entityId) {
@@ -2008,7 +2017,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._historySelectionToken += 1;
     this._pointCache = null;
     this._summaryCache = null;
-    this._cursor = { roiStart: 0, roiEnd: MAX_CHANNEL, data: 0 };
+    this._cursor = { roiStart: 0, roiEnd: this._maxChannel(), data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
     this._zoomDatasetKey = null;
     this._dataMode = "live";
@@ -2025,10 +2034,35 @@ class KC761SpectrumCard extends HTMLElement {
     const start = this.shadowRoot.querySelector("#roi-start");
     const end = this.shadowRoot.querySelector("#roi-end");
     if (start) start.value = "0";
-    if (end) end.value = String(MAX_CHANNEL);
+    if (end) end.value = String(this._maxChannel());
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._updateZoomReadout();
+  }
+
+  _pointCount() {
+    const declared = Number(this._data?.point_count);
+    const points = Array.isArray(this._data?.points) ? this._data.points.length : 0;
+    if (points > 0) {
+      // A non-empty payload is authoritative.  Never let stale or malformed
+      // metadata move the cursors beyond the points actually rendered.
+      return SUPPORTED_CHANNEL_COUNTS.includes(points) ? points : 2048;
+    }
+    return SUPPORTED_CHANNEL_COUNTS.includes(declared) ? declared : 2048;
+  }
+
+  _maxChannel() {
+    return this._pointCount() - 1;
+  }
+
+  _syncChannelBounds() {
+    const max = this._maxChannel();
+    for (const selector of ["#roi-start", "#roi-end", "#data-cursor-slider"]) {
+      const input = this.shadowRoot?.querySelector(selector);
+      if (!input) continue;
+      input.max = String(max);
+      input.setAttribute("aria-valuemax", String(max));
+    }
   }
 
   _findLovelacePath() {
@@ -2206,10 +2240,12 @@ class KC761SpectrumCard extends HTMLElement {
 
   _updateRoiSliderUI() {
     if (!this._rendered) return;
+    this._syncChannelBounds();
+    const maxChannel = this._maxChannel();
     const startValueNumber = Number(this._cursor.roiStart);
     const endValueNumber = Number(this._cursor.roiEnd);
-    const start = clamp(Number.isFinite(startValueNumber) ? startValueNumber : 0, 0, MAX_CHANNEL);
-    const end = clamp(Number.isFinite(endValueNumber) ? endValueNumber : MAX_CHANNEL, start, MAX_CHANNEL);
+    const start = clamp(Number.isFinite(startValueNumber) ? startValueNumber : 0, 0, maxChannel);
+    const end = clamp(Number.isFinite(endValueNumber) ? endValueNumber : maxChannel, start, maxChannel);
     const startInput = this.shadowRoot.querySelector("#roi-start");
     const endInput = this.shadowRoot.querySelector("#roi-end");
     const startValue = this.shadowRoot.querySelector("#roi-start-value");
@@ -2234,8 +2270,8 @@ class KC761SpectrumCard extends HTMLElement {
       endValue.setAttribute("aria-label", `End channel ${end}`);
     }
     if (fill) {
-      fill.style.left = `${(start / MAX_CHANNEL) * 100}%`;
-      fill.style.right = `${100 - (end / MAX_CHANNEL) * 100}%`;
+      fill.style.left = `${(start / maxChannel) * 100}%`;
+      fill.style.right = `${100 - (end / maxChannel) * 100}%`;
     }
   }
 
@@ -2341,8 +2377,9 @@ class KC761SpectrumCard extends HTMLElement {
     const roiStart = Number(state?.roi?.start_channel);
     const roiEnd = Number(state?.roi?.end_channel);
     const dataCursor = Number(state?.data_cursor_channel);
-    const start = clamp(Number.isFinite(roiStart) ? Math.round(roiStart) : 0, 0, MAX_CHANNEL);
-    const end = clamp(Number.isFinite(roiEnd) ? Math.round(roiEnd) : MAX_CHANNEL, start, MAX_CHANNEL);
+    const maxChannel = this._maxChannel();
+    const start = clamp(Number.isFinite(roiStart) ? Math.round(roiStart) : 0, 0, maxChannel);
+    const end = clamp(Number.isFinite(roiEnd) ? Math.round(roiEnd) : maxChannel, start, maxChannel);
     this._cursor = {
       roiStart: start,
       roiEnd: end,
@@ -2424,6 +2461,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._viewStateKey = nextKey;
     this._zoomDatasetKey = identity;
     this._data = data;
+    this._syncChannelBounds();
     if (keyChanged) this._restoreViewState();
     else if (previousRange) this._zoom = this._zoomFromChannelRange(previousRange[0], previousRange[1]);
     else this._zoom = this._clampZoom(this._zoom.start, this._zoom.end);
@@ -2483,7 +2521,7 @@ class KC761SpectrumCard extends HTMLElement {
 
   _zoomChannelRange() {
     const points = this._points();
-    if (!points.length) return [0, MAX_CHANNEL];
+    if (!points.length) return [0, this._maxChannel()];
     const last = points.length - 1;
     const startIndex = clamp(Math.round((this._zoom.start / 100) * last), 0, last);
     const endIndex = clamp(Math.round((this._zoom.end / 100) * last), startIndex, last);
@@ -2522,11 +2560,11 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _dataCursorChannel(channel) {
-    const requested = clamp(Math.round(Number(channel) || 0), 0, MAX_CHANNEL);
+    const requested = clamp(Math.round(Number(channel) || 0), 0, this._maxChannel());
     const points = this._points();
     if (!points.length) return requested;
     const point = this._pointForChannel(requested);
-    return point ? clamp(Math.round(point[0]), 0, MAX_CHANNEL) : requested;
+    return point ? clamp(Math.round(point[0]), 0, this._maxChannel()) : requested;
   }
 
   _updateDataCursorUI() {
@@ -2540,7 +2578,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (slider) {
       slider.value = String(channel);
       slider.setAttribute("aria-valuemin", "0");
-      slider.setAttribute("aria-valuemax", String(MAX_CHANNEL));
+      slider.setAttribute("aria-valuemax", String(this._maxChannel()));
       slider.setAttribute("aria-valuenow", String(channel));
       slider.setAttribute("aria-valuetext", value);
     }
@@ -2553,7 +2591,7 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _setCursorChannel(kind, channel) {
-    const requested = clamp(Math.round(Number(channel) || 0), 0, MAX_CHANNEL);
+    const requested = clamp(Math.round(Number(channel) || 0), 0, this._maxChannel());
     if (kind === "roiStart") this._cursor.roiStart = Math.min(requested, this._cursor.roiEnd);
     else if (kind === "roiEnd") this._cursor.roiEnd = Math.max(requested, this._cursor.roiStart);
     else this._cursor.data = this._dataCursorChannel(requested);
@@ -2572,8 +2610,9 @@ class KC761SpectrumCard extends HTMLElement {
     const endInput = this.shadowRoot.querySelector("#roi-end");
     const startValue = Number(startInput?.value);
     const endValue = Number(endInput?.value);
-    const start = clamp(Math.round(Number.isFinite(startValue) ? startValue : 0), 0, MAX_CHANNEL);
-    const end = clamp(Math.round(Number.isFinite(endValue) ? endValue : MAX_CHANNEL), 0, MAX_CHANNEL);
+    const maxChannel = this._maxChannel();
+    const start = clamp(Math.round(Number.isFinite(startValue) ? startValue : 0), 0, maxChannel);
+    const end = clamp(Math.round(Number.isFinite(endValue) ? endValue : maxChannel), 0, maxChannel);
     if (changed === "start") this._cursor.roiStart = Math.min(start, end);
     else this._cursor.roiEnd = Math.max(end, start);
     if (startInput) startInput.value = String(this._cursor.roiStart);
@@ -3015,8 +3054,9 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   _roi() {
-    const start = clamp(this._cursor.roiStart, 0, MAX_CHANNEL);
-    const end = clamp(this._cursor.roiEnd, start, MAX_CHANNEL);
+    const maxChannel = this._maxChannel();
+    const start = clamp(this._cursor.roiStart, 0, maxChannel);
+    const end = clamp(this._cursor.roiEnd, start, maxChannel);
     return [start, end];
   }
 

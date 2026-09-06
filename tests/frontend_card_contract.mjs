@@ -382,6 +382,12 @@ assert.deepEqual(Object.keys(suggestion), ["config"]);
 assert.deepEqual(Object.keys(suggestion.config).sort(), ["diagnostics", "entity", "refresh_interval", "show_actions", "show_controls", "show_legend", "show_peak", "show_summary", "title", "type", "x_axis", "y_axis"].sort());
 assert.equal(suggestion.config.entity, "sensor.real_spectrum");
 assert.equal(Card.getEntitySuggestion({ states: { "sensor.other": { attributes: { points: [[0, 0, 1]] } } } }, "sensor.other"), null);
+assert.equal(Card.getEntitySuggestion({ states: { "sensor.mismatch": {
+  attributes: { config_entry_id: "entry", point_count: 4096, points: Array.from({ length: 2048 }, (_, i) => [i, i / 2, i]) },
+} } }, "sensor.mismatch"), null, "declared and payload channel counts must agree");
+assert.equal(Card.getEntitySuggestion({ states: { "sensor.gap": {
+  attributes: { config_entry_id: "entry", points: [[0, 0, 1], [2, 1, 2], ...Array.from({ length: 2046 }, (_, i) => [i + 3, i, i])] },
+} } }, "sensor.gap"), null, "spectrum point channels must be sequential");
 
 const card = new Card();
 assert.doesNotThrow(() => {
@@ -1044,6 +1050,16 @@ assert.ok(zoomCard._zoom.end - zoomCard._zoom.start >= 0.25, "full spectra honor
 zoomCard._setData({ snapshot_id: "short", source: 0, channel: 0, points: [[2, 1, 5], [17, 10, 8]] });
 zoomCard._setZoomRange(50, 50);
 assert.deepEqual(zoomCard._zoom, { start: 0, end: 100 }, "two-point spectra retain a usable minimum span");
+const wideCard = new Card();
+wideCard.setConfig({ entity: "sensor.wide_spectrum" });
+const widePoints = Array.from({ length: 4096 }, (_, index) => [index, index / 2, index + 1]);
+wideCard._setData({ snapshot_id: "wide", source: 2, channel: 2, point_count: 4096, points: widePoints });
+assert.equal(wideCard._maxChannel(), 4095, "4096-point spectra expose the complete channel range");
+assert.equal(wideCard.shadowRoot.querySelector("#roi-end").max, "4095");
+assert.equal(wideCard.shadowRoot.querySelector("#data-cursor-slider").max, "4095");
+assert.equal(wideCard._dataCursorChannel(4095), 4095, "data cursor accepts the last 4096-point channel");
+wideCard._setData({ snapshot_id: "mismatch", source: 2, channel: 2, point_count: 4096, points: widePoints.slice(0, 1024) });
+assert.equal(wideCard._maxChannel(), 1023, "non-empty payload length bounds stale point metadata");
 const dispatches = [];
 zoomCard._chart = { dispatchAction: (action) => dispatches.push(action) };
 zoomCard._setZoomRange(10, 60);

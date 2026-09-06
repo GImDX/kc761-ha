@@ -16,7 +16,7 @@ from tempfile import mkstemp
 from threading import RLock
 from typing import Any
 
-from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNT
+from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNTS
 
 _SAFE_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-2]-[0-9a-f]{12}$")
 _ARCHIVE_SUFFIX = ".json.gz"
@@ -78,8 +78,8 @@ class SpectrumSnapshot:
         """Validate fields and create a content-addressed archive identifier."""
         if not 0 <= source <= 2:
             raise ValueError("spectrum source outside 0..2")
-        if len(counts) != SPECTRUM_CHANNEL_COUNT or len(energy_kev) != len(counts):
-            raise ValueError("spectrum must contain exactly 2048 count and energy values")
+        if len(counts) not in SPECTRUM_CHANNEL_COUNTS or len(energy_kev) != len(counts):
+            raise ValueError("spectrum must contain 1024, 2048, or 4096 count and energy values")
         if any(count < 0 for count in counts):
             raise ValueError("spectrum counts must be non-negative")
         if acquired_at.tzinfo is None:
@@ -119,7 +119,7 @@ class SpectrumSnapshot:
 
         A snapshot is immutable and Home Assistant treats the returned state
         attributes as read-only.  Keeping this object cached avoids rebuilding
-        2048 point triples for every coordinator state write.
+        one point triple for every coordinator state write.
         """
         return self._entity_attributes
 
@@ -140,8 +140,13 @@ class SpectrumSnapshot:
             raise ValueError("stored spectrum source outside 0..2")
         counts = tuple(int(item) for item in value["counts"])
         energy_kev = tuple(float(item) for item in value["energy_kev"])
-        if len(counts) != SPECTRUM_CHANNEL_COUNT or len(energy_kev) != len(counts):
+        if len(counts) not in SPECTRUM_CHANNEL_COUNTS or len(energy_kev) != len(counts):
             raise ValueError("stored spectrum has an invalid length")
+        stored_point_count = value.get("point_count")
+        if stored_point_count is not None and (
+            not isinstance(stored_point_count, int) or stored_point_count != len(counts)
+        ):
+            raise ValueError("stored spectrum point count does not match payload")
         snapshot = cls(
             snapshot_id=snapshot_id,
             source=source,
@@ -365,7 +370,7 @@ class SpectrumArchive:
             return False
         if metadata.get("channel") not in CHANNEL_KEYS:
             return False
-        if metadata.get("point_count") != SPECTRUM_CHANNEL_COUNT:
+        if metadata.get("point_count") not in SPECTRUM_CHANNEL_COUNTS:
             return False
         if not isinstance(metadata.get("acquired_at"), str):
             return False

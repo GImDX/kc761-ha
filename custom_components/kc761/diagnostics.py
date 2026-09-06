@@ -9,8 +9,12 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
+    CONF_DOSE_DISPLAY_UNIT,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
+    CONF_GAMMA_SPECTRUM_CHANNELS,
+    CONF_NEUTRON_SPECTRUM_CHANNELS,
+    CONF_PIN_SPECTRUM_CHANNELS,
     CONF_SPECTRUM_SAVE_ENABLED,
     CONF_SPECTRUM_SAVE_INTERVAL,
     CONF_TIME_SYNC_ENABLED,
@@ -53,6 +57,26 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                     entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 )
             ),
+            CONF_DOSE_DISPLAY_UNIT: getattr(
+                coordinator,
+                "dose_display_unit",
+                entry.options.get(CONF_DOSE_DISPLAY_UNIT, "raw"),
+            ),
+            CONF_GAMMA_SPECTRUM_CHANNELS: getattr(
+                coordinator,
+                "spectrum_channel_counts",
+                (2048, 2048, 2048),
+            )[0],
+            CONF_NEUTRON_SPECTRUM_CHANNELS: getattr(
+                coordinator,
+                "spectrum_channel_counts",
+                (2048, 2048, 2048),
+            )[1],
+            CONF_PIN_SPECTRUM_CHANNELS: getattr(
+                coordinator,
+                "spectrum_channel_counts",
+                (2048, 2048, 2048),
+            )[2],
             CONF_ENABLE_DEVICE_CONTROLS: bool(
                 getattr(coordinator, "device_controls_enabled", False)
             ),
@@ -108,6 +132,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             ),
         },
         "spectrum": {
+            "channel_counts": list(getattr(coordinator, "spectrum_channel_counts", (2048, 2048, 2048))),
             "latest": (
                 coordinator.latest_spectrum.metadata()
                 if getattr(coordinator, "latest_spectrum", None)

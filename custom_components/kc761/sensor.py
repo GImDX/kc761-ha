@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -22,6 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import KC761Coordinator
+from .const import DOSE_DISPLAY_UNIT_MICRO
 from .entity import kc761_device_info
 from .protocol.codec import CODEC_PROFILE
 from .protocol.models import CalibrationData, ChannelReading
@@ -38,6 +39,8 @@ class KC761SensorDescription(SensorEntityDescription):
     raw_reading: bool = False
     cumulative_key: str | None = None
     calibration_key: str | None = None
+    calibration_index: int | None = None
+    micro_companion_of: str | None = None
 
 
 DEVICE_DESCRIPTIONS = (
@@ -148,7 +151,102 @@ DEVICE_DESCRIPTIONS = (
         value_key="",
         calibration_key="altitude_m_offset",
     ),
+    KC761SensorDescription(
+        key="active_sensor_state",
+        translation_key="active_sensor_state",
+        value_key="active_sensor_state",
+    ),
+    KC761SensorDescription(
+        key="global_volume_state",
+        translation_key="global_volume_state",
+        value_key="global_volume_state",
+    ),
+    KC761SensorDescription(
+        key="backlight_brightness_state",
+        translation_key="backlight_brightness_state",
+        value_key="backlight_brightness_state",
+    ),
 )
+
+
+def _calibration_descriptions() -> tuple[KC761SensorDescription, ...]:
+    """Describe every A6 scalar without exposing coefficient arrays as attributes."""
+    descriptions: list[KC761SensorDescription] = [
+        KC761SensorDescription(
+            key="energy_calibration_version",
+            translation_key="energy_calibration_version",
+            value_key="",
+            calibration_key="factory_version",
+        ),
+        KC761SensorDescription(
+            key="energy_calibration_selection",
+            translation_key="energy_calibration_selection",
+            value_key="",
+            calibration_key="energy_calibration_select",
+        ),
+    ]
+    for channel in CHANNEL_NAMES:
+        descriptions.extend(
+            (
+                KC761SensorDescription(
+                    key=f"{channel}_energy_zoom",
+                    translation_key=f"{channel}_energy_zoom",
+                    value_key="",
+                    calibration_key="energy_zoom",
+                    calibration_index=CHANNEL_NAMES.index(channel),
+                ),
+                KC761SensorDescription(
+                    key=f"{channel}_energy_offset",
+                    translation_key=f"{channel}_energy_offset",
+                    value_key="",
+                    calibration_key="energy_offset",
+                    calibration_index=CHANNEL_NAMES.index(channel),
+                ),
+            )
+        )
+
+    coefficient_groups = (
+        ("gamma_custom_energy", "custom_energy_calibration"),
+        ("neutron_factory_energy", "channel1_factory_calibration"),
+        ("pin_factory_energy", "channel2_factory_calibration"),
+        ("gamma_factory_low_energy", "channel0_factory_low"),
+        ("gamma_factory_middle_energy", "channel0_factory_middle"),
+        ("gamma_factory_high_energy", "channel0_factory_high"),
+    )
+    suffixes = ("a", "b", "c", "d")
+    for prefix, calibration_key in coefficient_groups:
+        for index, suffix in enumerate(suffixes):
+            descriptions.append(
+                KC761SensorDescription(
+                    key=f"{prefix}_coefficient_{suffix}",
+                    translation_key=f"{prefix}_coefficient_{suffix}",
+                    value_key="",
+                    calibration_key=calibration_key,
+                    calibration_index=index,
+                )
+            )
+    descriptions.extend(
+        (
+            KC761SensorDescription(
+                key="gamma_factory_energy_node1",
+                translation_key="gamma_factory_energy_node1",
+                native_unit_of_measurement="ch",
+                value_key="",
+                calibration_key="channel0_factory_node1",
+            ),
+            KC761SensorDescription(
+                key="gamma_factory_energy_node2",
+                translation_key="gamma_factory_energy_node2",
+                native_unit_of_measurement="ch",
+                value_key="",
+                calibration_key="channel0_factory_node2",
+            ),
+        )
+    )
+    return tuple(descriptions)
+
+
+CALIBRATION_DESCRIPTIONS = _calibration_descriptions()
 
 
 def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
@@ -256,6 +354,36 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
     return tuple(result)
 
 
+_MICRO_DOSE_VALUE_KEYS = frozenset(
+    {
+        "avg_dose_rate",
+        "avg_dose_equivalent_rate",
+        "raw_dose_rate",
+        "raw_dose_equivalent_rate",
+        "cumulative_dose",
+        "cumulative_dose_equivalent",
+    }
+)
+
+
+def _micro_companion_description(
+    description: KC761SensorDescription,
+) -> KC761SensorDescription | None:
+    """Build a fixed-unit companion without changing the canonical entity."""
+    if description.value_key not in _MICRO_DOSE_VALUE_KEYS:
+        return None
+    unit = description.native_unit_of_measurement
+    if unit is None or ("mGy" not in unit and "mSv" not in unit):
+        return None
+    return replace(
+        description,
+        key=f"{description.key}_micro",
+        translation_key=f"{description.translation_key}_micro",
+        native_unit_of_measurement=unit.replace("mGy", "µGy").replace("mSv", "µSv"),
+        micro_companion_of=description.key,
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -268,6 +396,7 @@ async def async_setup_entry(
     if info is None:
         return
     descriptions = list(DEVICE_DESCRIPTIONS)
+    descriptions.extend(CALIBRATION_DESCRIPTIONS)
     for index, sensor_type in enumerate(info.sensor_types):
         if sensor_type:
             for description in _channel_descriptions():
@@ -277,6 +406,10 @@ async def async_setup_entry(
                     if not coordinator.create_raw_entities:
                         continue
                 descriptions.append(description)
+                if coordinator.dose_display_unit == DOSE_DISPLAY_UNIT_MICRO:
+                    micro_description = _micro_companion_description(description)
+                    if micro_description is not None:
+                        descriptions.append(micro_description)
     entities: list[SensorEntity] = [KC761Sensor(coordinator, description) for description in descriptions]
     entities.append(KC761SpectrumSensor(coordinator))
     async_add_entities(entities)
@@ -296,6 +429,14 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         self._attr_unique_id = f"{info.device_id}_{description.key}"
         self._attr_device_info = kc761_device_info(info)
 
+    def _display_dose_value(self, value: Any) -> Any:
+        if (
+            value is not None
+            and self.entity_description.micro_companion_of is not None
+        ):
+            return value * 1000
+        return value
+
     @property
     def native_value(self) -> Any:
         snapshot = self.coordinator.snapshot
@@ -305,11 +446,20 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
             calibration = self.coordinator.calibration
             if not isinstance(calibration, CalibrationData):
                 return None
-            return getattr(calibration, self.entity_description.calibration_key)
+            value = getattr(calibration, self.entity_description.calibration_key)
+            if self.entity_description.calibration_index is not None:
+                return value[self.entity_description.calibration_index]
+            if self.entity_description.key == "energy_calibration_selection":
+                return "custom" if value else "factory"
+            if self.entity_description.key == "energy_calibration_version":
+                return f"V{value}"
+            return value
         if self.entity_description.cumulative_key is not None:
             assert self.entity_description.channel_index is not None
             cumulative = snapshot.device_info.cumulative[self.entity_description.channel_index]
-            return getattr(cumulative, self.entity_description.cumulative_key)
+            return self._display_dose_value(
+                getattr(cumulative, self.entity_description.cumulative_key)
+            )
         if self.entity_description.channel_index is None:
             if self.entity_description.value_key == "clock_offset":
                 if snapshot.status.device_time is None:
@@ -322,9 +472,21 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
             if self.entity_description.value_key.startswith("sensor_type_"):
                 index = int(self.entity_description.value_key[-1])
                 return sensor_name(snapshot.device_info.sensor_types[index])
+            if self.entity_description.value_key == "active_sensor_state":
+                active_sensor = snapshot.status.active_sensor
+                return (
+                    CHANNEL_NAMES[active_sensor]
+                    if 0 <= active_sensor < len(CHANNEL_NAMES)
+                    else None
+                )
+            if self.entity_description.value_key == "global_volume_state":
+                volume = snapshot.status.volume_status & 0x03
+                return ("mute", "low", "high")[volume] if volume < 3 else None
+            if self.entity_description.value_key == "backlight_brightness_state":
+                return "bright" if snapshot.status.led_screen_status & 0x04 else "dim"
             return getattr(snapshot.status, self.entity_description.value_key)
         channel: ChannelReading = snapshot.status.channels[self.entity_description.channel_index]
-        return getattr(channel, self.entity_description.value_key)
+        return self._display_dose_value(getattr(channel, self.entity_description.value_key))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

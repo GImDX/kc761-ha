@@ -87,6 +87,34 @@ class SpectrumSnapshotTests(unittest.TestCase):
                 calibration_profile="x",
             )
 
+    def test_snapshot_accepts_supported_point_counts_and_legacy_storage(self) -> None:
+        for point_count in (1024, 2048, 4096):
+            value = SpectrumSnapshot.create(
+                source=2,
+                acquired_at=datetime(2026, 8, 21, 0, 0, tzinfo=UTC),
+                accumulation_seconds=12,
+                counts=tuple(range(point_count)),
+                energy_kev=tuple(channel * 0.5 for channel in range(point_count)),
+                segment_count=point_count // 256,
+                calibration_profile="factory:2",
+            )
+            self.assertEqual(value.metadata()["point_count"], point_count)
+            self.assertEqual(
+                value.entity_attributes()["points"][-1],
+                [point_count - 1, (point_count - 1) * 0.5, point_count - 1],
+            )
+            restored = SpectrumSnapshot.from_storage(value.to_storage())
+            self.assertEqual(restored, value)
+
+            legacy = value.to_storage()
+            legacy.pop("point_count", None)
+            self.assertEqual(SpectrumSnapshot.from_storage(legacy), value)
+
+            mismatch = value.to_storage()
+            mismatch["point_count"] = 2048 if point_count != 2048 else 1024
+            with self.assertRaises(ValueError):
+                SpectrumSnapshot.from_storage(mismatch)
+
     def test_storage_validation_and_optional_accumulation(self) -> None:
         value = snapshot()
         invalid_source = value.to_storage()

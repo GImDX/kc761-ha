@@ -10,6 +10,7 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
         """Minimal fallback used when Home Assistant is not installed."""
 
         SENSOR = "sensor"
+        BINARY_SENSOR = "binary_sensor"
         BUTTON = "button"
         SELECT = "select"
         SWITCH = "switch"
@@ -17,7 +18,7 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.2.0-rc.4"
+VERSION = "0.2.0-rc.5"
 DEFAULT_PORT = 7601
 CONF_TRANSPORT = "transport"
 TRANSPORT_TCP = "tcp"
@@ -41,6 +42,16 @@ CONF_STATUS_INTERVAL = "status_interval"
 CONF_INFO_INTERVAL = "info_interval"
 CONF_CREATE_RAW_ENTITIES = "create_raw_entities"
 DEFAULT_CREATE_RAW_ENTITIES = False
+CONF_DOSE_DISPLAY_UNIT = "dose_display_unit"
+DOSE_DISPLAY_UNIT_RAW = "raw"
+DOSE_DISPLAY_UNIT_MICRO = "micro"
+DOSE_DISPLAY_UNITS = (DOSE_DISPLAY_UNIT_RAW, DOSE_DISPLAY_UNIT_MICRO)
+DEFAULT_DOSE_DISPLAY_UNIT = DOSE_DISPLAY_UNIT_RAW
+CONF_GAMMA_SPECTRUM_CHANNELS = "gamma_spectrum_channels"
+CONF_NEUTRON_SPECTRUM_CHANNELS = "neutron_spectrum_channels"
+CONF_PIN_SPECTRUM_CHANNELS = "pin_spectrum_channels"
+SPECTRUM_CHANNEL_COUNT_OPTIONS = (1024, 2048, 4096)
+DEFAULT_SPECTRUM_CHANNEL_COUNTS = (2048, 2048, 2048)
 CONF_ENABLE_DEVICE_CONTROLS = "enable_device_controls"
 DEFAULT_ENABLE_DEVICE_CONTROLS = False
 CONF_ENABLE_DESTRUCTIVE_ACTIONS = "enable_destructive_actions"
@@ -58,7 +69,10 @@ DEFAULT_SPECTRUM_SAVE_INTERVAL = 60
 MIN_SPECTRUM_SAVE_INTERVAL = 5
 MAX_SPECTRUM_SAVE_INTERVAL = 1440
 MAX_SAVED_SPECTRA = 256
-SPECTRUM_CHANNEL_COUNT = 2048
+SPECTRUM_CHANNEL_COUNTS = SPECTRUM_CHANNEL_COUNT_OPTIONS
+DEFAULT_SPECTRUM_CHANNEL_COUNT = 2048
+# Kept as a compatibility alias for callers that still use the legacy default.
+SPECTRUM_CHANNEL_COUNT = DEFAULT_SPECTRUM_CHANNEL_COUNT
 MIN_STATUS_INTERVAL = 5
 MAX_STATUS_INTERVAL = 60
 MIN_INFO_INTERVAL = 60
@@ -112,6 +126,7 @@ FORBIDDEN_WRITE_COMMANDS = {CMD_SET_REVISED_DATA}
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
+    Platform.BINARY_SENSOR,
     Platform.SWITCH,
     Platform.SELECT,
     Platform.BUTTON,

@@ -25,6 +25,8 @@ from ..const import (
     MAX_FRAME_LENGTH,
     READ_COMMANDS,
     REQUEST_TIMEOUT,
+    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
+    SPECTRUM_CHANNEL_COUNT_OPTIONS,
     SPECTRUM_CHANNEL_COUNT,
 )
 from .codec import (
@@ -65,30 +67,37 @@ class PendingTransaction:
     expected_flags: frozenset[int]
     future: asyncio.Future[DecodedFrame | SpectrumData]
     spectrum_source: int | None = None
+    spectrum_channel_count: int = SPECTRUM_CHANNEL_COUNT
     spectrum_counts: list[int | None] = field(
         default_factory=lambda: [None] * SPECTRUM_CHANNEL_COUNT
     )
     spectrum_filled: int = 0
     spectrum_segments: int = 0
 
+    def __post_init__(self) -> None:
+        if self.command == CMD_GET_MC_DATA:
+            if self.spectrum_channel_count not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
+                raise ValueError("unsupported spectrum channel count")
+            self.spectrum_counts = [None] * self.spectrum_channel_count
+
     def add_spectrum_segment(self, segment: SpectrumSegment) -> SpectrumData | None:
         """Add a fragment and return a complete fixed-size KC761x spectrum."""
         if self.spectrum_source is None or segment.source != self.spectrum_source:
             raise TransactionError("spectrum source does not match request")
-        if segment.offset >= SPECTRUM_CHANNEL_COUNT:
+        if segment.offset >= self.spectrum_channel_count:
             raise TransactionError("spectrum segment starts outside supported range")
+        if segment.offset + len(segment.counts) > self.spectrum_channel_count:
+            raise TransactionError("spectrum segment exceeds configured channel count")
         self.spectrum_segments += 1
         for relative_index, count in enumerate(segment.counts):
             channel = segment.offset + relative_index
-            if channel >= SPECTRUM_CHANNEL_COUNT:
-                break
             existing = self.spectrum_counts[channel]
             if existing is None:
                 self.spectrum_counts[channel] = count
                 self.spectrum_filled += 1
             elif existing != count:
                 raise TransactionError("overlapping spectrum fragments disagree")
-        if self.spectrum_filled < SPECTRUM_CHANNEL_COUNT:
+        if self.spectrum_filled < self.spectrum_channel_count:
             return None
         return SpectrumData(
             source=self.spectrum_source,
@@ -102,7 +111,8 @@ class PendingTransaction:
 class SpectrumUploadAssembler:
     """Bounded assembler for one A3/A1 automatic-upload spectrum round."""
 
-    channel_count: int = SPECTRUM_CHANNEL_COUNT
+    channel_counts: tuple[int, int, int] = DEFAULT_SPECTRUM_CHANNEL_COUNTS
+    channel_count: int = field(init=False, default=SPECTRUM_CHANNEL_COUNT)
     source: int | None = None
     counts: list[int | None] = field(default_factory=list)
     segment_count: int = 0
@@ -110,8 +120,11 @@ class SpectrumUploadAssembler:
     complete: bool = False
 
     def __post_init__(self) -> None:
-        if self.channel_count < 1:
-            raise ValueError("spectrum channel count must be positive")
+        if len(self.channel_counts) != 3 or any(
+            value not in SPECTRUM_CHANNEL_COUNT_OPTIONS for value in self.channel_counts
+        ):
+            raise ValueError("unsupported spectrum channel count")
+        self.channel_count = self.channel_counts[1]
         self.counts = [None] * self.channel_count
 
     def begin_round(self, source: int) -> None:
@@ -119,10 +132,13 @@ class SpectrumUploadAssembler:
         self.reset()
         if 0 <= source <= 2:
             self.source = source
+            self.channel_count = self.channel_counts[source]
+            self.counts = [None] * self.channel_count
 
     def reset(self) -> None:
         """Discard all partial data without retaining an unbounded fragment log."""
         self.source = None
+        self.channel_count = self.channel_counts[1]
         self.counts = [None] * self.channel_count
         self.segment_count = 0
         self.filled = 0
@@ -137,7 +153,10 @@ class SpectrumUploadAssembler:
         if segment.offset < 0 or segment.offset >= self.channel_count:
             self.reset()
             return None
-        end = min(self.channel_count, segment.offset + len(segment.counts))
+        if segment.offset + len(segment.counts) > self.channel_count:
+            self.reset()
+            return None
+        end = segment.offset + len(segment.counts)
         if end <= segment.offset:
             return None
         for channel in range(segment.offset, end):
@@ -181,12 +200,18 @@ class KC761Client:
         request_timeout: float = REQUEST_TIMEOUT,
         on_push: PushCallback | None = None,
         task_creator: TaskCreator = _asyncio_task_creator,
+        spectrum_channel_counts: tuple[int, int, int] = DEFAULT_SPECTRUM_CHANNEL_COUNTS,
     ) -> None:
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
         self.on_push = on_push
         self.task_creator = task_creator
+        if len(spectrum_channel_counts) != 3 or any(
+            value not in SPECTRUM_CHANNEL_COUNT_OPTIONS for value in spectrum_channel_counts
+        ):
+            raise ValueError("unsupported spectrum channel count")
+        self.spectrum_channel_counts = spectrum_channel_counts
         self.transport: Transport = transport or TcpTransport(host, port)
         self.parser = FrameParser(max_frame_length=MAX_FRAME_LENGTH)
         self._reader_task: asyncio.Task[None] | None = None
@@ -266,7 +291,18 @@ class KC761Client:
         }[command]
         loop = asyncio.get_running_loop()
         future: asyncio.Future[DecodedFrame | SpectrumData] = loop.create_future()
-        self._pending[sync] = PendingTransaction(command, expected, future, source)
+        channel_count = (
+            self.spectrum_channel_counts[source]
+            if command == CMD_GET_MC_DATA and source is not None
+            else SPECTRUM_CHANNEL_COUNT
+        )
+        self._pending[sync] = PendingTransaction(
+            command,
+            expected,
+            future,
+            source,
+            channel_count,
+        )
         try:
             await self.transport.async_write(encode_read_request(sync, command, source=source))
             return await asyncio.wait_for(future, self.request_timeout)

@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
     er = None  # type: ignore[assignment]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
-CONFIG_ENTRY_VERSION = 6
+CONFIG_ENTRY_VERSION = 7
 
 _REMOVED_BINARY_SENSOR_KEYS = (
     "auto_upload_enabled",

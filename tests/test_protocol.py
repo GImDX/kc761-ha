@@ -533,10 +533,13 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TransactionError):
             pending.add_spectrum_segment(SpectrumSegment(0, 2048, 1, (1,), FLAG_MC_DATA_QUERY))
 
-        self.assertIsNone(
+        with self.assertRaises(TransactionError):
             pending.add_spectrum_segment(
                 SpectrumSegment(0, 2047, 1, (7, 8), FLAG_MC_DATA_QUERY)
             )
+        self.assertEqual(pending.spectrum_filled, 0)
+        self.assertIsNone(
+            pending.add_spectrum_segment(SpectrumSegment(0, 2047, 1, (7,), FLAG_MC_DATA_QUERY))
         )
         self.assertEqual(pending.spectrum_filled, 1)
         with self.assertRaises(TransactionError):
@@ -816,6 +819,36 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
             simulator.received_commands,
             [CMD_GET_MC_DATA, CMD_GET_CAL_DATA, CMD_SET_STA, CMD_SET_DEVICE_TIME, CMD_SET_CLEAR, CMD_GET_STA],
         )
+        self.assertEqual(simulator.forbidden_commands, [])
+
+    async def test_client_supports_mixed_per_channel_spectrum_lengths(self) -> None:
+        counts = (1024, 2048, 4096)
+        scenario = SimulatorScenario(
+            sensor_types=(2, 0, 5),
+            spectrum_channel_counts=counts,
+            spectrum_fragment_size=257,
+            spectrum_reverse_order=True,
+        )
+        async with Kc761Simulator(scenario) as simulator:
+            client = KC761Client(
+                *simulator.address,
+                request_timeout=2,
+                spectrum_channel_counts=counts,
+            )
+            try:
+                gamma = await client.async_get_spectrum(0)
+                pin = await client.async_get_spectrum(2)
+            finally:
+                await client.async_close()
+        self.assertEqual(len(gamma.counts), 1024)
+        self.assertEqual(gamma.counts[0], 0)
+        self.assertEqual(gamma.counts[-1], 1023)
+        self.assertEqual(gamma.segment_count, 4)
+        self.assertEqual(len(pin.counts), 4096)
+        self.assertEqual(pin.counts[0], 0)
+        self.assertEqual(pin.counts[-1], 4095)
+        self.assertEqual(pin.segment_count, 16)
+        self.assertEqual(simulator.received_commands, [CMD_GET_MC_DATA, CMD_GET_MC_DATA])
         self.assertEqual(simulator.forbidden_commands, [])
 
     async def test_client_rejects_failed_or_mismatched_ack(self) -> None:
