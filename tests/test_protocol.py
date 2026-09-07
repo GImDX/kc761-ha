@@ -23,9 +23,20 @@ from custom_components.kc761.const import (
     FLAG_MC_DATA_QUERY,
     FLAG_STATUS_QUERY,
     MAX_CONSECUTIVE_PROTOCOL_ERRORS,
+    MAX_SPECTRUM_WIRE_SPAN,
+    SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE,
+    SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW,
+    SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY,
+    SPECTRUM_LENGTH_CONFIDENCE_INFERRED,
+    SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
 )
 from custom_components.kc761.protocol import client as client_module
-from custom_components.kc761.protocol.client import KC761Client, PendingTransaction, SpectrumUploadAssembler
+from custom_components.kc761.protocol.client import (
+    KC761Client,
+    PendingTransaction,
+    SpectrumUploadAssembler,
+    _finalize_spectrum_buffer,
+)
 from custom_components.kc761.protocol.codec import (
     DecodedFrame,
     HARDWARE_VERIFIED,
@@ -728,7 +739,7 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
     def test_auto_upload_spectrum_assembler_round_boundaries_and_duplicates(self) -> None:
         assembler = SpectrumUploadAssembler()
         assembler.begin_round(0)
-        self.assertEqual(len(assembler.counts), 2048)
+        self.assertEqual(len(assembler.counts), MAX_SPECTRUM_WIRE_SPAN)
         self.assertEqual(assembler.filled, 0)
         self.assertIsNone(
             assembler.add(SpectrumSegment(0, -1, 1, (1,), FLAG_MC_DATA_UPLOAD))
@@ -763,11 +774,18 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
             assembler.add(SpectrumSegment(0, 512, 1, tuple(range(512, 1024)), FLAG_MC_DATA_UPLOAD))
         )
         complete = assembler.add(SpectrumSegment(0, 1024, 1, first, FLAG_MC_DATA_UPLOAD))
+        self.assertIsNone(complete)
+        complete = assembler.finish_round()
         self.assertIsNotNone(complete)
         assert complete is not None
         self.assertEqual(complete.source, 0)
         self.assertEqual(complete.segment_count, 4)
         self.assertEqual(complete.counts, tuple(range(2048)))
+        self.assertEqual(complete.spectrum_status, "complete")
+        self.assertEqual(complete.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+        self.assertEqual(complete.completion_basis, SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY)
+        self.assertEqual(complete.received_count, 2048)
+        self.assertEqual(complete.received_span, 2048)
         self.assertTrue(assembler.complete)
         self.assertEqual(assembler.filled, 2048)
         self.assertIsNone(
@@ -778,6 +796,240 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_UPLOAD)))
         self.assertIsNone(assembler.add(SpectrumSegment(1, 0, 1, (1,), FLAG_MC_DATA_QUERY)))
         self.assertFalse(assembler.complete)
+
+    def test_adaptive_round_waits_for_boundary_and_rejects_gaps(self) -> None:
+        assembler = SpectrumUploadAssembler()
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(1024)), FLAG_MC_DATA_UPLOAD))
+        )
+        # A 1024 prefix is not enough to end a round.  It remains extendable
+        # to 2048/4096 until the next A3 boundary is observed.
+        self.assertIsNone(
+            assembler.add(
+                SpectrumSegment(0, 1024, 1, tuple(range(1024, 2048)), FLAG_MC_DATA_UPLOAD)
+            )
+        )
+        result = assembler.finish_round()
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result.counts), 2048)
+        self.assertEqual(result.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+        self.assertEqual(result.completion_basis, SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY)
+
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(512)), FLAG_MC_DATA_UPLOAD))
+        )
+        self.assertIsNone(
+            assembler.add(
+                SpectrumSegment(0, 1024, 1, tuple(range(1024, 1536)), FLAG_MC_DATA_UPLOAD)
+            )
+        )
+        self.assertIsNone(assembler.finish_round())
+        self.assertEqual(assembler.last_issue, "round_incomplete_or_noncontiguous")
+
+    async def test_adaptive_pending_uses_window_and_preserves_65535(self) -> None:
+        loop = asyncio.get_running_loop()
+        pending = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        self.assertIsNone(
+            pending.add_spectrum_segment(
+                SpectrumSegment(0, 0, 1, tuple(range(1024)), FLAG_MC_DATA_QUERY)
+            )
+        )
+        self.assertIsNone(
+            pending.add_spectrum_segment(
+                SpectrumSegment(0, 1024, 1, tuple(range(1024, 2048)), FLAG_MC_DATA_QUERY)
+            )
+        )
+        result = pending.finish_spectrum_window()
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result.counts), 2048)
+        self.assertEqual(result.completion_basis, SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW)
+        self.assertEqual(result.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+
+        exact = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        exact_result = exact.add_spectrum_segment(
+            SpectrumSegment(0, 0, 1, (0xFFFF,) + (1,) * 1023, FLAG_MC_DATA_QUERY)
+        )
+        self.assertIsNone(exact_result)
+        exact_result = exact.add_spectrum_segment(
+            SpectrumSegment(0, 1024, 1, tuple(range(1024, 2048)), FLAG_MC_DATA_QUERY)
+        )
+        self.assertIsNone(exact_result)
+        exact_result = exact.finish_spectrum_window()
+        self.assertIsNotNone(exact_result)
+        assert exact_result is not None
+        self.assertEqual(exact_result.counts[0], 0xFFFF)
+        self.assertEqual(exact_result.received_span, 2048)
+
+    async def test_adaptive_padding_candidate_allows_wire_suffix(self) -> None:
+        loop = asyncio.get_running_loop()
+        pending = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        self.assertIsNone(
+            pending.add_spectrum_segment(
+                SpectrumSegment(0, 0, 1, tuple(range(4096)), FLAG_MC_DATA_QUERY)
+            )
+        )
+        result = pending.add_spectrum_segment(
+            SpectrumSegment(0, 4096, 1, (0xFFFF,) * 8, FLAG_MC_DATA_QUERY)
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result.counts), 4096)
+        self.assertEqual(result.counts[-1], 4095)
+        self.assertEqual(result.received_span, 4104)
+        self.assertEqual(result.padding_count, 8)
+        self.assertEqual(result.completion_basis, SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE)
+        self.assertEqual(result.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+
+        max_bound = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        self.assertIsNone(
+            max_bound.add_spectrum_segment(
+                SpectrumSegment(0, 0, 1, tuple(range(4096)), FLAG_MC_DATA_QUERY)
+            )
+        )
+        observed = max_bound.finish_spectrum_window()
+        self.assertIsNotNone(observed)
+        assert observed is not None
+        self.assertEqual(observed.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_OBSERVED)
+        self.assertEqual(observed.completion_basis, "max_bound")
+
+    def test_adaptive_finalizer_rejects_empty_holes_and_unsupported_spans(self) -> None:
+        kwargs = {
+            "source": 0,
+            "segment_count": 1,
+            "source_flag": FLAG_MC_DATA_QUERY,
+            "padding_channels": set(),
+            "completion_basis": SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW,
+        }
+        self.assertIsNone(_finalize_spectrum_buffer([], **kwargs))
+        self.assertIsNone(_finalize_spectrum_buffer([0] * 1024 + [None, 1], **kwargs))
+        self.assertIsNone(_finalize_spectrum_buffer([0] * 1536, **kwargs))
+
+    async def test_adaptive_pending_validation_and_gap_boundary(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self.assertRaises(ValueError):
+            PendingTransaction(
+                CMD_GET_MC_DATA,
+                frozenset({FLAG_MC_DATA_QUERY}),
+                loop.create_future(),
+                spectrum_source=0,
+                spectrum_channel_count=123,
+            )
+
+        pending = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(SpectrumSegment(0, -1, 1, (1,), FLAG_MC_DATA_QUERY))
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(
+                SpectrumSegment(0, MAX_SPECTRUM_WIRE_SPAN - 1, 1, (1, 2), FLAG_MC_DATA_QUERY)
+            )
+        with self.assertRaises(TransactionError):
+            pending.add_spectrum_segment(SpectrumSegment(0, 0, 1, (), FLAG_MC_DATA_QUERY))
+        self.assertIsNone(pending.finish_spectrum_window())
+
+        fixed = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+        )
+        self.assertIsNone(fixed.finish_spectrum_window())
+
+        gap = PendingTransaction(
+            CMD_GET_MC_DATA,
+            frozenset({FLAG_MC_DATA_QUERY}),
+            loop.create_future(),
+            spectrum_source=0,
+            adaptive_spectrum=True,
+        )
+        self.assertIsNone(
+            gap.add_spectrum_segment(
+                SpectrumSegment(0, 1, 1, tuple(range(4096)), FLAG_MC_DATA_QUERY)
+            )
+        )
+        with self.assertRaises(TransactionError):
+            gap.add_spectrum_segment(SpectrumSegment(0, 4097, 1, (1,), FLAG_MC_DATA_QUERY))
+
+    def test_adaptive_assembler_legacy_constructor_and_round_reset(self) -> None:
+        with self.assertRaises(ValueError):
+            SpectrumUploadAssembler(channel_counts=(1024, 2048))
+
+        assembler = SpectrumUploadAssembler()
+        self.assertIsNone(assembler.begin_round(3))
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_UPLOAD)))
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(
+                SpectrumSegment(0, MAX_SPECTRUM_WIRE_SPAN - 1, 1, (1, 2), FLAG_MC_DATA_UPLOAD)
+            )
+        )
+        self.assertEqual(assembler.last_issue, "segment_out_of_bounds")
+
+        assembler.begin_round(0)
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (), FLAG_MC_DATA_UPLOAD)))
+        self.assertEqual(assembler.last_issue, "empty_segment")
+
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(1024)), FLAG_MC_DATA_UPLOAD))
+        )
+        previous = assembler.begin_round(1)
+        self.assertIsNotNone(previous)
+        assert previous is not None
+        self.assertEqual(len(previous.counts), 1024)
+        self.assertEqual(previous.completion_basis, SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY)
+        self.assertEqual(assembler.source, 1)
+
+        self.assertIsNone(assembler.add(SpectrumSegment(0, 0, 1, (1,), FLAG_MC_DATA_UPLOAD)))
+        self.assertIsNone(assembler.add(SpectrumSegment(1, 0, 1, tuple(range(4096)), FLAG_MC_DATA_UPLOAD)))
+        self.assertIsNotNone(assembler.finish_round())
+        self.assertIsNone(assembler.add(SpectrumSegment(1, 0, 1, (0,), FLAG_MC_DATA_UPLOAD)))
+
+        assembler.begin_round(0)
+        self.assertIsNone(
+            assembler.add(SpectrumSegment(0, 0, 1, tuple(range(4096)), FLAG_MC_DATA_UPLOAD))
+        )
+        padded = assembler.add(
+            SpectrumSegment(0, 4096, 1, (0xFFFF,) * 8, FLAG_MC_DATA_UPLOAD)
+        )
+        self.assertIsNotNone(padded)
+        assert padded is not None
+        self.assertEqual(padded.received_span, 4104)
+        self.assertEqual(padded.padding_count, 8)
+        self.assertEqual(padded.completion_basis, SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE)
 
     async def test_client_only_sends_read_commands(self) -> None:
         async with Kc761Simulator() as simulator:
@@ -811,6 +1063,11 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(spectrum.counts), 2048)
         self.assertEqual(spectrum.counts[1024], 1024)
         self.assertEqual(spectrum.segment_count, 4)
+        self.assertEqual(spectrum.spectrum_status, "complete")
+        self.assertEqual(spectrum.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+        self.assertEqual(spectrum.completion_basis, SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW)
+        self.assertEqual(spectrum.received_count, 2048)
+        self.assertEqual(spectrum.received_span, 2048)
         self.assertEqual(calibration.energy_kev(0, 2047), 2047)
         self.assertEqual(status.sensor_status, 0x14)
         self.assertEqual(status.auto_upload_status, 1)
@@ -844,10 +1101,14 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gamma.counts[0], 0)
         self.assertEqual(gamma.counts[-1], 1023)
         self.assertEqual(gamma.segment_count, 4)
+        self.assertEqual(gamma.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_INFERRED)
+        self.assertEqual(gamma.completion_basis, SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW)
         self.assertEqual(len(pin.counts), 4096)
         self.assertEqual(pin.counts[0], 0)
         self.assertEqual(pin.counts[-1], 4095)
         self.assertEqual(pin.segment_count, 16)
+        self.assertEqual(pin.length_confidence, SPECTRUM_LENGTH_CONFIDENCE_OBSERVED)
+        self.assertEqual(pin.completion_basis, "max_bound")
         self.assertEqual(simulator.received_commands, [CMD_GET_MC_DATA, CMD_GET_MC_DATA])
         self.assertEqual(simulator.forbidden_commands, [])
 

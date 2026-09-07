@@ -77,21 +77,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                 "dose_display_unit",
                 entry.options.get(CONF_DOSE_DISPLAY_UNIT, "raw"),
             ),
-            CONF_GAMMA_SPECTRUM_CHANNELS: getattr(
-                coordinator,
-                "spectrum_channel_counts",
-                (2048, 2048, 2048),
-            )[0],
-            CONF_NEUTRON_SPECTRUM_CHANNELS: getattr(
-                coordinator,
-                "spectrum_channel_counts",
-                (2048, 2048, 2048),
-            )[1],
-            CONF_PIN_SPECTRUM_CHANNELS: getattr(
-                coordinator,
-                "spectrum_channel_counts",
-                (2048, 2048, 2048),
-            )[2],
+            "legacy_spectrum_channel_options": list(
+                getattr(coordinator, "legacy_spectrum_channel_counts", (None, None, None))
+            ),
             CONF_ENABLE_DEVICE_CONTROLS: bool(
                 getattr(coordinator, "device_controls_enabled", False)
             ),
@@ -147,12 +135,23 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             ),
         },
         "spectrum": {
-            "channel_counts": list(getattr(coordinator, "spectrum_channel_counts", (2048, 2048, 2048))),
+            "channel_counts": None,
+            "legacy_channel_counts": list(
+                getattr(coordinator, "legacy_spectrum_channel_counts", (None, None, None))
+            ),
             "latest": (
                 coordinator.latest_spectrum.metadata()
                 if getattr(coordinator, "latest_spectrum", None)
                 else None
             ),
+            "last_protocol_result": _spectrum_result_metadata(
+                getattr(coordinator, "last_spectrum_data", None)
+            ),
+            "assembler": getattr(
+                getattr(coordinator, "_auto_upload_spectrum", None),
+                "state",
+                lambda: None,
+            )(),
             "last_saved": (
                 coordinator.last_spectrum_save.isoformat()
                 if getattr(coordinator, "last_spectrum_save", None)
@@ -190,9 +189,7 @@ def _diagnostics_without_runtime(entry: ConfigEntry) -> dict[str, Any]:
             CONF_INFO_INTERVAL: _option_int(options, CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
             CONF_CREATE_RAW_ENTITIES: bool(options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES)),
             CONF_DOSE_DISPLAY_UNIT: options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT),
-            CONF_GAMMA_SPECTRUM_CHANNELS: channel_counts[0],
-            CONF_NEUTRON_SPECTRUM_CHANNELS: channel_counts[1],
-            CONF_PIN_SPECTRUM_CHANNELS: channel_counts[2],
+            "legacy_spectrum_channel_options": list(channel_counts),
             CONF_ENABLE_DEVICE_CONTROLS: bool(
                 options.get(CONF_ENABLE_DEVICE_CONTROLS, DEFAULT_ENABLE_DEVICE_CONTROLS)
             ),
@@ -229,8 +226,11 @@ def _diagnostics_without_runtime(entry: ConfigEntry) -> dict[str, Any]:
         },
         "controls": {"commands": 0, "last_time_sync": None},
         "spectrum": {
-            "channel_counts": list(channel_counts),
+            "channel_counts": None,
+            "legacy_channel_counts": list(channel_counts),
             "latest": None,
+            "last_protocol_result": None,
+            "assembler": None,
             "last_saved": None,
         },
         "framing": None,
@@ -243,6 +243,23 @@ def _option_int(options: Mapping[str, Any], key: str, default: int) -> int:
         return int(options.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def _spectrum_result_metadata(value: Any) -> dict[str, Any] | None:
+    """Return bounded protocol-length evidence without exposing point data."""
+    if value is None:
+        return None
+    return {
+        "source": getattr(value, "source", None),
+        "point_count": len(getattr(value, "counts", ())),
+        "segment_count": getattr(value, "segment_count", None),
+        "spectrum_status": getattr(value, "spectrum_status", None),
+        "length_confidence": getattr(value, "length_confidence", None),
+        "completion_basis": getattr(value, "completion_basis", None),
+        "received_count": getattr(value, "received_count", None),
+        "received_span": getattr(value, "received_span", None),
+        "padding_count": getattr(value, "padding_count", None),
+    }
 
 
 def _entry_channel_counts(options: Mapping[str, Any]) -> tuple[int, int, int]:

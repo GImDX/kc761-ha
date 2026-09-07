@@ -18,7 +18,8 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.2.0-rc.6"
+VERSION = "0.2.0-rc.7"
+DEFAULT_HOST = "192.168.1.127"
 DEFAULT_PORT = 7601
 CONF_TRANSPORT = "transport"
 TRANSPORT_TCP = "tcp"
@@ -52,6 +53,25 @@ CONF_NEUTRON_SPECTRUM_CHANNELS = "neutron_spectrum_channels"
 CONF_PIN_SPECTRUM_CHANNELS = "pin_spectrum_channels"
 SPECTRUM_CHANNEL_COUNT_OPTIONS = (1024, 2048, 4096)
 DEFAULT_SPECTRUM_CHANNEL_COUNTS = (2048, 2048, 2048)
+MAX_SPECTRUM_CHANNEL_COUNT = max(SPECTRUM_CHANNEL_COUNT_OPTIONS)
+# A final wire packet may carry a bounded suffix of 0xFFFF padding beyond the
+# physical 4096 channels.  Keep that suffix in the parser but never expose it
+# as data.  The largest documented packet carries 512 channels.
+MAX_SPECTRUM_WIRE_SPAN = MAX_SPECTRUM_CHANNEL_COUNT + 511
+# The old per-channel options remain readable for migration and diagnostics,
+# but they no longer select an assembler target.  Runtime spectrum lengths are
+# determined from the bounded response itself.
+SPECTRUM_STATUS_COMPLETE = "complete"
+SPECTRUM_STATUS_AMBIGUOUS = "ambiguous"
+SPECTRUM_LENGTH_CONFIDENCE_OBSERVED = "observed"
+SPECTRUM_LENGTH_CONFIDENCE_INFERRED = "inferred"
+SPECTRUM_LENGTH_CONFIDENCE_LEGACY = "legacy"
+SPECTRUM_COMPLETION_BASIS_NONE = "none"
+SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW = "request_window"
+SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY = "round_boundary"
+SPECTRUM_COMPLETION_BASIS_MAX_BOUND = "max_bound"
+SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE = "padding_candidate"
+SPECTRUM_COMPLETION_BASIS_LEGACY = "legacy"
 CONF_ENABLE_DEVICE_CONTROLS = "enable_device_controls"
 DEFAULT_ENABLE_DEVICE_CONTROLS = False
 CONF_ENABLE_DESTRUCTIVE_ACTIONS = "enable_destructive_actions"

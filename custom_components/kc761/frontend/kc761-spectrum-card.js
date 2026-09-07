@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-rc.6";
+const CARD_VERSION = "0.2.0-rc.7";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const SUPPORTED_CHANNEL_COUNTS = Object.freeze([1024, 2048, 4096]);
 const MAX_CHANNEL = 2047;
@@ -1404,6 +1404,7 @@ class KC761SpectrumCard extends HTMLElement {
     const hasKC761Identity = typeof attributes.config_entry_id === "string" || typeof attributes.codec_profile === "string";
     const points = attributes.points;
     if (!hasKC761Identity || !Array.isArray(points)) return false;
+    if (attributes.spectrum_status !== undefined && !["complete", "ambiguous"].includes(String(attributes.spectrum_status))) return false;
     const hasDeclaredCount = attributes.point_count !== undefined && attributes.point_count !== null;
     const declaredCount = Number(attributes.point_count);
     if (hasDeclaredCount && !SUPPORTED_CHANNEL_COUNTS.includes(declaredCount)) return false;
@@ -1789,7 +1790,7 @@ class KC761SpectrumCard extends HTMLElement {
         </div>
         <div class="summary">
           <div data-summary="acquired">Acquired<b id="acquired">—</b></div><div data-summary="runtime">Accumulation<b id="runtime">—</b></div>
-          <div data-summary="total">Total counts<b id="total">—</b></div><div data-summary="peak">Peak<b id="peak">—</b></div><div data-summary="roi-total">ROI counts<b id="roi-total">—</b></div>
+          <div data-summary="total">Total counts<b id="total">—</b></div><div data-summary="peak">Peak<b id="peak">—</b></div><div data-summary="roi-total">ROI counts<b id="roi-total">—</b></div><div data-summary="spectrum-status">Length<b id="spectrum-status">—</b></div>
           <div>Data cursor<b id="cursor-value">—</b></div>
         </div>
         <div id="chart-wrap" class="chart-wrap">
@@ -3120,10 +3121,20 @@ class KC761SpectrumCard extends HTMLElement {
       this._setSummaryValue("#runtime", data.accumulation_seconds == null ? "Unknown" : `${data.accumulation_seconds} s`);
       this._setSummaryValue("#total", cache.totalCounts.toLocaleString());
       this._setSummaryValue("#peak", `CH ${peak[0]} · ${peak[1].toFixed(2)} keV · ${peak[2]}`);
+      this._setSummaryValue("#spectrum-status", this._spectrumStatusText(data));
       this._summaryCache = cache;
     }
     this._setSummaryValue("#roi-total", roiTotal.toLocaleString());
     this._setSummaryValue("#cursor-value", `CH ${cursorPoint[0]} · ${cursorPoint[1].toFixed(2)} keV · ${cursorPoint[2]}`);
+  }
+
+  _spectrumStatusText(data = this._data) {
+    const pointCount = Array.isArray(data?.points) ? data.points.length : Number(data?.point_count) || 0;
+    const confidence = String(data?.length_confidence || "legacy");
+    const basis = String(data?.completion_basis || "legacy");
+    if (confidence === "inferred") return `${pointCount} channels · inferred (${basis})`;
+    if (confidence === "legacy") return `${pointCount} channels · legacy archive`;
+    return `${pointCount} channels · observed (${basis})`;
   }
 
   _lineData(cache, xMode, logarithmic) {

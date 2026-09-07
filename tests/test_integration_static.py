@@ -468,6 +468,22 @@ class IntegrationStaticTests(unittest.TestCase):
             "create_raw_entities",
             canonical["options"]["step"]["init"]["data"],
         )
+        self.assertEqual(
+            canonical["options"]["step"]["init"]["data"]["create_raw_entities"],
+            "Create raw reading entities (3 per installed channel)",
+        )
+        self.assertEqual(
+            canonical["options"]["step"]["init"]["data"]["enable_device_controls"],
+            "Enable device controls",
+        )
+        self.assertEqual(
+            canonical["options"]["step"]["init"]["data"]["enable_destructive_actions"],
+            "Enable clearing radiation statistics",
+        )
+        self.assertEqual(
+            set(canonical["options"]["step"]["init"]["data_description"]),
+            {"create_raw_entities", "enable_device_controls", "enable_destructive_actions"},
+        )
         self.assertIn("enable_device_controls", canonical["options"]["step"]["init"]["data"])
         self.assertIn("enable_destructive_actions", canonical["options"]["step"]["init"]["data"])
         self.assertIn("time_sync_enabled", canonical["options"]["step"]["init"]["data"])

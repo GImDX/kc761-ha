@@ -49,6 +49,7 @@ from custom_components.kc761.const import (  # noqa: E402
     CONF_NEUTRON_SPECTRUM_CHANNELS,
     CONF_PIN_SPECTRUM_CHANNELS,
     CONF_TRANSPORT,
+    DEFAULT_HOST,
     DOSE_DISPLAY_UNIT_MICRO,
     DOMAIN,
     TRANSPORT_BLE,
@@ -244,7 +245,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.6",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.7",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
@@ -666,7 +667,17 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
             CONF_PIN_SPECTRUM_CHANNELS: 2048,
         }
         assert (await options.async_step_init(option_values))["type"] == "create_entry"
-        options.async_create_entry.assert_called_once_with(title="", data=option_values)
+        expected_options = {
+            key: value
+            for key, value in option_values.items()
+            if key
+            not in {
+                CONF_GAMMA_SPECTRUM_CHANNELS,
+                CONF_NEUTRON_SPECTRUM_CHANNELS,
+                CONF_PIN_SPECTRUM_CHANNELS,
+            }
+        }
+        options.async_create_entry.assert_called_once_with(title="", data=expected_options)
 
         safe_options = config_flow_module.KC761ConfigFlow.async_get_options_flow(entry)
         safe_options.async_create_entry = MagicMock(return_value={"type": "create_entry"})
@@ -878,6 +889,38 @@ def test_config_flow_transport_specific_steps_and_ble_discovery() -> None:
     run(exercise())
 
 
+def test_new_tcp_default_is_isolated_from_reconfigure_saved_host() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        new_flow = config_flow_module.KC761ConfigFlow()
+        new_flow.hass = hass
+        new_flow.async_show_form = MagicMock(return_value={"type": "form"})
+        await new_flow.async_step_tcp()
+        new_schema = new_flow.async_show_form.call_args.kwargs["data_schema"]
+        new_defaults = {str(marker.schema): marker.default() for marker in new_schema.schema}
+        assert new_defaults["host"] == DEFAULT_HOST
+
+        entry = make_entry()
+        entry.data = {
+            "device_id": "7601-0000-000001",
+            CONF_TRANSPORT: TRANSPORT_TCP,
+            "host": "192.168.8.127",
+            "port": 7601,
+        }
+        hass.config_entries.async_get_entry.return_value = entry
+        reconfigure = config_flow_module.KC761ConfigFlow()
+        reconfigure.hass = hass
+        reconfigure.context = {"entry_id": entry.entry_id}
+        reconfigure.async_show_form = MagicMock(return_value={"type": "form"})
+        await reconfigure.async_step_reconfigure()
+        await reconfigure.async_step_reconfigure({CONF_TRANSPORT: TRANSPORT_TCP})
+        saved_schema = reconfigure.async_show_form.call_args.kwargs["data_schema"]
+        saved_defaults = {str(marker.schema): marker.default() for marker in saved_schema.schema}
+        assert saved_defaults["host"] == "192.168.8.127"
+
+    run(exercise())
+
+
 def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
     async def exercise() -> None:
         hass = make_hass()
@@ -920,6 +963,10 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
                     counts=tuple(range(offset, offset + 512)),
                 )
             )
+        # A1 has no wire EOF marker; the next A3 status closes the previous
+        # round and is the first point where 2048 is usable.
+        assert coordinator.latest_spectrum is None
+        await coordinator._async_push(make_decoded_status())
         assert coordinator.latest_spectrum is not None
         assert coordinator.latest_spectrum.source == 0
         assert coordinator.latest_spectrum.counts == tuple(range(2048))
@@ -946,6 +993,7 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
                     counts=tuple(range(offset, offset + 512)),
                 )
             )
+        await coordinator._async_push(make_decoded_status())
         assert coordinator.latest_spectrum.counts == tuple(range(2048))
         await coordinator._async_push(make_decoded_status())
         await coordinator._async_push(
@@ -1943,7 +1991,8 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         assert result["device"] is None
         assert result["connection"]["connected"] is False
         assert result["connection"]["transport"] == "tcp"
-        assert result["spectrum"]["channel_counts"] == [1024, 4096, 2048]
+        assert result["spectrum"]["channel_counts"] is None
+        assert result["spectrum"]["legacy_channel_counts"] == [1024, 4096, 2048]
         assert "secret.example" not in str(result)
         assert "7601-0000-000001" not in str(result)
 

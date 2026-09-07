@@ -48,6 +48,7 @@ from .const import (
     FLAG_STATUS_UPLOAD,
     MAX_INFO_INTERVAL,
     MAX_RECONNECT_BACKOFF,
+    MAX_SPECTRUM_CHANNEL_COUNT,
     MAX_STATUS_INTERVAL,
     MAX_SPECTRUM_SAVE_INTERVAL,
     MAX_TIME_SYNC_INTERVAL,
@@ -66,7 +67,7 @@ from .const import (
 )
 from .protocol.client import KC761Client, SpectrumUploadAssembler
 from .protocol.codec import CODEC_PROFILE, DecodedFrame, HARDWARE_VERIFIED
-from .protocol.models import CalibrationData, DeviceInfo, SpectrumSegment, StatusData
+from .protocol.models import CalibrationData, DeviceInfo, SpectrumData, SpectrumSegment, StatusData
 from .protocol.transport import BleTransport
 from .spectrum import SpectrumArchive, SpectrumSnapshot
 
@@ -155,15 +156,18 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             MIN_SPECTRUM_SAVE_INTERVAL,
             MAX_SPECTRUM_SAVE_INTERVAL,
         )
-        self.spectrum_channel_counts = _spectrum_channel_counts(entry.options)
+        # Spectrum lengths are discovered from each bounded A0/A1 response.
+        # Keep the old values only as migration diagnostics; they no longer
+        # constrain a request or assembler.
+        self.spectrum_channel_counts = (MAX_SPECTRUM_CHANNEL_COUNT,) * 3
+        self.legacy_spectrum_channel_counts = _spectrum_channel_counts(entry.options)
         self.client = self._new_client(self.host, self.port)
         self._device_info: DeviceInfo | None = None
         self._last_info_at: datetime | None = None
         self._snapshot: KC761Snapshot | None = None
         self._calibration: CalibrationData | None = None
-        self._auto_upload_spectrum = SpectrumUploadAssembler(
-            channel_counts=self.spectrum_channel_counts
-        )
+        self._auto_upload_spectrum = SpectrumUploadAssembler()
+        self._last_spectrum_data: SpectrumData | None = None
         self._latest_spectrum: SpectrumSnapshot | None = None
         self._archive: SpectrumArchive | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -206,6 +210,11 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     @property
     def latest_spectrum(self) -> SpectrumSnapshot | None:
         return self._latest_spectrum
+
+    @property
+    def last_spectrum_data(self) -> SpectrumData | None:
+        """Return the latest bounded protocol result for diagnostics."""
+        return self._last_spectrum_data
 
     @property
     def calibration(self) -> CalibrationData | None:
@@ -279,7 +288,9 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     async def _async_push(self, decoded: DecodedFrame) -> None:
         """Accept A3 status and bounded A1 spectrum pushes without writes."""
         if decoded.frame.flag == FLAG_STATUS_UPLOAD and isinstance(decoded.data, StatusData):
-            self._auto_upload_spectrum.begin_round(decoded.data.active_sensor)
+            completed = self._auto_upload_spectrum.begin_round(decoded.data.active_sensor)
+            if completed is not None:
+                await self._publish_spectrum_data(completed)
             if self._device_info is None:
                 return
             now = datetime.now(UTC)
@@ -302,7 +313,14 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         ):
             return
         uploaded = self._auto_upload_spectrum.add(decoded.data)
-        if uploaded is None or self._calibration is None:
+        if uploaded is None:
+            return
+        await self._publish_spectrum_data(uploaded)
+
+    async def _publish_spectrum_data(self, uploaded: SpectrumData) -> None:
+        """Convert one bounded protocol result into the shared snapshot path."""
+        self._last_spectrum_data = uploaded
+        if self._device_info is None or self._calibration is None:
             return
         acquired_at = datetime.now(UTC)
         energy = tuple(
@@ -318,6 +336,12 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             energy_kev=energy,
             segment_count=uploaded.segment_count,
             calibration_profile=f"factory:{self._calibration.factory_version}",
+            spectrum_status=uploaded.spectrum_status,
+            length_confidence=uploaded.length_confidence,
+            completion_basis=uploaded.completion_basis,
+            received_count=uploaded.received_count,
+            received_span=uploaded.received_span,
+            padding_count=uploaded.padding_count,
         )
         self._notify_entities()
 
@@ -347,6 +371,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             if self._calibration is None:
                 self._calibration = await self.client.async_get_calibration()
             spectrum = await self.client.async_get_spectrum(selected)
+            self._last_spectrum_data = spectrum
             acquired_at = datetime.now(UTC)
             energy = tuple(
                 self._calibration.energy_kev(selected, channel)
@@ -361,6 +386,12 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 energy_kev=energy,
                 segment_count=spectrum.segment_count,
                 calibration_profile=f"factory:{self._calibration.factory_version}",
+                spectrum_status=spectrum.spectrum_status,
+                length_confidence=spectrum.length_confidence,
+                completion_basis=spectrum.completion_basis,
+                received_count=spectrum.received_count,
+                received_span=spectrum.received_span,
+                padding_count=spectrum.padding_count,
             )
             self._latest_spectrum = snapshot
             self._notify_entities()
@@ -701,14 +732,12 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 address,
                 0,
                 transport=transport,
-                spectrum_channel_counts=self.spectrum_channel_counts,
                 on_push=self._async_push if on_push else None,
                 task_creator=self._create_hass_task,
             )
         return KC761Client(
             host,
             port,
-            spectrum_channel_counts=self.spectrum_channel_counts,
             on_push=self._async_push if on_push else None,
             task_creator=self._create_hass_task,
         )

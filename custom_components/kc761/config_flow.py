@@ -22,9 +22,6 @@ from .const import (
     CONF_BLE_SERVICE_UUID,
     CONF_CREATE_RAW_ENTITIES,
     CONF_DOSE_DISPLAY_UNIT,
-    CONF_GAMMA_SPECTRUM_CHANNELS,
-    CONF_NEUTRON_SPECTRUM_CHANNELS,
-    CONF_PIN_SPECTRUM_CHANNELS,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_INFO_INTERVAL,
@@ -35,9 +32,9 @@ from .const import (
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
     DEFAULT_DOSE_DISPLAY_UNIT,
-    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
+    DEFAULT_HOST,
     DEFAULT_INFO_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_STATUS_INTERVAL,
@@ -48,7 +45,6 @@ from .const import (
     DOMAIN,
     DOSE_DISPLAY_UNIT_MICRO,
     DOSE_DISPLAY_UNIT_RAW,
-    SPECTRUM_CHANNEL_COUNT_OPTIONS,
     MAX_INFO_INTERVAL,
     MAX_SPECTRUM_SAVE_INTERVAL,
     MAX_STATUS_INTERVAL,
@@ -387,22 +383,15 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                 DOSE_DISPLAY_UNIT_MICRO,
             }:
                 normalized[CONF_DOSE_DISPLAY_UNIT] = DEFAULT_DOSE_DISPLAY_UNIT
-            for key, default in zip(
-                (
-                    CONF_GAMMA_SPECTRUM_CHANNELS,
-                    CONF_NEUTRON_SPECTRUM_CHANNELS,
-                    CONF_PIN_SPECTRUM_CHANNELS,
-                ),
-                DEFAULT_SPECTRUM_CHANNEL_COUNTS,
-                strict=True,
+            # These keys belonged to the pre-rc7 fixed-length assembler.  Do
+            # not keep accepting them as a runtime target; old entries remain
+            # loadable and diagnostics retain their values as migration data.
+            for key in (
+                "gamma_spectrum_channels",
+                "neutron_spectrum_channels",
+                "pin_spectrum_channels",
             ):
-                try:
-                    value = int(normalized.get(key, default))
-                except (TypeError, ValueError):
-                    value = default
-                normalized[key] = (
-                    value if value in SPECTRUM_CHANNEL_COUNT_OPTIONS else default
-                )
+                normalized.pop(key, None)
             return self.async_create_entry(title="", data=normalized)
         options = self.config_entry.options
         schema = vol.Schema(
@@ -437,33 +426,6 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
-                vol.Required(
-                    CONF_GAMMA_SPECTRUM_CHANNELS,
-                    default=str(
-                        options.get(
-                            CONF_GAMMA_SPECTRUM_CHANNELS,
-                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[0],
-                        )
-                    ),
-                ): _spectrum_channel_selector(),
-                vol.Required(
-                    CONF_NEUTRON_SPECTRUM_CHANNELS,
-                    default=str(
-                        options.get(
-                            CONF_NEUTRON_SPECTRUM_CHANNELS,
-                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[1],
-                        )
-                    ),
-                ): _spectrum_channel_selector(),
-                vol.Required(
-                    CONF_PIN_SPECTRUM_CHANNELS,
-                    default=str(
-                        options.get(
-                            CONF_PIN_SPECTRUM_CHANNELS,
-                            DEFAULT_SPECTRUM_CHANNEL_COUNTS[2],
-                        )
-                    ),
-                ): _spectrum_channel_selector(),
                 vol.Required(
                     CONF_ENABLE_DEVICE_CONTROLS,
                     default=options.get(
@@ -541,7 +503,7 @@ def _tcp_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     defaults = defaults or {}
     return vol.Schema(
         {
-            vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+            vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, DEFAULT_HOST)): str,
             vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=65535)
             ),
@@ -612,16 +574,3 @@ def _connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     if transport == TRANSPORT_TCP or _has_endpoint_input(defaults):
         return _tcp_schema(defaults)
     return _transport_schema()
-
-
-def _spectrum_channel_selector() -> SelectSelector:
-    """Return the explicit per-channel spectrum length selector."""
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                {"value": str(value), "label": f"{value} channels"}
-                for value in SPECTRUM_CHANNEL_COUNT_OPTIONS
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
-    )

@@ -120,7 +120,7 @@
 | `<channel>_cumulative_dose` | 累计剂量 | `mGy` | `mGy` | 无 |
 | `<channel>_cumulative_dose_equivalent` | 累计剂量当量 | `mSv` | `mSv` | 无 |
 
-这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。2026-09-06 用户确认累计原始数值单位为 `mGy/mSv`，本项目保留当前标签、原始值与历史；撤回此前“仅改为 µGy/µSv 标签”的方案。PDF 表格、正文和官方 UI 的矛盾作为原始证据保留，不表述为本轮已消除的跨固件疑点。可选微单位显示须将数值乘 1000，并在 Recorder 验证后确定同实体切换或独立换算实体策略，详见 D-012 和 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
+这些值可由设备清零，故统一作为普通传感器，不使用 `total` 或 `total_increasing`。2026-09-06 用户确认累计原始数值单位为 `mGy/mSv`，本项目保留当前标签、原始值与历史；撤回此前“仅改为 µGy/µSv 标签”的方案。PDF 表格、正文和官方 UI 的矛盾作为原始证据保留，不表述为本轮已消除的跨固件疑点。可选微单位显示已采用独立换算实体策略，数值乘 1000，不在原实体上切换单位；核心统计验证与完整 Recorder 端到端验证的区别见 D-012 和 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
 
 ### 6.1 剂量显示单位选项
 
@@ -128,19 +128,25 @@
 
 微单位速率实体使用 `measurement`，微单位累计量不设置 state class。选项不重写既有 Recorder 历史，也不改变协议、协调器快照或原始诊断。HA 2026.7.4 统计单位处理限制与验证范围见 [发布前补全记录](PRE_RELEASE_COVERAGE.md)。
 
+2026-09-07 用户否定上述伴随实体方案，要求同一实体以 Gy/Sv 为内部基准，选项仅影响默认显示单位。以上为既有实现记录，不再作为新方案目标。用户随后确认报文仍按 mGy/mSv 解码，不改变物理量级：报文值除以 1000 得到内部基准值，显示 m 单位时乘 1000，显示 µ 单位时乘 1,000,000；每小时速率遵循相同倍率。HA 显示换算支持以及既有实体和 Recorder 历史兼容方式待核实；不得只改标签不换算数值，也不得删除伴随实体记录。
+
 ## 7. 结构化谱图实体
 
 每台设备创建一个 `spectrum` sensor：
 
-- state：当前完整谱图的总计数；
+- state：当前可用谱图快照的总计数（长度的观测/推断状态另行公开）；
 - 属性：source、获取时间、累计时间、校准档案、segment 数、`point_count` 及对应数量的 `[channel, energy_kev, counts]` 点；道数支持 1024、2048、4096；
 - `points` 被列入 `_unrecorded_attributes`，Recorder 不保存点阵；
-- 没有完整谱图时 state 为 `unknown`、`points=[]`；
-- A0 主动谱图和完整 A3/A1 自动上传轮次复用同一实体。
+- 没有可用谱图快照时 state 为 `unknown`、`points=[]`；内部缺洞、冲突数据不生成可用快照；
+- A0 主动谱图和 A3/A1 自动上传轮次复用同一实体和长度判定元数据。
 
 谱图卡、WebSocket、CSV 和本地历史存档消费相同的 `SpectrumSnapshot`，不为每个道址创建实体。
 
-每个通道通过 `gamma_spectrum_channels`、`neutron_spectrum_channels`、`pin_spectrum_channels` 显式配置道数；缺省为 2048。A0/A1 无总道数字段，不根据暂时收到的数据推断完整长度。不同通道可以配置不同道数；历史存档使用自身保存的长度，不用当前实时配置强行裁剪旧谱图。
+rc7 不再显示或使用 `gamma_spectrum_channels`、`neutron_spectrum_channels`、`pin_spectrum_channels` 强制长度；每个谱图根据接收片段自动适配，`point_count` 与实际点阵长度一致。实体、卡片、CSV 和存档共同保留 `spectrum_status`、`length_confidence`、`completion_basis` 等信息；观测/推断长度不得表述为硬件能力已确认。无法排除长谱缺失尾片的情况，卡片需明确提示；没有相关元数据的旧存档标为 legacy。历史存档使用自身保存的长度，不用最新实时谱图长度裁剪旧谱图。
+
+CSV 保留原有 7 列的顺序，在其后追加 `spectrum_status`、`length_confidence`、`completion_basis`、`received_count`、`received_span`、`padding_count` 六列，并在每个道址记录上保留相同的快照判定信息。消费者不应再假定 CSV 恰有 7 列；点阵中的原始计数不因新增元数据而改变。
+
+可用候选的 `spectrum_status=complete` 仅指候选范围连续覆盖，不是硬件总长度确认。1024/2048 道在请求窗口或上传轮次结束时为 `inferred`；4096 道无填充时为 `observed/max_bound`；合法末包填充候选为 `inferred/padding_candidate`。`received_count` 记录候选点数，`received_span` 保留线上片段覆盖跨度，`padding_count` 记录被判为末包填充的数量。读取与导出时必须同时解释这些字段，不能单独把 `complete` 当成“已排除尾片丢失”。
 
 ## 8. 始终可用的按钮
 

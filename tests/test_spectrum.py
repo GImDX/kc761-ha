@@ -41,7 +41,10 @@ class SpectrumSnapshotTests(unittest.TestCase):
         self.assertEqual(attributes["points"][7], [7, 3.5, 7])
         csv_text = value.to_csv()
         self.assertTrue(csv_text.startswith("source,channel_name,acquired_at"))
-        self.assertIn(",2047,1023.50000000,2047\r\n", csv_text)
+        self.assertIn(
+            ",2047,1023.50000000,2047,complete,observed,max_bound,2048,2048,0\r\n",
+            csv_text,
+        )
         restored = SpectrumSnapshot.from_storage(value.to_storage())
         self.assertEqual(restored, value)
 
@@ -115,6 +118,48 @@ class SpectrumSnapshotTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SpectrumSnapshot.from_storage(mismatch)
 
+    def test_inferred_metadata_and_legacy_archive_provenance(self) -> None:
+        counts = (0xFFFF,) + tuple(range(1, 2048))
+        value = SpectrumSnapshot.create(
+            source=0,
+            acquired_at=datetime(2026, 8, 21, 0, 0, tzinfo=UTC),
+            accumulation_seconds=12,
+            counts=counts,
+            energy_kev=tuple(channel * 0.5 for channel in range(2048)),
+            segment_count=5,
+            calibration_profile="factory:2",
+            spectrum_status="complete",
+            length_confidence="inferred",
+            completion_basis="padding_candidate",
+            received_count=2048,
+            received_span=2056,
+            padding_count=8,
+        )
+        metadata = value.metadata()
+        self.assertEqual(metadata["point_count"], 2048)
+        self.assertEqual(metadata["length_confidence"], "inferred")
+        self.assertEqual(metadata["completion_basis"], "padding_candidate")
+        self.assertEqual(metadata["received_span"], 2056)
+        self.assertEqual(metadata["padding_count"], 8)
+        self.assertEqual(value.to_storage()["counts"][0], 0xFFFF)
+
+        legacy = value.to_storage()
+        for key in (
+            "spectrum_status",
+            "length_confidence",
+            "completion_basis",
+            "received_count",
+            "received_span",
+            "padding_count",
+        ):
+            legacy.pop(key)
+        restored = SpectrumSnapshot.from_storage(legacy)
+        self.assertEqual(restored.length_confidence, "legacy")
+        self.assertEqual(restored.completion_basis, "legacy")
+        self.assertEqual(restored.received_count, 2048)
+        self.assertEqual(restored.received_span, 2048)
+        self.assertEqual(restored.counts[0], 0xFFFF)
+
     def test_storage_validation_and_optional_accumulation(self) -> None:
         value = snapshot()
         invalid_source = value.to_storage()
@@ -141,7 +186,7 @@ class SpectrumSnapshotTests(unittest.TestCase):
             segment_count=value.segment_count,
             calibration_profile=value.calibration_profile,
         )
-        self.assertIn(",,0,0.00000000,0\r\n", optional.to_csv())
+        self.assertIn(",,0,0.00000000,0,complete,observed,max_bound,2048,2048,0\r\n", optional.to_csv())
 
 
 class SpectrumArchiveTests(unittest.TestCase):

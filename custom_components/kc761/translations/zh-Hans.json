@@ -70,17 +70,19 @@
         "data": {
           "status_interval": "状态轮询间隔（秒）",
           "info_interval": "设备信息轮询间隔（秒）",
-          "create_raw_entities": "创建高频原始读数实体",
+          "create_raw_entities": "创建原始读数实体（每个已安装通道 3 个）",
           "dose_display_unit": "剂量显示实体（原始 mGy/mSv 或微单位伴随实体 µGy/µSv）",
-          "gamma_spectrum_channels": "Gamma 谱图道数",
-          "neutron_spectrum_channels": "中子谱图道数",
-          "pin_spectrum_channels": "PIN 谱图道数",
-          "enable_device_controls": "启用尚未完成实机验收的设备控制",
-          "enable_destructive_actions": "启用破坏性清空操作（还需启用设备控制）",
+          "enable_device_controls": "启用设备控制",
+          "enable_destructive_actions": "启用清除辐射统计数据",
           "time_sync_enabled": "启用定时同步设备时间",
           "time_sync_interval": "设备时间同步间隔（小时）",
           "spectrum_save_enabled": "启用定时保存谱图",
           "spectrum_save_interval": "谱图保存周期（分钟）"
+        },
+        "data_description": {
+          "create_raw_entities": "为每个已安装通道额外创建 3 个传感器：原始计数率、原始剂量率、原始剂量当量率。",
+          "enable_device_controls": "启用设备写控制。设备写入行为尚未完成实机验收，默认关闭。",
+          "enable_destructive_actions": "允许清除辐射统计数据；必须同时启用“启用设备控制”，只有两个开关都启用时才会生效。"
         }
       }
     }

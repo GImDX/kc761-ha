@@ -16,6 +16,13 @@ from tempfile import mkstemp
 from threading import RLock
 from typing import Any
 
+from .const import (
+    SPECTRUM_COMPLETION_BASIS_LEGACY,
+    SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
+    SPECTRUM_LENGTH_CONFIDENCE_LEGACY,
+    SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
+    SPECTRUM_STATUS_COMPLETE,
+)
 from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNTS
 
 _SAFE_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-2]-[0-9a-f]{12}$")
@@ -23,6 +30,18 @@ _ARCHIVE_SUFFIX = ".json.gz"
 _INDEX_FILENAME = ".metadata.json"
 _INDEX_VERSION = 1
 _ARCHIVE_ERRORS = (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError)
+
+
+def _legacy_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Add explicit legacy provenance to pre-rc7 archive index entries."""
+    normalized = dict(metadata)
+    normalized.setdefault("spectrum_status", SPECTRUM_STATUS_COMPLETE)
+    normalized.setdefault("length_confidence", SPECTRUM_LENGTH_CONFIDENCE_LEGACY)
+    normalized.setdefault("completion_basis", SPECTRUM_COMPLETION_BASIS_LEGACY)
+    normalized.setdefault("received_count", normalized.get("point_count"))
+    normalized.setdefault("received_span", normalized.get("point_count"))
+    normalized.setdefault("padding_count", 0)
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +56,12 @@ class SpectrumSnapshot:
     energy_kev: tuple[float, ...]
     segment_count: int
     calibration_profile: str
+    spectrum_status: str = SPECTRUM_STATUS_COMPLETE
+    length_confidence: str = SPECTRUM_LENGTH_CONFIDENCE_OBSERVED
+    completion_basis: str = SPECTRUM_COMPLETION_BASIS_MAX_BOUND
+    received_count: int | None = None
+    received_span: int | None = None
+    padding_count: int = 0
     _total_counts: int = field(init=False, repr=False, compare=False)
     _metadata: dict[str, Any] = field(init=False, repr=False, compare=False)
     _entity_attributes: dict[str, Any] = field(init=False, repr=False, compare=False)
@@ -44,6 +69,8 @@ class SpectrumSnapshot:
     def __post_init__(self) -> None:
         """Build immutable-snapshot payloads once instead of per state update."""
         total_counts = sum(self.counts)
+        received_count = len(self.counts) if self.received_count is None else self.received_count
+        received_span = len(self.counts) if self.received_span is None else self.received_span
         metadata = {
             "snapshot_id": self.snapshot_id,
             "source": self.source,
@@ -54,11 +81,23 @@ class SpectrumSnapshot:
             "total_counts": total_counts,
             "segment_count": self.segment_count,
             "calibration_profile": self.calibration_profile,
+            "spectrum_status": self.spectrum_status,
+            "length_confidence": self.length_confidence,
+            "completion_basis": self.completion_basis,
+            "received_count": received_count,
+            "received_span": received_span,
+            "padding_count": self.padding_count,
         }
         points = [
             [channel, round(self.energy_kev[channel], 8), self.counts[channel]]
             for channel in range(len(self.counts))
         ]
+        # Persist the effective values on the immutable object as well as in
+        # the derived metadata.  This keeps a newly-created snapshot equal to
+        # the same snapshot after a storage round-trip where the lengths are
+        # explicitly present.
+        object.__setattr__(self, "received_count", received_count)
+        object.__setattr__(self, "received_span", received_span)
         object.__setattr__(self, "_total_counts", total_counts)
         object.__setattr__(self, "_metadata", metadata)
         object.__setattr__(self, "_entity_attributes", {**metadata, "points": points})
@@ -74,6 +113,12 @@ class SpectrumSnapshot:
         energy_kev: tuple[float, ...],
         segment_count: int,
         calibration_profile: str,
+        spectrum_status: str = SPECTRUM_STATUS_COMPLETE,
+        length_confidence: str = SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
+        completion_basis: str = SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
+        received_count: int | None = None,
+        received_span: int | None = None,
+        padding_count: int = 0,
     ) -> SpectrumSnapshot:
         """Validate fields and create a content-addressed archive identifier."""
         if not 0 <= source <= 2:
@@ -100,6 +145,12 @@ class SpectrumSnapshot:
             energy_kev=energy_kev,
             segment_count=segment_count,
             calibration_profile=calibration_profile,
+            spectrum_status=spectrum_status,
+            length_confidence=length_confidence,
+            completion_basis=completion_basis,
+            received_count=received_count,
+            received_span=received_span,
+            padding_count=padding_count,
         )
 
     @property
@@ -158,6 +209,16 @@ class SpectrumSnapshot:
             energy_kev=energy_kev,
             segment_count=int(value["segment_count"]),
             calibration_profile=str(value["calibration_profile"]),
+            spectrum_status=str(value.get("spectrum_status", SPECTRUM_STATUS_COMPLETE)),
+            length_confidence=str(
+                value.get("length_confidence", SPECTRUM_LENGTH_CONFIDENCE_LEGACY)
+            ),
+            completion_basis=str(value.get("completion_basis", SPECTRUM_COMPLETION_BASIS_LEGACY)),
+            received_count=(
+                None if value.get("received_count") is None else int(value["received_count"])
+            ),
+            received_span=(None if value.get("received_span") is None else int(value["received_span"])),
+            padding_count=int(value.get("padding_count", 0)),
         )
         return snapshot
 
@@ -174,6 +235,12 @@ class SpectrumSnapshot:
                 "channel_address",
                 "energy_kev",
                 "counts",
+                "spectrum_status",
+                "length_confidence",
+                "completion_basis",
+                "received_count",
+                "received_span",
+                "padding_count",
             )
         )
         acquired_at = self.acquired_at.isoformat()
@@ -187,6 +254,12 @@ class SpectrumSnapshot:
                     channel,
                     f"{energy:.8f}",
                     counts,
+                    self.spectrum_status,
+                    self.length_confidence,
+                    self.completion_basis,
+                    self.received_count if self.received_count is not None else len(self.counts),
+                    self.received_span if self.received_span is not None else len(self.counts),
+                    self.padding_count,
                 )
             )
         return output.getvalue()
@@ -238,7 +311,10 @@ class SpectrumArchive:
             changed = self._refresh_index(index)
             if changed or self._index_dirty:
                 self._persist_index(index)
-            return [dict(index[snapshot_id]["metadata"]) for snapshot_id in sorted(index, reverse=True)]
+            return [
+                _legacy_metadata(index[snapshot_id]["metadata"])
+                for snapshot_id in sorted(index, reverse=True)
+            ]
 
     def load(self, snapshot_id: str) -> SpectrumSnapshot:
         with self._lock:
@@ -288,7 +364,10 @@ class SpectrumArchive:
         for snapshot_id, entry in entries.items():
             if not isinstance(snapshot_id, str) or not self._valid_index_entry(snapshot_id, entry):
                 return None
-            normalized[snapshot_id] = entry
+            normalized[snapshot_id] = {
+                **entry,
+                "metadata": _legacy_metadata(entry["metadata"]),
+            }
         return normalized
 
     def _rebuild_index(self) -> dict[str, dict[str, Any]]:

@@ -21,13 +21,21 @@ from ..const import (
     FLAG_STATUS_QUERY,
     FLAG_STATUS_UPLOAD,
     FLAG_STREAM_DATA,
+    MAX_SPECTRUM_CHANNEL_COUNT,
+    MAX_SPECTRUM_WIRE_SPAN,
     MAX_CONSECUTIVE_PROTOCOL_ERRORS,
     MAX_FRAME_LENGTH,
     READ_COMMANDS,
     REQUEST_TIMEOUT,
-    DEFAULT_SPECTRUM_CHANNEL_COUNTS,
     SPECTRUM_CHANNEL_COUNT_OPTIONS,
     SPECTRUM_CHANNEL_COUNT,
+    SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
+    SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE,
+    SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW,
+    SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY,
+    SPECTRUM_LENGTH_CONFIDENCE_INFERRED,
+    SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
+    SPECTRUM_STATUS_COMPLETE,
 )
 from .codec import (
     DecodedFrame,
@@ -59,6 +67,70 @@ QUERY_RESPONSE_FLAGS = frozenset(
 PUSH_FLAGS = frozenset({FLAG_MC_DATA_UPLOAD, FLAG_STATUS_UPLOAD, FLAG_STREAM_DATA})
 
 
+def _finalize_spectrum_buffer(
+    values: list[int | None],
+    *,
+    source: int,
+    segment_count: int,
+    source_flag: int,
+    padding_channels: set[int],
+    completion_basis: str,
+) -> SpectrumData | None:
+    """Return a contiguous bounded result without inventing missing bins.
+
+    The protocol has no total-channel field.  A legal trailing 0xFFFF pattern
+    is therefore only a candidate boundary; it is never treated as proof that
+    a real count was padding.  The caller records the resulting length as
+    inferred unless the 4096-channel safety bound itself was reached.
+    """
+    first_gap = next((index for index, value in enumerate(values) if value is None), len(values))
+    if first_gap == 0:
+        return None
+    if any(value is not None for value in values[first_gap:]):
+        # A hole in the received span cannot be represented as a dense
+        # SpectrumSnapshot.  Do not zero-fill it or publish a partial array.
+        return None
+
+    wire_end = first_gap
+    candidate = wire_end
+    padding_count = 0
+    basis = completion_basis
+    if candidate not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
+        for supported in reversed(SPECTRUM_CHANNEL_COUNT_OPTIONS):
+            if supported >= candidate:
+                continue
+            suffix = range(supported, candidate)
+            if all(index in padding_channels for index in suffix):
+                candidate = supported
+                padding_count = wire_end - supported
+                basis = SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE
+                break
+    if candidate not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
+        return None
+    if any(values[index] is None for index in range(candidate)):
+        return None
+
+    observed_max = candidate == MAX_SPECTRUM_CHANNEL_COUNT and padding_count == 0
+    return SpectrumData(
+        source=source,
+        counts=tuple(int(values[index]) for index in range(candidate)),
+        segment_count=segment_count,
+        source_flag=source_flag,
+        spectrum_status=SPECTRUM_STATUS_COMPLETE,
+        length_confidence=(
+            SPECTRUM_LENGTH_CONFIDENCE_OBSERVED
+            if observed_max
+            else SPECTRUM_LENGTH_CONFIDENCE_INFERRED
+        ),
+        completion_basis=(
+            SPECTRUM_COMPLETION_BASIS_MAX_BOUND if observed_max else basis
+        ),
+        received_count=candidate,
+        received_span=wire_end,
+        padding_count=padding_count,
+    )
+
+
 @dataclass(slots=True)
 class PendingTransaction:
     """One serialized transaction, optionally collecting spectrum fragments."""
@@ -68,81 +140,136 @@ class PendingTransaction:
     future: asyncio.Future[DecodedFrame | SpectrumData]
     spectrum_source: int | None = None
     spectrum_channel_count: int = SPECTRUM_CHANNEL_COUNT
+    adaptive_spectrum: bool = False
     spectrum_counts: list[int | None] = field(
         default_factory=lambda: [None] * SPECTRUM_CHANNEL_COUNT
     )
     spectrum_filled: int = 0
     spectrum_segments: int = 0
+    padding_channels: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.command == CMD_GET_MC_DATA:
-            if self.spectrum_channel_count not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
+            if self.adaptive_spectrum:
+                self.spectrum_channel_count = MAX_SPECTRUM_WIRE_SPAN
+            elif self.spectrum_channel_count not in SPECTRUM_CHANNEL_COUNT_OPTIONS:
                 raise ValueError("unsupported spectrum channel count")
             self.spectrum_counts = [None] * self.spectrum_channel_count
 
     def add_spectrum_segment(self, segment: SpectrumSegment) -> SpectrumData | None:
-        """Add a fragment and return a complete fixed-size KC761x spectrum."""
+        """Add one fragment, finalizing only after a bound or window boundary.
+
+        A 4096-bin prefix is not emitted immediately: N=228/N=86 packet
+        layouts may legally append a bounded padding suffix.  Waiting until
+        the request window (or until such a suffix arrives) preserves that
+        evidence without imposing an unbounded wait.
+        """
         if self.spectrum_source is None or segment.source != self.spectrum_source:
             raise TransactionError("spectrum source does not match request")
-        if segment.offset >= self.spectrum_channel_count:
+        if segment.offset < 0 or segment.offset >= self.spectrum_channel_count:
             raise TransactionError("spectrum segment starts outside supported range")
         if segment.offset + len(segment.counts) > self.spectrum_channel_count:
             raise TransactionError("spectrum segment exceeds configured channel count")
-        self.spectrum_segments += 1
+        if not segment.counts:
+            raise TransactionError("spectrum segment is empty")
+        added_new_channel = False
         for relative_index, count in enumerate(segment.counts):
             channel = segment.offset + relative_index
             existing = self.spectrum_counts[channel]
             if existing is None:
                 self.spectrum_counts[channel] = count
                 self.spectrum_filled += 1
+                added_new_channel = True
+                if count == 0xFFFF * segment.ratio:
+                    self.padding_channels.add(channel)
             elif existing != count:
                 raise TransactionError("overlapping spectrum fragments disagree")
-        if self.spectrum_filled < self.spectrum_channel_count:
+        if added_new_channel:
+            self.spectrum_segments += 1
+        if not self.adaptive_spectrum:
+            if self.spectrum_filled < self.spectrum_channel_count:
+                return None
+            return SpectrumData(
+                source=self.spectrum_source,
+                counts=tuple(int(count) for count in self.spectrum_counts),
+                segment_count=self.spectrum_segments,
+                source_flag=FLAG_MC_DATA_QUERY,
+            )
+        if self.spectrum_filled <= MAX_SPECTRUM_CHANNEL_COUNT:
             return None
-        return SpectrumData(
+        result = _finalize_spectrum_buffer(
+            self.spectrum_counts,
             source=self.spectrum_source,
-            counts=tuple(int(count) for count in self.spectrum_counts),
             segment_count=self.spectrum_segments,
             source_flag=FLAG_MC_DATA_QUERY,
+            padding_channels=self.padding_channels,
+            completion_basis=SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
+        )
+        if result is None:
+            raise TransactionError("spectrum reached bound with a missing channel")
+        return result
+
+    def finish_spectrum_window(self) -> SpectrumData | None:
+        """Finalize an adaptive A0 response at the bounded request window."""
+        if not self.adaptive_spectrum or self.spectrum_source is None:
+            return None
+        return _finalize_spectrum_buffer(
+            self.spectrum_counts,
+            source=self.spectrum_source,
+            segment_count=self.spectrum_segments,
+            source_flag=FLAG_MC_DATA_QUERY,
+            padding_channels=self.padding_channels,
+            completion_basis=SPECTRUM_COMPLETION_BASIS_REQUEST_WINDOW,
         )
 
 
 @dataclass(slots=True)
 class SpectrumUploadAssembler:
-    """Bounded assembler for one A3/A1 automatic-upload spectrum round."""
+    """Bounded assembler for one A3/A1 automatic-upload spectrum round.
 
-    channel_counts: tuple[int, int, int] = DEFAULT_SPECTRUM_CHANNEL_COUNTS
-    channel_count: int = field(init=False, default=SPECTRUM_CHANNEL_COUNT)
+    The retained ``channel_counts`` argument is compatibility-only.  Runtime
+    target lengths are discovered from the current round and are never forced
+    by an OptionsFlow value.
+    """
+
+    channel_counts: tuple[int, int, int] | None = None
+    channel_count: int = field(init=False, default=MAX_SPECTRUM_WIRE_SPAN)
     source: int | None = None
     counts: list[int | None] = field(default_factory=list)
     segment_count: int = 0
     filled: int = 0
     complete: bool = False
+    padding_channels: set[int] = field(default_factory=set)
+    round_id: int = 0
+    last_result: SpectrumData | None = None
+    last_issue: str | None = None
 
     def __post_init__(self) -> None:
-        if len(self.channel_counts) != 3 or any(
-            value not in SPECTRUM_CHANNEL_COUNT_OPTIONS for value in self.channel_counts
-        ):
-            raise ValueError("unsupported spectrum channel count")
-        self.channel_count = self.channel_counts[1]
+        # Accept old constructor arguments so existing callers can migrate,
+        # but intentionally do not use them as a target length.
+        if self.channel_counts is not None and len(self.channel_counts) != 3:
+            raise ValueError("spectrum channel counts must contain three entries")
+        self.channel_count = MAX_SPECTRUM_WIRE_SPAN
         self.counts = [None] * self.channel_count
 
-    def begin_round(self, source: int) -> None:
-        """Start a new round at the A3 boundary and discard older fragments."""
+    def begin_round(self, source: int) -> SpectrumData | None:
+        """Close the prior A3 round, then start a new source-isolated round."""
+        previous = self.finish_round()
         self.reset()
+        self.round_id += 1
         if 0 <= source <= 2:
             self.source = source
-            self.channel_count = self.channel_counts[source]
-            self.counts = [None] * self.channel_count
+        return previous
 
     def reset(self) -> None:
         """Discard all partial data without retaining an unbounded fragment log."""
         self.source = None
-        self.channel_count = self.channel_counts[1]
+        self.channel_count = MAX_SPECTRUM_WIRE_SPAN
         self.counts = [None] * self.channel_count
         self.segment_count = 0
         self.filled = 0
         self.complete = False
+        self.padding_channels.clear()
 
     def add(self, segment: SpectrumSegment) -> SpectrumData | None:
         """Add one A1 segment, tolerating reordering and exact duplicates."""
@@ -151,9 +278,15 @@ class SpectrumUploadAssembler:
         if segment.source_flag != FLAG_MC_DATA_UPLOAD or segment.source != self.source:
             return None
         if segment.offset < 0 or segment.offset >= self.channel_count:
+            self.last_issue = "segment_out_of_bounds"
             self.reset()
             return None
         if segment.offset + len(segment.counts) > self.channel_count:
+            self.last_issue = "segment_out_of_bounds"
+            self.reset()
+            return None
+        if not segment.counts:
+            self.last_issue = "empty_segment"
             self.reset()
             return None
         end = segment.offset + len(segment.counts)
@@ -163,6 +296,7 @@ class SpectrumUploadAssembler:
             existing = self.counts[channel]
             incoming = segment.counts[channel - segment.offset]
             if existing is not None and existing != incoming:
+                self.last_issue = "overlapping_segment_conflict"
                 self.reset()
                 return None
         added_new_channel = False
@@ -171,17 +305,61 @@ class SpectrumUploadAssembler:
                 added_new_channel = True
                 self.counts[channel] = segment.counts[channel - segment.offset]
                 self.filled += 1
+                if segment.counts[channel - segment.offset] == 0xFFFF * segment.ratio:
+                    self.padding_channels.add(channel)
         if added_new_channel:
             self.segment_count += 1
-        if self.filled < self.channel_count:
+        if self.filled <= MAX_SPECTRUM_CHANNEL_COUNT:
             return None
-        self.complete = True
-        return SpectrumData(
+        result = _finalize_spectrum_buffer(
+            self.counts,
             source=self.source,
-            counts=tuple(int(count) for count in self.counts),
             segment_count=self.segment_count,
             source_flag=FLAG_MC_DATA_UPLOAD,
+            padding_channels=self.padding_channels,
+            completion_basis=SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
         )
+        if result is None:
+            self.last_issue = "bound_reached_with_gap"
+            self.reset()
+            return None
+        self.complete = True
+        self.last_result = result
+        return result
+
+    def finish_round(self) -> SpectrumData | None:
+        """Finalize a round at its explicit A3 boundary."""
+        if self.source is None or self.filled == 0 or self.complete:
+            return None
+        result = _finalize_spectrum_buffer(
+            self.counts,
+            source=self.source,
+            segment_count=self.segment_count,
+            source_flag=FLAG_MC_DATA_UPLOAD,
+            padding_channels=self.padding_channels,
+            completion_basis=SPECTRUM_COMPLETION_BASIS_ROUND_BOUNDARY,
+        )
+        if result is None:
+            self.last_issue = "round_incomplete_or_noncontiguous"
+            return None
+        self.last_result = result
+        self.complete = True
+        return result
+
+    def state(self) -> dict[str, int | str | None]:
+        """Return bounded assembler state for diagnostics."""
+        span = next(
+            (index for index in range(len(self.counts) - 1, -1, -1) if self.counts[index] is not None),
+            -1,
+        )
+        return {
+            "round_id": self.round_id,
+            "source": self.source,
+            "filled": self.filled,
+            "received_span": span + 1,
+            "segment_count": self.segment_count,
+            "last_issue": self.last_issue,
+        }
 
 
 def _asyncio_task_creator(coroutine: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
@@ -200,18 +378,18 @@ class KC761Client:
         request_timeout: float = REQUEST_TIMEOUT,
         on_push: PushCallback | None = None,
         task_creator: TaskCreator = _asyncio_task_creator,
-        spectrum_channel_counts: tuple[int, int, int] = DEFAULT_SPECTRUM_CHANNEL_COUNTS,
+        spectrum_channel_counts: tuple[int, int, int] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
         self.on_push = on_push
         self.task_creator = task_creator
-        if len(spectrum_channel_counts) != 3 or any(
-            value not in SPECTRUM_CHANNEL_COUNT_OPTIONS for value in spectrum_channel_counts
-        ):
-            raise ValueError("unsupported spectrum channel count")
-        self.spectrum_channel_counts = spectrum_channel_counts
+        if spectrum_channel_counts is not None and len(spectrum_channel_counts) != 3:
+            raise ValueError("spectrum channel counts must contain three entries")
+        # Retain the public attribute for diagnostics/older callers, but do
+        # not use persisted values to choose the runtime target length.
+        self.spectrum_channel_counts = (MAX_SPECTRUM_CHANNEL_COUNT,) * 3
         self.transport: Transport = transport or TcpTransport(host, port)
         self.parser = FrameParser(max_frame_length=MAX_FRAME_LENGTH)
         self._reader_task: asyncio.Task[None] | None = None
@@ -292,7 +470,7 @@ class KC761Client:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[DecodedFrame | SpectrumData] = loop.create_future()
         channel_count = (
-            self.spectrum_channel_counts[source]
+            MAX_SPECTRUM_WIRE_SPAN
             if command == CMD_GET_MC_DATA and source is not None
             else SPECTRUM_CHANNEL_COUNT
         )
@@ -302,11 +480,17 @@ class KC761Client:
             future,
             source,
             channel_count,
+            command == CMD_GET_MC_DATA,
         )
         try:
             await self.transport.async_write(encode_read_request(sync, command, source=source))
-            return await asyncio.wait_for(future, self.request_timeout)
+            return await asyncio.wait_for(asyncio.shield(future), self.request_timeout)
         except TimeoutError as err:
+            if command == CMD_GET_MC_DATA:
+                adaptive_result = self._pending[sync].finish_spectrum_window()
+                if adaptive_result is not None:
+                    self.responses += 1
+                    return adaptive_result
             await self.async_close()
             raise TimeoutError(f"KC761 command {command:#x} timed out") from err
         finally:

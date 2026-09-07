@@ -70,17 +70,19 @@
         "data": {
           "status_interval": "Status polling interval (seconds)",
           "info_interval": "Device information polling interval (seconds)",
-          "create_raw_entities": "Create high-frequency raw reading entities",
+          "create_raw_entities": "Create raw reading entities (3 per installed channel)",
           "dose_display_unit": "Dose display entities (raw mGy/mSv or micro companions µGy/µSv)",
-          "gamma_spectrum_channels": "Gamma spectrum channel count",
-          "neutron_spectrum_channels": "Neutron spectrum channel count",
-          "pin_spectrum_channels": "PIN spectrum channel count",
-          "enable_device_controls": "Enable hardware-unverified device controls",
-          "enable_destructive_actions": "Enable destructive clear actions (also requires device controls)",
+          "enable_device_controls": "Enable device controls",
+          "enable_destructive_actions": "Enable clearing radiation statistics",
           "time_sync_enabled": "Enable scheduled device time synchronization",
           "time_sync_interval": "Time synchronization interval (hours)",
           "spectrum_save_enabled": "Enable scheduled spectrum saving",
           "spectrum_save_interval": "Spectrum saving interval (minutes)"
+        },
+        "data_description": {
+          "create_raw_entities": "Creates three additional sensors for each installed channel: raw count rate, raw dose rate, and raw dose equivalent rate.",
+          "enable_device_controls": "Enables device write controls. Hardware write behavior is not yet verified and is disabled by default.",
+          "enable_destructive_actions": "Allows clearing radiation statistics. This requires Enable device controls and remains disabled unless both switches are enabled."
         }
       }
     }

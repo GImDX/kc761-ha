@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from ..const import (
+    SPECTRUM_COMPLETION_BASIS_MAX_BOUND,
+    SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
+    SPECTRUM_STATUS_COMPLETE,
+)
+
 
 class ProtocolError(ValueError):
     """Base class for malformed or unsupported protocol data."""
@@ -136,12 +142,24 @@ class SpectrumSegment:
 
 @dataclass(frozen=True, slots=True)
 class SpectrumData:
-    """One complete spectrum reconstructed from bounded A0/A1 fragments."""
+    """One bounded spectrum result reconstructed from A0/A1 fragments.
+
+    ``length_confidence`` deliberately separates a usable contiguous snapshot
+    from proof that the device's physical spectrum has that many channels.
+    The protocol has no total-channel field, so 1024/2048-point results may be
+    usable but inferred from the bounded request/round window.
+    """
 
     source: int
     counts: tuple[int, ...]
     segment_count: int
     source_flag: int
+    spectrum_status: str = SPECTRUM_STATUS_COMPLETE
+    length_confidence: str = SPECTRUM_LENGTH_CONFIDENCE_OBSERVED
+    completion_basis: str = SPECTRUM_COMPLETION_BASIS_MAX_BOUND
+    received_count: int | None = None
+    received_span: int | None = None
+    padding_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
