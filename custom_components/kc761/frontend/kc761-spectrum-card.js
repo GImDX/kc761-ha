@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-rc.7";
+const CARD_VERSION = "0.2.0-rc.9";
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const SUPPORTED_CHANNEL_COUNTS = Object.freeze([1024, 2048, 4096]);
 const MAX_CHANNEL = 2047;

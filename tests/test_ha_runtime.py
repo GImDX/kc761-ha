@@ -44,13 +44,11 @@ from custom_components.kc761.const import (  # noqa: E402
     CONF_BLE_SERVICE_UUID,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
-    CONF_DOSE_DISPLAY_UNIT,
     CONF_GAMMA_SPECTRUM_CHANNELS,
     CONF_NEUTRON_SPECTRUM_CHANNELS,
     CONF_PIN_SPECTRUM_CHANNELS,
     CONF_TRANSPORT,
     DEFAULT_HOST,
-    DOSE_DISPLAY_UNIT_MICRO,
     DOMAIN,
     TRANSPORT_BLE,
     TRANSPORT_TCP,
@@ -245,7 +243,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.7",
+            "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9",
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
@@ -650,6 +648,10 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
         options.handler = entry.entry_id
         options.async_show_form = MagicMock(return_value={"type": "form"})
         assert (await options.async_step_init())["type"] == "form"
+        option_schema = options.async_show_form.call_args.kwargs["data_schema"]
+        assert "dose_display_unit" not in {
+            getattr(key, "key", key) for key in option_schema.schema
+        }
         options.async_create_entry = MagicMock(return_value={"type": "create_entry"})
         option_values = {
             "status_interval": 5,
@@ -661,7 +663,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
             "time_sync_interval": 24,
             "spectrum_save_enabled": True,
             "spectrum_save_interval": 60,
-            CONF_DOSE_DISPLAY_UNIT: "raw",
+            "dose_display_unit": "micro",
             CONF_GAMMA_SPECTRUM_CHANNELS: 2048,
             CONF_NEUTRON_SPECTRUM_CHANNELS: 2048,
             CONF_PIN_SPECTRUM_CHANNELS: 2048,
@@ -675,6 +677,7 @@ def test_config_flow_success_error_duplicate_reconfigure_and_options() -> None:
                 CONF_GAMMA_SPECTRUM_CHANNELS,
                 CONF_NEUTRON_SPECTRUM_CHANNELS,
                 CONF_PIN_SPECTRUM_CHANNELS,
+                "dose_display_unit",
             }
         }
         options.async_create_entry.assert_called_once_with(title="", data=expected_options)
@@ -2058,135 +2061,140 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
     run(exercise())
 
 
-def test_micro_companions_keep_raw_entities_and_fixed_units() -> None:
+class _FakeEntityRegistry:
+    """Minimal registry snapshot used to verify legacy IDs are untouched."""
+
+    def __init__(self, unique_ids: set[str]) -> None:
+        self.unique_ids = unique_ids
+        self.async_update_entity = MagicMock()
+        self.async_remove = MagicMock()
+
+
+def _collect_sensor_entities(
+    *,
+    create_raw_entities: bool,
+    registry_unique_ids: set[str],
+    options: dict | None = None,
+) -> tuple[dict[str, object], _FakeEntityRegistry, MagicMock]:
+    info = make_info((2, 8, 5))
+    coordinator = MagicMock()
+    coordinator.device_info = info
+    coordinator.snapshot = coordinator_module.KC761Snapshot(
+        info,
+        make_status(),
+        datetime(2025, 1, 1, 0, 0, 10, tzinfo=UTC),
+    )
+    coordinator.hardware_verified = False
+    coordinator.create_raw_entities = create_raw_entities
+    coordinator.calibration = make_calibration()
+    coordinator.latest_spectrum = None
+    coordinator.device_controls_enabled = False
+    coordinator.destructive_actions_enabled = False
+    coordinator.async_add_listener = MagicMock()
+    entry = make_entry(options=options)
+    entry.runtime_data = coordinator
+    registry = _FakeEntityRegistry(registry_unique_ids)
+    entities: list[object] = []
+
     async def exercise() -> None:
-        info = make_info((2, 8, 5))
-        status = make_status()
-        coordinator = MagicMock()
-        coordinator.device_info = info
-        coordinator.snapshot = coordinator_module.KC761Snapshot(
-            info,
-            status,
-            datetime(2025, 1, 1, 0, 0, 10, tzinfo=UTC),
-        )
-        coordinator.hardware_verified = False
-        coordinator.create_raw_entities = True
-        coordinator.dose_display_unit = DOSE_DISPLAY_UNIT_MICRO
-        coordinator.calibration = make_calibration()
-        coordinator.latest_spectrum = None
-        coordinator.device_controls_enabled = False
-        coordinator.destructive_actions_enabled = False
-        coordinator.async_add_listener = MagicMock()
-        entry = make_entry()
-        entry.runtime_data = coordinator
         with patch.object(
             sensor_module.CoordinatorEntity,
             "__init__",
             lambda self, value: setattr(self, "coordinator", value),
         ):
-            entities = []
             await sensor_module.async_setup_entry(
                 MagicMock(), entry, lambda values: entities.extend(values)
             )
-        assert len(entities) == 103
-        by_key = {
+
+    run(exercise())
+    return (
+        {
             entity.entity_description.key: entity
             for entity in entities
             if hasattr(entity, "entity_description")
-        }
-        assert (
-            by_key["gamma_avg_dose_rate"].entity_description.native_unit_of_measurement
-            == "mGy/h"
-        )
-        assert (
-            by_key["gamma_avg_dose_rate_micro"].entity_description.native_unit_of_measurement
-            == "µGy/h"
-        )
-        assert by_key["gamma_avg_dose_rate"]._attr_unique_id.endswith("_gamma_avg_dose_rate")
-        assert by_key["gamma_avg_dose_rate_micro"]._attr_unique_id.endswith(
-            "_gamma_avg_dose_rate_micro"
-        )
-        assert by_key["gamma_avg_dose_rate"].native_value == pytest.approx(0.01, abs=1e-4)
-        assert by_key["gamma_avg_dose_rate_micro"].native_value == pytest.approx(10.0, abs=1e-2)
-        assert by_key["gamma_raw_dose_equivalent_rate"].native_value == pytest.approx(0.02, abs=1e-4)
-        assert by_key["gamma_raw_dose_equivalent_rate_micro"].native_value == pytest.approx(20.0, abs=1e-2)
-        assert by_key["gamma_cumulative_dose"].native_value == 1.0
-        assert by_key["gamma_cumulative_dose_micro"].native_value == 1000.0
-        assert by_key["gamma_cumulative_dose_equivalent"].native_value == 2.0
-        assert by_key["gamma_cumulative_dose_equivalent_micro"].native_value == 2000.0
-        assert "gamma_avg_cps_micro" not in by_key
-
-    run(exercise())
+        },
+        registry,
+        coordinator,
+    )
 
 
-def test_dose_option_reload_preserves_canonical_entities_and_status_ids() -> None:
-    async def collect(dose_display_unit: str) -> tuple[dict[str, object], list[object]]:
-        info = make_info((2, 8, 5))
-        coordinator = MagicMock()
-        coordinator.device_info = info
-        coordinator.snapshot = coordinator_module.KC761Snapshot(
-            info,
-            make_status(),
-            datetime(2025, 1, 1, 0, 0, 10, tzinfo=UTC),
-        )
-        coordinator.hardware_verified = False
-        coordinator.create_raw_entities = True
-        coordinator.dose_display_unit = dose_display_unit
-        coordinator.calibration = make_calibration()
-        coordinator.latest_spectrum = None
-        coordinator.device_controls_enabled = False
-        coordinator.destructive_actions_enabled = False
-        coordinator.async_add_listener = MagicMock()
-        entry = make_entry(options={CONF_DOSE_DISPLAY_UNIT: dose_display_unit})
-        entry.runtime_data = coordinator
-        sensor_entities: list[object] = []
-        binary_entities: list[object] = []
-        with patch.object(
-            sensor_module.CoordinatorEntity,
-            "__init__",
-            lambda self, value: setattr(self, "coordinator", value),
-        ), patch.object(
-            binary_sensor_module.CoordinatorEntity,
-            "__init__",
-            lambda self, value: setattr(self, "coordinator", value),
-        ):
-            await sensor_module.async_setup_entry(
-                MagicMock(), entry, lambda values: sensor_entities.extend(values)
-            )
-            await binary_sensor_module.async_setup_entry(
-                MagicMock(), entry, lambda values: binary_entities.extend(values)
-            )
-        return (
-            {
-                entity.entity_description.key: entity
-                for entity in sensor_entities
-                if hasattr(entity, "entity_description")
-            },
-            binary_entities,
-        )
+def test_dose_option_removed_new_install_keeps_canonical_entities() -> None:
+    info = make_info((2, 8, 5))
+    by_key, registry, _coordinator = _collect_sensor_entities(
+        create_raw_entities=True,
+        registry_unique_ids=set(),
+        options={"dose_display_unit": "micro"},
+    )
+    assert not any(key.endswith("_micro") for key in by_key)
+    assert registry.async_update_entity.call_count == 0
+    for key, entity in by_key.items():
+        assert entity._attr_unique_id == f"{info.device_id}_{key}"
+    assert by_key["gamma_avg_dose_rate"].native_value == pytest.approx(0.01, abs=1e-4)
+    assert by_key["gamma_avg_dose_rate"].entity_description.native_unit_of_measurement == "mGy/h"
+    assert by_key["gamma_avg_dose_equivalent_rate"].entity_description.native_unit_of_measurement == "mSv/h"
+    assert by_key["gamma_cumulative_dose"].native_value == 1.0
+    assert by_key["gamma_cumulative_dose"].entity_description.native_unit_of_measurement == "mGy"
+    assert by_key["gamma_cumulative_dose_equivalent"].native_value == 2.0
+    assert by_key["gamma_cumulative_dose_equivalent"].entity_description.native_unit_of_measurement == "mSv"
 
-    async def exercise() -> None:
-        raw, raw_binary = await collect("raw")
-        micro, micro_binary = await collect(DOSE_DISPLAY_UNIT_MICRO)
-        canonical_keys = {
-            key for key in raw if not key.endswith("_micro")
-        }
-        assert canonical_keys <= micro.keys()
-        for key in canonical_keys:
-            assert micro[key]._attr_unique_id == raw[key]._attr_unique_id
-            assert micro[key].entity_description.native_unit_of_measurement == (
-                raw[key].entity_description.native_unit_of_measurement
-            )
-            assert micro[key].entity_description.state_class == raw[key].entity_description.state_class
-        micro_keys = {key for key in micro if key.endswith("_micro")}
-        assert micro_keys
-        assert all(key not in raw for key in micro_keys)
-        assert all(micro[key]._attr_unique_id.endswith(f"_{key}") for key in micro_keys)
-        assert [entity._attr_unique_id for entity in raw_binary] == [
-            entity._attr_unique_id for entity in micro_binary
-        ]
 
-    run(exercise())
+def test_existing_micro_registry_entities_are_not_loaded_or_mutated() -> None:
+    info = make_info((2, 8, 5))
+    micro_keys = {
+        f"{channel}_{measurement}_micro"
+        for channel in ("gamma", "neutron", "pin")
+        for measurement in (
+            "avg_dose_rate",
+            "avg_dose_equivalent_rate",
+            "raw_dose_rate",
+            "raw_dose_equivalent_rate",
+            "cumulative_dose",
+            "cumulative_dose_equivalent",
+        )
+    }
+    by_key, registry, _coordinator = _collect_sensor_entities(
+        create_raw_entities=True,
+        registry_unique_ids={f"{info.device_id}_{key}" for key in micro_keys},
+        options={"dose_display_unit": "micro"},
+    )
+    assert not micro_keys & by_key.keys()
+    assert registry.unique_ids == {
+        f"{info.device_id}_{key}" for key in micro_keys
+    }
+    assert registry.async_update_entity.call_count == 0
+    assert registry.async_remove.call_count == 0
+    assert by_key["gamma_avg_dose_rate"].native_value == pytest.approx(0.01, abs=1e-4)
+    assert by_key["gamma_avg_dose_rate"].entity_description.native_unit_of_measurement == "mGy/h"
+    assert by_key["gamma_avg_dose_equivalent_rate"].native_value == pytest.approx(0.02, abs=1e-4)
+    assert by_key["gamma_avg_dose_equivalent_rate"].entity_description.native_unit_of_measurement == "mSv/h"
+    assert by_key["gamma_cumulative_dose"].native_value == 1.0
+    assert by_key["gamma_cumulative_dose"].entity_description.native_unit_of_measurement == "mGy"
+    assert by_key["gamma_cumulative_dose_equivalent"].native_value == 2.0
+    assert by_key["gamma_cumulative_dose_equivalent"].entity_description.native_unit_of_measurement == "mSv"
+    assert "gamma_avg_cps_micro" not in by_key
+
+
+def test_raw_entities_follow_raw_option_without_micro_compatibility() -> None:
+    info = make_info((2, 8, 5))
+    raw_micro_unique_id = f"{info.device_id}_gamma_raw_dose_rate_micro"
+    disabled_by_option, registry, _coordinator = _collect_sensor_entities(
+        create_raw_entities=False,
+        registry_unique_ids={raw_micro_unique_id},
+    )
+    assert "gamma_raw_dose_rate" not in disabled_by_option
+    assert "gamma_raw_dose_rate_micro" not in disabled_by_option
+    assert registry.unique_ids == {raw_micro_unique_id}
+    assert registry.async_update_entity.call_count == 0
+    assert registry.async_remove.call_count == 0
+    enabled_by_option, registry, _coordinator = _collect_sensor_entities(
+        create_raw_entities=True,
+        registry_unique_ids={raw_micro_unique_id},
+    )
+    assert "gamma_raw_dose_rate" in enabled_by_option
+    assert "gamma_raw_dose_rate_micro" not in enabled_by_option
+    assert registry.unique_ids == {raw_micro_unique_id}
+    assert registry.async_update_entity.call_count == 0
+    assert registry.async_remove.call_count == 0
 
 
 def test_spectrum_entity_skips_unchanged_coordinator_updates() -> None:

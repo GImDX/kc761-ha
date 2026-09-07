@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -22,7 +22,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import KC761Coordinator
-from .const import DOSE_DISPLAY_UNIT_MICRO
 from .entity import kc761_device_info
 from .protocol.codec import CODEC_PROFILE
 from .protocol.models import CalibrationData, ChannelReading
@@ -40,7 +39,6 @@ class KC761SensorDescription(SensorEntityDescription):
     cumulative_key: str | None = None
     calibration_key: str | None = None
     calibration_index: int | None = None
-    micro_companion_of: str | None = None
 
 
 DEVICE_DESCRIPTIONS = (
@@ -354,36 +352,6 @@ def _channel_descriptions() -> tuple[KC761SensorDescription, ...]:
     return tuple(result)
 
 
-_MICRO_DOSE_VALUE_KEYS = frozenset(
-    {
-        "avg_dose_rate",
-        "avg_dose_equivalent_rate",
-        "raw_dose_rate",
-        "raw_dose_equivalent_rate",
-        "cumulative_dose",
-        "cumulative_dose_equivalent",
-    }
-)
-
-
-def _micro_companion_description(
-    description: KC761SensorDescription,
-) -> KC761SensorDescription | None:
-    """Build a fixed-unit companion without changing the canonical entity."""
-    if description.value_key not in _MICRO_DOSE_VALUE_KEYS:
-        return None
-    unit = description.native_unit_of_measurement
-    if unit is None or ("mGy" not in unit and "mSv" not in unit):
-        return None
-    return replace(
-        description,
-        key=f"{description.key}_micro",
-        translation_key=f"{description.translation_key}_micro",
-        native_unit_of_measurement=unit.replace("mGy", "µGy").replace("mSv", "µSv"),
-        micro_companion_of=description.key,
-    )
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -406,10 +374,6 @@ async def async_setup_entry(
                     if not coordinator.create_raw_entities:
                         continue
                 descriptions.append(description)
-                if coordinator.dose_display_unit == DOSE_DISPLAY_UNIT_MICRO:
-                    micro_description = _micro_companion_description(description)
-                    if micro_description is not None:
-                        descriptions.append(micro_description)
     entities: list[SensorEntity] = [KC761Sensor(coordinator, description) for description in descriptions]
     entities.append(KC761SpectrumSensor(coordinator))
     async_add_entities(entities)
@@ -428,14 +392,6 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         assert info is not None
         self._attr_unique_id = f"{info.device_id}_{description.key}"
         self._attr_device_info = kc761_device_info(info)
-
-    def _display_dose_value(self, value: Any) -> Any:
-        if (
-            value is not None
-            and self.entity_description.micro_companion_of is not None
-        ):
-            return value * 1000
-        return value
 
     @property
     def native_value(self) -> Any:
@@ -457,9 +413,7 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
         if self.entity_description.cumulative_key is not None:
             assert self.entity_description.channel_index is not None
             cumulative = snapshot.device_info.cumulative[self.entity_description.channel_index]
-            return self._display_dose_value(
-                getattr(cumulative, self.entity_description.cumulative_key)
-            )
+            return getattr(cumulative, self.entity_description.cumulative_key)
         if self.entity_description.channel_index is None:
             if self.entity_description.value_key == "clock_offset":
                 if snapshot.status.device_time is None:
@@ -486,7 +440,7 @@ class KC761Sensor(CoordinatorEntity[KC761Coordinator], SensorEntity):
                 return "bright" if snapshot.status.led_screen_status & 0x04 else "dim"
             return getattr(snapshot.status, self.entity_description.value_key)
         channel: ChannelReading = snapshot.status.channels[self.entity_description.channel_index]
-        return self._display_dose_value(getattr(channel, self.entity_description.value_key))
+        return getattr(channel, self.entity_description.value_key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

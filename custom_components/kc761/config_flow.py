@@ -21,7 +21,6 @@ from .const import (
     CONF_BLE_ADDRESS,
     CONF_BLE_SERVICE_UUID,
     CONF_CREATE_RAW_ENTITIES,
-    CONF_DOSE_DISPLAY_UNIT,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_INFO_INTERVAL,
@@ -31,7 +30,6 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
-    DEFAULT_DOSE_DISPLAY_UNIT,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_HOST,
@@ -43,8 +41,6 @@ from .const import (
     DEFAULT_TIME_SYNC_ENABLED,
     DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
-    DOSE_DISPLAY_UNIT_MICRO,
-    DOSE_DISPLAY_UNIT_RAW,
     MAX_INFO_INTERVAL,
     MAX_SPECTRUM_SAVE_INTERVAL,
     MAX_STATUS_INTERVAL,
@@ -375,14 +371,13 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             normalized = dict(user_input)
+            # The removed dose-display option may still be present in a
+            # caller's stale submission.  Ignore it; upgrading an entry does
+            # not rewrite its saved options.
+            normalized.pop("dose_display_unit", None)
             if not normalized.get(CONF_ENABLE_DEVICE_CONTROLS, False):
                 normalized[CONF_ENABLE_DESTRUCTIVE_ACTIONS] = False
                 normalized[CONF_TIME_SYNC_ENABLED] = False
-            if normalized.get(CONF_DOSE_DISPLAY_UNIT) not in {
-                DOSE_DISPLAY_UNIT_RAW,
-                DOSE_DISPLAY_UNIT_MICRO,
-            }:
-                normalized[CONF_DOSE_DISPLAY_UNIT] = DEFAULT_DOSE_DISPLAY_UNIT
             # These keys belonged to the pre-rc7 fixed-length assembler.  Do
             # not keep accepting them as a runtime target; old entries remain
             # loadable and diagnostics retain their values as migration data.
@@ -414,18 +409,6 @@ class KC761OptionsFlow(config_entries.OptionsFlow):
                     CONF_CREATE_RAW_ENTITIES,
                     default=options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 ): bool,
-                vol.Required(
-                    CONF_DOSE_DISPLAY_UNIT,
-                    default=options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            {"value": DOSE_DISPLAY_UNIT_RAW, "label": "Original (mGy/mSv)"},
-                            {"value": DOSE_DISPLAY_UNIT_MICRO, "label": "Micro (µGy/µSv)"},
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
                 vol.Required(
                     CONF_ENABLE_DEVICE_CONTROLS,
                     default=options.get(

@@ -16,7 +16,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
-    CONF_DOSE_DISPLAY_UNIT,
     CONF_GAMMA_SPECTRUM_CHANNELS,
     CONF_NEUTRON_SPECTRUM_CHANNELS,
     CONF_PIN_SPECTRUM_CHANNELS,
@@ -31,7 +30,6 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
-    DEFAULT_DOSE_DISPLAY_UNIT,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
@@ -42,8 +40,6 @@ from .const import (
     DEFAULT_TIME_SYNC_ENABLED,
     DEFAULT_TIME_SYNC_INTERVAL,
     DOMAIN,
-    DOSE_DISPLAY_UNIT_MICRO,
-    DOSE_DISPLAY_UNIT_RAW,
     FLAG_MC_DATA_UPLOAD,
     FLAG_STATUS_UPLOAD,
     MAX_INFO_INTERVAL,
@@ -122,12 +118,6 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             MAX_INFO_INTERVAL,
         )
         self.create_raw_entities = bool(entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES))
-        dose_display_unit = entry.options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT)
-        self.dose_display_unit = (
-            dose_display_unit
-            if dose_display_unit in (DOSE_DISPLAY_UNIT_RAW, DOSE_DISPLAY_UNIT_MICRO)
-            else DEFAULT_DOSE_DISPLAY_UNIT
-        )
         self.device_controls_enabled = bool(
             entry.options.get(
                 CONF_ENABLE_DEVICE_CONTROLS,

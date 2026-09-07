@@ -71,7 +71,6 @@
           "status_interval": "状态轮询间隔（秒）",
           "info_interval": "设备信息轮询间隔（秒）",
           "create_raw_entities": "创建原始读数实体（每个已安装通道 3 个）",
-          "dose_display_unit": "剂量显示实体（原始 mGy/mSv 或微单位伴随实体 µGy/µSv）",
           "enable_device_controls": "启用设备控制",
           "enable_destructive_actions": "启用清除辐射统计数据",
           "time_sync_enabled": "启用定时同步设备时间",

@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - allows protocol-only offline tests
 
 DOMAIN = "kc761"
 NAME = "KC761x Radiation Meter"
-VERSION = "0.2.0-rc.7"
+VERSION = "0.2.0-rc.9"
 DEFAULT_HOST = "192.168.1.127"
 DEFAULT_PORT = 7601
 CONF_TRANSPORT = "transport"
@@ -43,11 +43,6 @@ CONF_STATUS_INTERVAL = "status_interval"
 CONF_INFO_INTERVAL = "info_interval"
 CONF_CREATE_RAW_ENTITIES = "create_raw_entities"
 DEFAULT_CREATE_RAW_ENTITIES = False
-CONF_DOSE_DISPLAY_UNIT = "dose_display_unit"
-DOSE_DISPLAY_UNIT_RAW = "raw"
-DOSE_DISPLAY_UNIT_MICRO = "micro"
-DOSE_DISPLAY_UNITS = (DOSE_DISPLAY_UNIT_RAW, DOSE_DISPLAY_UNIT_MICRO)
-DEFAULT_DOSE_DISPLAY_UNIT = DOSE_DISPLAY_UNIT_RAW
 CONF_GAMMA_SPECTRUM_CHANNELS = "gamma_spectrum_channels"
 CONF_NEUTRON_SPECTRUM_CHANNELS = "neutron_spectrum_channels"
 CONF_PIN_SPECTRUM_CHANNELS = "pin_spectrum_channels"

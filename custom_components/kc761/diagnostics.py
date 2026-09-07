@@ -10,7 +10,6 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_CREATE_RAW_ENTITIES,
-    CONF_DOSE_DISPLAY_UNIT,
     CONF_ENABLE_DESTRUCTIVE_ACTIONS,
     CONF_ENABLE_DEVICE_CONTROLS,
     CONF_GAMMA_SPECTRUM_CHANNELS,
@@ -23,7 +22,6 @@ from .const import (
     CONF_TIME_SYNC_ENABLED,
     CONF_TIME_SYNC_INTERVAL,
     DEFAULT_CREATE_RAW_ENTITIES,
-    DEFAULT_DOSE_DISPLAY_UNIT,
     DEFAULT_ENABLE_DESTRUCTIVE_ACTIONS,
     DEFAULT_ENABLE_DEVICE_CONTROLS,
     DEFAULT_INFO_INTERVAL,
@@ -71,11 +69,6 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
                     "create_raw_entities",
                     entry.options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES),
                 )
-            ),
-            CONF_DOSE_DISPLAY_UNIT: getattr(
-                coordinator,
-                "dose_display_unit",
-                entry.options.get(CONF_DOSE_DISPLAY_UNIT, "raw"),
             ),
             "legacy_spectrum_channel_options": list(
                 getattr(coordinator, "legacy_spectrum_channel_counts", (None, None, None))
@@ -188,7 +181,6 @@ def _diagnostics_without_runtime(entry: ConfigEntry) -> dict[str, Any]:
             CONF_STATUS_INTERVAL: _option_int(options, CONF_STATUS_INTERVAL, DEFAULT_STATUS_INTERVAL),
             CONF_INFO_INTERVAL: _option_int(options, CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
             CONF_CREATE_RAW_ENTITIES: bool(options.get(CONF_CREATE_RAW_ENTITIES, DEFAULT_CREATE_RAW_ENTITIES)),
-            CONF_DOSE_DISPLAY_UNIT: options.get(CONF_DOSE_DISPLAY_UNIT, DEFAULT_DOSE_DISPLAY_UNIT),
             "legacy_spectrum_channel_options": list(channel_counts),
             CONF_ENABLE_DEVICE_CONTROLS: bool(
                 options.get(CONF_ENABLE_DEVICE_CONTROLS, DEFAULT_ENABLE_DEVICE_CONTROLS)

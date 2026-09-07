@@ -71,7 +71,6 @@
           "status_interval": "Status polling interval (seconds)",
           "info_interval": "Device information polling interval (seconds)",
           "create_raw_entities": "Create raw reading entities (3 per installed channel)",
-          "dose_display_unit": "Dose display entities (raw mGy/mSv or micro companions µGy/µSv)",
           "enable_device_controls": "Enable device controls",
           "enable_destructive_actions": "Enable clearing radiation statistics",
           "time_sync_enabled": "Enable scheduled device time synchronization",
