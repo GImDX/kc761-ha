@@ -12,6 +12,7 @@ import inspect
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -65,7 +66,8 @@ from custom_components.kc761.protocol.codec import (  # noqa: E402
 )
 from custom_components.kc761.protocol.framing import FrameParser  # noqa: E402
 from custom_components.kc761.protocol.models import CumulativeChannel, RawFrame, SpectrumData  # noqa: E402
-from custom_components.kc761.spectrum import SpectrumSnapshot  # noqa: E402
+from custom_components.kc761.spectrum import SpectrumArchive, SpectrumSnapshot  # noqa: E402
+from tests.test_spectrum import consistency_snapshot  # noqa: E402
 
 
 def run(coro):
@@ -1463,6 +1465,97 @@ def test_websocket_spectrum_and_confirmation_api() -> None:
     run(exercise())
 
 
+def test_supported_point_counts_survive_sensor_and_websocket_round_trips() -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        entry = make_entry()
+        info = make_info((2, 0, 0))
+        fake = FakeClient(info=info)
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=fake):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        coordinator._device_info = info
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator._archive = SpectrumArchive(Path(directory) / "spectrum")
+            entry.runtime_data = coordinator
+            entities = []
+            with patch.object(
+                sensor_module.CoordinatorEntity,
+                "__init__",
+                lambda self, value: setattr(self, "coordinator", value),
+            ):
+                await sensor_module.async_setup_entry(MagicMock(), entry, lambda values: entities.extend(values))
+            spectrum_entity = next(
+                entity for entity in entities if isinstance(entity, sensor_module.KC761SpectrumSensor)
+            )
+            hass.data[DOMAIN] = {entry.entry_id: coordinator}
+            connection = MagicMock()
+            values = [
+                consistency_snapshot(point_count, minute=index)
+                for index, point_count in enumerate((1024, 2048, 4096))
+            ]
+            for value in values:
+                coordinator._archive.save(value)
+
+            for point_count, value in zip((1024, 2048, 4096), values, strict=True):
+                first_count = point_count * 100_000 + 7
+                last_count = point_count * 100_000 + (point_count - 1) * 3 + 7
+                first_energy = point_count / 10
+                last_energy = point_count / 10 + (point_count - 1) / 4
+                coordinator._latest_spectrum = value
+                attributes = spectrum_entity.extra_state_attributes
+                assert spectrum_entity.native_value == sum(value.counts)
+                assert attributes["point_count"] == point_count
+                assert len(attributes["points"]) == point_count
+                assert attributes["points"][0] == [0, first_energy, first_count]
+                assert attributes["points"][-1] == [point_count - 1, round(last_energy, 8), last_count]
+
+                connection.reset_mock()
+                await invoke_websocket_handler(
+                    websocket_module.websocket_spectrum_list,
+                    hass,
+                    connection,
+                    {"id": point_count, "type": "kc761/spectrum/list", "entry_id": entry.entry_id},
+                )
+                listed = connection.send_result.call_args.args[1]
+                listed_value = next(item for item in listed if item["snapshot_id"] == value.snapshot_id)
+                assert listed_value["point_count"] == point_count
+                assert listed_value["total_counts"] == sum(value.counts)
+
+                connection.reset_mock()
+                await invoke_websocket_handler(
+                    websocket_module.websocket_spectrum_get,
+                    hass,
+                    connection,
+                    {"id": point_count + 1, "type": "kc761/spectrum/get", "entry_id": entry.entry_id},
+                )
+                latest = connection.send_result.call_args.args[1]
+                assert latest["point_count"] == point_count
+                assert len(latest["points"]) == point_count
+                assert latest["points"][0] == [0, first_energy, first_count]
+                assert latest["points"][-1] == [point_count - 1, round(last_energy, 8), last_count]
+
+                connection.reset_mock()
+                await invoke_websocket_handler(
+                    websocket_module.websocket_spectrum_get,
+                    hass,
+                    connection,
+                    {
+                        "id": point_count + 2,
+                        "type": "kc761/spectrum/get",
+                        "entry_id": entry.entry_id,
+                        "snapshot_id": value.snapshot_id,
+                    },
+                )
+                restored = connection.send_result.call_args.args[1]
+                assert restored["point_count"] == point_count
+                assert len(restored["points"]) == point_count
+                assert restored["points"][0] == [0, first_energy, first_count]
+                assert restored["points"][-1] == [point_count - 1, round(last_energy, 8), last_count]
+
+    run(exercise())
+
+
 def test_coordinator_background_and_validation_edges() -> None:
     async def exercise() -> None:
         hass = make_hass()
@@ -1924,6 +2017,8 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         coordinator.client = SimpleNamespace(
             connected=False,
             last_frame=RawFrame(1, 0xA2, 81, b"", b""),
+            received_frame_flags={0xA1: 9, 0xA2: 2, 0xA3: 1, 0xA4: 3},
+            client_instance_token="ephemeral-test-token",
             data_errors=2,
             consecutive_protocol_errors=1,
             responses=11,
@@ -1966,6 +2061,20 @@ def test_entities_and_diagnostics_cover_dynamic_and_unknown_values() -> None:
         assert result["connection"]["last_frame"]["flag"] == 0xA2
         assert result["connection"]["data_errors"] == 2
         assert result["connection"]["responses"] == 11
+        assert result["connection"]["received_frame_flags"] == {
+            0xA1: 9,
+            0xA2: 2,
+            0xA3: 1,
+            0xA4: 3,
+        }
+        assert result["connection"]["received_frame_flags_scope"] == "client_lifetime"
+        assert result["connection"]["received_frame_flags_basis"] == (
+            "complete_routed_frames_before_semantic_decode"
+        )
+        assert result["connection"]["client_instance_token"] == "ephemeral-test-token"
+        result["connection"]["received_frame_flags"][0xA1] = 99
+        result = await diagnostics_module.async_get_config_entry_diagnostics(MagicMock(), entry)
+        assert result["connection"]["received_frame_flags"][0xA1] == 9
         assert result["connection"]["transport"] == "ble"
         assert result["connection"]["identity_mismatches"] == 1
         assert result["framing"]["dropped_bytes"] == 7

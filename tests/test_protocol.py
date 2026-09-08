@@ -22,6 +22,7 @@ from custom_components.kc761.const import (
     FLAG_MC_DATA_UPLOAD,
     FLAG_MC_DATA_QUERY,
     FLAG_STATUS_QUERY,
+    FLAG_STATUS_UPLOAD,
     MAX_CONSECUTIVE_PROTOCOL_ERRORS,
     MAX_SPECTRUM_WIRE_SPAN,
     SPECTRUM_COMPLETION_BASIS_PADDING_CANDIDATE,
@@ -1284,6 +1285,53 @@ class ClientSimulatorTests(unittest.IsolatedAsyncioTestCase):
         await client._route_frame(RawFrame(2, 0xFE, 4, b"", b"\x02\xfe\x04\x00", known=False))
         self.assertEqual(received, ["DecodedFrame"])
         self.assertEqual(client.unhandled_frames, 1)
+
+    async def test_received_frame_flags_survive_last_frame_overwrite_and_copy(self) -> None:
+        client = KC761Client("127.0.0.1", 1)
+        a1 = FrameParser().feed(
+            build_spectrum_frame(1, source=0, offset=0, counts=(1,), upload=True)
+        )[0]
+        a3 = FrameParser().feed(build_status_frame(2, upload=True))[0]
+        bad_a2 = RawFrame(3, FLAG_STATUS_QUERY, 81, b"bad", b"bad")
+        unknown = RawFrame(4, 0xFE, 4, b"", b"\x04\xfe\x04\x00", known=False)
+
+        await client._route_frame(a1)
+        await client._route_frame(a3)
+        await client._route_frame(bad_a2)
+        await client._route_frame(unknown)
+
+        self.assertEqual(client.last_frame, unknown)
+        self.assertEqual(
+            client.received_frame_flags,
+            {FLAG_MC_DATA_UPLOAD: 1, FLAG_STATUS_UPLOAD: 1, FLAG_STATUS_QUERY: 1, 0xFE: 1},
+        )
+        snapshot = client.received_frame_flags
+        snapshot[FLAG_MC_DATA_UPLOAD] = 99
+        self.assertEqual(client.received_frame_flags[FLAG_MC_DATA_UPLOAD], 1)
+        token = client.client_instance_token
+        await client.async_close()
+
+        transport = MagicMock()
+        transport.connected = False
+        transport.async_close = AsyncMock()
+        transport.async_connect = AsyncMock()
+        client.transport = transport
+
+        def create_task(coroutine, name):
+            del name
+            coroutine.close()
+            return asyncio.create_task(asyncio.sleep(10))
+
+        client.task_creator = create_task
+        await client.async_connect()
+        await client.async_close()
+        self.assertEqual(client.client_instance_token, token)
+        self.assertEqual(client.received_frame_flags[FLAG_MC_DATA_UPLOAD], 1)
+
+        fresh = KC761Client("127.0.0.1", 1)
+        self.assertNotEqual(fresh.client_instance_token, token)
+        self.assertEqual(fresh.received_frame_flags, {})
+        await fresh.async_close()
 
     def test_sync_allocator_exhaustion(self) -> None:
         client = KC761Client("127.0.0.1", 1)

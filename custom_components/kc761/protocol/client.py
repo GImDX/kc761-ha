@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -65,6 +66,7 @@ QUERY_RESPONSE_FLAGS = frozenset(
     {FLAG_MC_DATA_QUERY, FLAG_STATUS_QUERY, FLAG_DEVICE_INFO, FLAG_CAL_DATA, FLAG_ACK}
 )
 PUSH_FLAGS = frozenset({FLAG_MC_DATA_UPLOAD, FLAG_STATUS_UPLOAD, FLAG_STREAM_DATA})
+MAX_FRAME_FLAG_COUNTER_KEYS = 256
 
 
 def _finalize_spectrum_buffer(
@@ -408,10 +410,25 @@ class KC761Client:
         self.late_responses = 0
         self.unhandled_frames = 0
         self.last_frame: RawFrame | None = None
+        self._client_instance_token = secrets.token_hex(16)
+        # Keep only bounded, payload-free receive evidence.  This counter is
+        # intentionally lifetime-scoped: reconnects and diagnostics reads do
+        # not clear it.  A new KC761Client starts a new counter scope.
+        self._frame_flag_counts: dict[int, int] = {}
 
     @property
     def connected(self) -> bool:
         return self.transport.connected and self._reader_task is not None and not self._reader_task.done()
+
+    @property
+    def received_frame_flags(self) -> dict[int, int]:
+        """Return an isolated snapshot of complete frames routed by FLAG."""
+        return dict(self._frame_flag_counts)
+
+    @property
+    def client_instance_token(self) -> str:
+        """Return the ephemeral token identifying this client lifetime only."""
+        return self._client_instance_token
 
     async def async_connect(self) -> None:
         async with self._connection_lock:
@@ -621,6 +638,7 @@ class KC761Client:
                 self._reader_task = None
 
     async def _route_frame(self, frame: RawFrame) -> None:
+        self._record_frame_flag(frame.flag)
         self.last_frame = frame
         try:
             decoded = decode_frame(frame)
@@ -664,6 +682,14 @@ class KC761Client:
                     await callback_result
             return
         self.unhandled_frames += 1
+
+    def _record_frame_flag(self, flag: int) -> None:
+        """Count one complete routed frame without retaining payload or ID data."""
+        if isinstance(flag, bool) or not isinstance(flag, int) or not 0 <= flag <= 0xFF:
+            return
+        if flag not in self._frame_flag_counts and len(self._frame_flag_counts) >= MAX_FRAME_FLAG_COUNTER_KEYS:
+            return
+        self._frame_flag_counts[flag] = self._frame_flag_counts.get(flag, 0) + 1
 
     def _capture_parser_errors(self) -> None:
         delta = self.parser.errors - self._parser_errors_seen

@@ -49,6 +49,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     client = coordinator.client
     parser = getattr(client, "parser", None)
     last_frame = getattr(client, "last_frame", None)
+    received_frame_flags: dict[int, int] = dict(getattr(client, "received_frame_flags", {}))
     transport_type = getattr(coordinator, "transport_type", "tcp")
     if transport_type not in {"tcp", "ble"}:
         transport_type = "tcp"
@@ -107,6 +108,11 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "consecutive_protocol_errors": getattr(client, "consecutive_protocol_errors", 0),
             "responses": getattr(client, "responses", 0),
             "push_frames": getattr(client, "push_frames", 0),
+            "received_frame_flags": received_frame_flags,
+            "received_frame_flags_scope": "client_lifetime",
+            "received_frame_flags_reset": "client_recreation",
+            "received_frame_flags_basis": "complete_routed_frames_before_semantic_decode",
+            "client_instance_token": getattr(client, "client_instance_token", None),
             "late_responses": getattr(client, "late_responses", 0),
             "unhandled_frames": getattr(client, "unhandled_frames", 0),
             "identity_mismatches": getattr(coordinator, "identity_mismatches", 0),
@@ -209,6 +215,11 @@ def _diagnostics_without_runtime(entry: ConfigEntry) -> dict[str, Any]:
             "consecutive_protocol_errors": 0,
             "responses": 0,
             "push_frames": 0,
+            "received_frame_flags": {},
+            "received_frame_flags_scope": "no_runtime_client",
+            "received_frame_flags_reset": "client_recreation",
+            "received_frame_flags_basis": "complete_routed_frames_before_semantic_decode",
+            "client_instance_token": None,
             "late_responses": 0,
             "unhandled_frames": 0,
             "identity_mismatches": 0,

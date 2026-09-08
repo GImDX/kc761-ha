@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import csv
 import gzip
 import json
 import tempfile
@@ -26,6 +27,21 @@ def snapshot(*, minute: int = 0, source: int = 0) -> SpectrumSnapshot:
         energy_kev=energy,
         segment_count=4,
         calibration_profile="factory:2",
+    )
+
+
+def consistency_snapshot(point_count: int, *, minute: int) -> SpectrumSnapshot:
+    """Build boundary-distinct data for the multi-resolution consistency checks."""
+    counts = tuple(point_count * 100_000 + channel * 3 + 7 for channel in range(point_count))
+    energy = tuple(point_count / 10 + channel / 4 for channel in range(point_count))
+    return SpectrumSnapshot.create(
+        source=0,
+        acquired_at=datetime(2026, 9, 8, 0, minute, tzinfo=UTC),
+        accumulation_seconds=point_count + 17,
+        counts=counts,
+        energy_kev=energy,
+        segment_count=(point_count + 511) // 512,
+        calibration_profile=f"factory:{point_count}",
     )
 
 
@@ -117,6 +133,54 @@ class SpectrumSnapshotTests(unittest.TestCase):
             mismatch["point_count"] = 2048 if point_count != 2048 else 1024
             with self.assertRaises(ValueError):
                 SpectrumSnapshot.from_storage(mismatch)
+
+    def test_supported_point_counts_preserve_entity_archive_and_csv_boundaries(self) -> None:
+        values = [
+            consistency_snapshot(point_count, minute=index)
+            for index, point_count in enumerate((1024, 2048, 4096))
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            archive = SpectrumArchive(Path(directory), maximum=len(values))
+            for point_count, value in zip((1024, 2048, 4096), values, strict=True):
+                attributes = value.entity_attributes()
+                first_count = point_count * 100_000 + 7
+                last_count = point_count * 100_000 + (point_count - 1) * 3 + 7
+                first_energy = point_count / 10
+                last_energy = point_count / 10 + (point_count - 1) / 4
+                self.assertEqual(attributes["point_count"], point_count)
+                self.assertEqual(len(attributes["points"]), point_count)
+                self.assertEqual(attributes["points"][0], [0, first_energy, first_count])
+                self.assertEqual(attributes["points"][-1], [point_count - 1, round(last_energy, 8), last_count])
+                self.assertEqual(value.metadata()["total_counts"], sum(value.counts))
+
+                rows = list(csv.reader(value.to_csv().splitlines()))
+                self.assertEqual(len(rows), point_count + 1)
+                self.assertEqual(
+                    rows[1][4:7],
+                    ["0", f"{first_energy:.8f}", str(first_count)],
+                )
+                self.assertEqual(
+                    rows[-1][4:7],
+                    [str(point_count - 1), f"{last_energy:.8f}", str(last_count)],
+                )
+                self.assertEqual(rows[-1][10:12], [str(point_count), str(point_count)])
+                archive.save(value)
+
+            listed = {item["snapshot_id"]: item for item in archive.list_metadata()}
+            self.assertEqual(set(listed), {value.snapshot_id for value in values})
+            for point_count, value in zip((1024, 2048, 4096), values, strict=True):
+                self.assertEqual(listed[value.snapshot_id]["point_count"], point_count)
+                self.assertEqual(listed[value.snapshot_id]["total_counts"], sum(value.counts))
+
+            restarted = SpectrumArchive(Path(directory), maximum=len(values))
+            restarted_listed = {item["snapshot_id"]: item for item in restarted.list_metadata()}
+            self.assertEqual(set(restarted_listed), set(listed))
+            for point_count, value in zip((1024, 2048, 4096), values, strict=True):
+                restored = restarted.load(value.snapshot_id)
+                self.assertEqual(restored, value)
+                self.assertEqual(restored.metadata()["point_count"], point_count)
+                self.assertEqual(restored.entity_attributes()["points"][0], value.entity_attributes()["points"][0])
+                self.assertEqual(restored.entity_attributes()["points"][-1], value.entity_attributes()["points"][-1])
 
     def test_inferred_metadata_and_legacy_archive_provenance(self) -> None:
         counts = (0xFFFF,) + tuple(range(1, 2048))
