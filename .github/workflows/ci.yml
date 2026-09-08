@@ -53,7 +53,9 @@ jobs:
         run: >-
           python -m pytest -q -p no:cacheprovider
           --cov=custom_components/kc761 --cov-branch
-          --cov-report=term-missing --cov-fail-under=95
+          --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=95
+      - name: Independent branch coverage
+        run: python -m tests.check_branch_coverage coverage.json
       - name: Hassfest
         uses: home-assistant/actions/hassfest@a7c616ce81ccda50150bf1595786c71b1883fabb
       - name: HACS validation
