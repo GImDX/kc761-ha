@@ -1062,7 +1062,12 @@ def test_coordinator_refresh_push_reconnect_shutdown_reconfigure() -> None:
 
         old = FakeClient()
         candidate = FakeClient()
-        coordinator.client = old
+        # HA constructs a new coordinator after unload; a shut-down owner
+        # must never be reused to establish another connection.
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=old):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+        coordinator.async_set_updated_data = MagicMock()
         coordinator._device_info = make_info()
         with patch.object(coordinator_module, "KC761Client", side_effect=[candidate, FakeClient()]):
             await coordinator.async_reconfigure("new-host", 7602)
@@ -1280,7 +1285,7 @@ def test_coordinator_spectrum_controls_archive_and_schedules(tmp_path: Path) -> 
         await coordinator.async_clear_statistics(2, "cumulative_dose")
         assert fake.clear_writes[-1] == {"cumulative_dose_mask": 4}
         assert coordinator.control_commands == 8
-        assert coordinator.async_request_refresh.await_count == 8
+        assert coordinator.async_request_refresh.await_count == 2
 
         with pytest.raises(ValueError):
             await coordinator.async_set_volume(3)
@@ -1655,7 +1660,7 @@ def test_coordinator_background_and_validation_edges() -> None:
         coordinator._schedule_hardware_reload()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        hass.config_entries.async_reload.assert_awaited_with(entry.entry_id)
+        hass.config_entries.async_schedule_reload.assert_called_once_with(entry.entry_id)
         coordinator._schedule_hardware_reload()
         coordinator._shutdown = True
         coordinator._reload_scheduled = False

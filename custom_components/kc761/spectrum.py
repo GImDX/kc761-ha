@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import zlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ _SAFE_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-2]-[0-9a-f]{12}$")
 _ARCHIVE_SUFFIX = ".json.gz"
 _INDEX_FILENAME = ".metadata.json"
 _INDEX_VERSION = 1
-_ARCHIVE_ERRORS = (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError)
+_ARCHIVE_ERRORS = (OSError, EOFError, zlib.error, ValueError, KeyError, TypeError)
 
 
 def _legacy_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -353,7 +354,7 @@ class SpectrumArchive:
         try:
             with self._index_path.open("r", encoding="utf-8") as handle:
                 value = json.load(handle)
-        except (OSError, TypeError, json.JSONDecodeError):
+        except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         if not isinstance(value, dict) or value.get("version") != _INDEX_VERSION:
             return None

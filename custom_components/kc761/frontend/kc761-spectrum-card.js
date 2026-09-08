@@ -1605,6 +1605,7 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   connectedCallback() {
+    const reconnecting = this._detached;
     this._detached = false;
     diagnosticsRecord("connected");
     if (this._diagnosticsEnabled) {
@@ -1617,11 +1618,15 @@ class KC761SpectrumCard extends HTMLElement {
     this._applyPresentationMode();
     this._syncAutoRefresh();
     if (this._data) this._draw();
+    if (reconnecting && this._entryId && this._hass) void this._loadInitial();
   }
 
   disconnectedCallback() {
     diagnosticsRecord("disconnected");
     this._detached = true;
+    this._entityGeneration += 1;
+    this._busyState = false;
+    this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
     this._historyRequestToken += 1;
     this._historySelectionToken += 1;
     this._historyLoadPromise = null;
@@ -2004,6 +2009,7 @@ class KC761SpectrumCard extends HTMLElement {
 
   _resetEntityRuntime() {
     this._entityGeneration = (this._entityGeneration || 0) + 1;
+    this._busyState = false;
     this._drawToken += 1;
     this._flushViewState();
     this._stopAutoRefresh();
@@ -2668,12 +2674,17 @@ class KC761SpectrumCard extends HTMLElement {
       this._stopAutoRefresh();
       return;
     }
-    if (!this._refreshTimer) this._refreshTimer = window.setInterval(() => this._autoRefresh(), interval * 1000);
+    if (this._refreshTimer && this._refreshPeriod !== interval) this._stopAutoRefresh();
+    if (!this._refreshTimer) {
+      this._refreshPeriod = interval;
+      this._refreshTimer = window.setInterval(() => this._autoRefresh(), interval * 1000);
+    }
   }
 
   _stopAutoRefresh() {
     if (this._refreshTimer) window.clearInterval(this._refreshTimer);
     this._refreshTimer = null;
+    this._refreshPeriod = null;
   }
 
   async _autoRefresh() {
@@ -2689,11 +2700,12 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _loadInitial() {
+    if (this._detached || !this._entryId) return;
     const generation = this._entityGeneration;
     const entryId = this._entryId;
     try {
       const device = await this._call({ type: "kc761/info", entry_id: entryId });
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       this._device = device;
       this._setDestructiveActionsEnabled(device.destructive_actions_enabled);
       const source = this.shadowRoot.querySelector("#source");
@@ -2730,13 +2742,14 @@ class KC761SpectrumCard extends HTMLElement {
         const firstInstalled = [0, 1, 2].find((index) => isInstalled(index));
         source.value = firstInstalled === undefined ? "" : String(firstInstalled);
       }
+      if (!this._requestIsCurrent(generation, entryId)) return;
       if (this._shouldLoadHistory()) await this._requestHistoryLoad();
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       this._setStatus("");
       this._syncAutoRefresh();
     } catch (error) {
       diagnosticsRecordError("initial-load-failure", error);
-      this._setStatus(error.message || String(error), true);
+      if (this._requestIsCurrent(generation, entryId)) this._setStatus(error.message || String(error), true);
     }
   }
 
@@ -2825,7 +2838,7 @@ class KC761SpectrumCard extends HTMLElement {
       const message = { type: "kc761/spectrum/capture", entry_id: entryId };
       if (!useActiveSensor) message.source = Number(this.shadowRoot.querySelector("#source").value);
       const data = await this._call(message);
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       this._setData(data, { viewMode: "live" });
       const source = Number(data?.source);
       if (Number.isInteger(source) && source >= 0 && source <= 2) {
@@ -2842,17 +2855,20 @@ class KC761SpectrumCard extends HTMLElement {
     const entryId = this._entryId;
     await this._busy(async () => {
       await this._call({ type: "kc761/spectrum/save", entry_id: entryId, source: Number(this.shadowRoot.querySelector("#source").value) });
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       if (this._historyLoaded) await this._requestHistoryLoad({ force: true });
     }, "Spectrum saved");
   }
 
   async _csv() {
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     await this._busy(async () => {
       const selected = this.shadowRoot.querySelector("#history").value;
       const message = { type: "kc761/spectrum/csv", entry_id: this._entryId };
       if (selected !== "latest") message.snapshot_id = selected;
       const result = await this._call(message);
+      if (!this._requestIsCurrent(generation, entryId)) return;
       const url = URL.createObjectURL(new Blob([result.content], { type: "text/csv;charset=utf-8" }));
       const link = document.createElement("a");
       link.href = url;
@@ -2876,9 +2892,9 @@ class KC761SpectrumCard extends HTMLElement {
     const entryId = this._entryId;
     await this._busy(async () => {
       await this._call({ type: "kc761/clear", entry_id: entryId, source, kind });
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       const data = await this._call({ type: "kc761/spectrum/capture", entry_id: entryId, source });
-      if (generation !== this._entityGeneration || entryId !== this._entryId) return;
+      if (!this._requestIsCurrent(generation, entryId)) return;
       this._setData(data, { viewMode: "live" });
       this.shadowRoot.querySelector("#history").value = "latest";
       this._updateSummary();
@@ -2887,22 +2903,30 @@ class KC761SpectrumCard extends HTMLElement {
   }
 
   async _busy(operation, success) {
-    if (this._busyState) return;
+    if (this._busyState || this._detached) return;
+    const generation = this._entityGeneration;
+    const entryId = this._entryId;
     this._busyState = true;
     this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = true; });
     if (success) this._setStatus("Working…");
     try {
       await operation();
-      if (success) this._setStatus(success);
+      if (this._requestIsCurrent(generation, entryId) && success) this._setStatus(success);
     } catch (error) {
       diagnosticsRecordError("operation-failure", error);
-      this._setStatus(error.message || String(error), true);
+      if (this._requestIsCurrent(generation, entryId)) this._setStatus(error.message || String(error), true);
     } finally {
-      this._busyState = false;
-      this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-      this._syncAutoRefresh();
-      if (this._refreshAfterVisible && !this._documentIsHidden()) this._scheduleVisibleRefresh();
+      if (this._requestIsCurrent(generation, entryId)) {
+        this._busyState = false;
+        this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+        this._syncAutoRefresh();
+        if (this._refreshAfterVisible && !this._documentIsHidden()) this._scheduleVisibleRefresh();
+      }
     }
+  }
+
+  _requestIsCurrent(generation, entryId) {
+    return !this._detached && generation === this._entityGeneration && entryId === this._entryId;
   }
 
   _call(message) {

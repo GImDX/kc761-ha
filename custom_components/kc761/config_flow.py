@@ -171,7 +171,7 @@ class KC761ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "cannot_connect"
         finally:
             await client.async_close()
-        if info is None or not info.device_id:
+        if errors or info is None or not info.device_id:
             errors.setdefault("base", "cannot_connect")
             return self.async_show_form(
                 step_id=_endpoint_step(user_input),

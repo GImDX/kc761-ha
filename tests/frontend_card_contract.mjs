@@ -1682,4 +1682,77 @@ for (let attempt = 0; attempt < 12; attempt += 1) {
   }, "dashboard lifecycle attempt " + attempt);
 }
 
+// Review regressions: configuration changes replace the installed interval.
+const originalSetInterval = window.setInterval;
+const originalClearInterval = window.clearInterval;
+const reviewIntervals = [];
+const reviewClears = [];
+window.setInterval = (_callback, delay) => { reviewIntervals.push(delay); return reviewIntervals.length; };
+window.clearInterval = (id) => reviewClears.push(id);
+const intervalCard = new Card();
+intervalCard.isConnected = true;
+intervalCard.setConfig({ entity: "sensor.offline_spectrum", refresh_interval: 5 });
+intervalCard._hass = {};
+intervalCard._entryId = "offline-entry";
+intervalCard._syncAutoRefresh();
+intervalCard.setConfig({ entity: "sensor.offline_spectrum", refresh_interval: 60 });
+assert.deepEqual(reviewIntervals, [5000, 60000]);
+assert.deepEqual(reviewClears, [1]);
+intervalCard._syncAutoRefresh();
+assert.equal(reviewIntervals.length, 2, "unchanged interval is not recreated");
+intervalCard.disconnectedCallback();
+assert.deepEqual(reviewClears, [1, 2]);
+intervalCard._loadInitial = async () => {};
+intervalCard.connectedCallback();
+assert.deepEqual(reviewIntervals, [5000, 60000, 60000], "reconnect uses the configured period");
+intervalCard.setConfig({ entity: "sensor.offline_spectrum", refresh_interval: 0 });
+assert.deepEqual(reviewClears, [1, 2, 3], "disabling refresh clears the resumed timer");
+intervalCard.disconnectedCallback();
+window.setInterval = originalSetInterval;
+window.clearInterval = originalClearInterval;
+
+// A delayed old lifecycle must not capture, overwrite, or unlock a new one.
+const lifecycleCard = new Card();
+lifecycleCard.isConnected = true;
+lifecycleCard.setConfig({ entity: "sensor.offline_spectrum", refresh_interval: 0 });
+lifecycleCard._entryId = "offline-entry";
+lifecycleCard._data = { source: 0, snapshot_id: "original", points: [[0, 0, 1]] };
+const lifecycleMessages = [];
+let resolveOldInfo;
+lifecycleCard._call = (message) => {
+  lifecycleMessages.push(message.type);
+  return new Promise((resolve) => { resolveOldInfo = resolve; });
+};
+const oldInitial = lifecycleCard._loadInitial();
+lifecycleCard.disconnectedCallback();
+lifecycleCard.connectedCallback();
+resolveOldInfo({ sensor_types: [2, 0, 0] });
+await oldInitial;
+assert.deepEqual(lifecycleMessages, ["kc761/info"], "old info cannot start capture after reconnect");
+assert.equal(lifecycleCard._data.snapshot_id, "original");
+let resolveOldCapture;
+lifecycleCard._call = () => new Promise((resolve) => { resolveOldCapture = resolve; });
+const oldCapture = lifecycleCard._capture();
+lifecycleCard.disconnectedCallback();
+lifecycleCard.connectedCallback();
+lifecycleCard._busyState = true;
+resolveOldCapture({ source: 0, snapshot_id: "stale", points: [[0, 0, 2]] });
+await oldCapture;
+assert.equal(lifecycleCard._data.snapshot_id, "original");
+assert.equal(lifecycleCard._busyState, true, "old completion cannot clear a new operation's busy state");
+lifecycleCard.disconnectedCallback();
+
+let resumedInitial;
+const realInitial = lifecycleCard._loadInitial.bind(lifecycleCard);
+lifecycleCard._loadInitial = () => { resumedInitial = realInitial(); return resumedInitial; };
+lifecycleCard._hass = {};
+lifecycleCard._call = async (message) => message.type === "kc761/info"
+  ? { sensor_types: [2, 0, 0] }
+  : { source: 0, snapshot_id: "resumed", points: [[0, 0, 3]] };
+lifecycleCard.connectedCallback();
+await resumedInitial;
+assert.equal(lifecycleCard._data.snapshot_id, "resumed", "a newly mounted lifecycle can refresh normally");
+assert.equal(lifecycleCard._busyState, false);
+lifecycleCard.disconnectedCallback();
+
 console.log("frontend card contract: ok");

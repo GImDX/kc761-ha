@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -228,6 +229,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     async def _async_update_data_locked(self) -> KC761Snapshot:
         """Poll while the connection ownership lock is held."""
         try:
+            self._require_running()
             new_connection = not self.client.connected
             if new_connection:
                 self._auto_upload_spectrum.reset()
@@ -341,19 +343,23 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             if self._shutdown:
                 return
             self._shutdown = True
-            tasks = list(self._background_tasks)
+            tasks = [task for task in self._background_tasks if task is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._background_tasks.clear()
-            self._auto_upload_spectrum.reset()
             await super().async_shutdown()
-            await self.client.async_close()
+            # Cancel owned tasks before acquiring their transaction lock.
+            # Non-background callers finish/reject before the final close.
+            async with self._write_lock:
+                self._auto_upload_spectrum.reset()
+                await self.client.async_close()
 
     async def async_capture_spectrum(self, source: int | None = None) -> SpectrumSnapshot:
         """Capture one complete configured spectrum and publish the single entity payload."""
         async with self._write_lock:
+            self._require_running()
             if self._snapshot is None or self._device_info is None:
                 raise RuntimeError("KC761 has no current status snapshot")
             selected = self._snapshot.status.active_sensor if source is None else int(source)
@@ -416,35 +422,35 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
 
     async def async_set_active_sensor(self, source: int) -> None:
         self._validate_source(source)
-        status = self._require_status()
-        await self._execute_state_write(sensor_status=(status.sensor_status & ~0x03) | source)
+        await self._execute_state_write(lambda status: {"sensor_status": (status.sensor_status & ~0x03) | source})
 
     async def async_set_spectrum_accumulating(self, source: int, enabled: bool) -> None:
         self._validate_source(source)
-        status = self._require_status()
         bit = 1 << (source + 2)
-        value = status.sensor_status | bit if enabled else status.sensor_status & ~bit
-        await self._execute_state_write(sensor_status=value)
+        await self._execute_state_write(
+            lambda status: {"sensor_status": status.sensor_status | bit if enabled else status.sensor_status & ~bit}
+        )
 
     async def async_set_volume(self, volume: int) -> None:
         if volume not in (0, 1, 2):
             raise ValueError("volume must be 0, 1, or 2")
-        status = self._require_status()
-        await self._execute_state_write(volume_status=(status.volume_status & ~0x03) | volume)
+        await self._execute_state_write(lambda status: {"volume_status": (status.volume_status & ~0x03) | volume})
 
     async def async_set_volume_flag(self, bit: int, enabled: bool) -> None:
         if bit not in (2, 3, 4):
             raise ValueError("unsupported volume flag")
-        status = self._require_status()
-        value = status.volume_status | (1 << bit) if enabled else status.volume_status & ~(1 << bit)
-        await self._execute_state_write(volume_status=value)
+        await self._execute_state_write(lambda status: {
+            "volume_status": status.volume_status | (1 << bit) if enabled else status.volume_status & ~(1 << bit)
+        })
 
     async def async_set_led_flag(self, bit: int, enabled: bool) -> None:
         if bit not in (0, 1, 2):
             raise ValueError("unsupported LED/screen flag")
-        status = self._require_status()
-        value = status.led_screen_status | (1 << bit) if enabled else status.led_screen_status & ~(1 << bit)
-        await self._execute_state_write(led_screen_status=value)
+        await self._execute_state_write(lambda status: {
+            "led_screen_status": (
+                status.led_screen_status | (1 << bit) if enabled else status.led_screen_status & ~(1 << bit)
+            )
+        })
 
     async def async_set_auto_upload(self, enabled: bool) -> None:
         await self._execute_state_write(auto_upload_status=int(enabled))
@@ -452,6 +458,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     async def async_sync_device_time(self) -> None:
         self._require_device_controls()
         async with self._write_lock:
+            self._require_running()
             await self.client.async_set_device_time(int(datetime.now(UTC).timestamp()))
             self.control_commands += 1
             self.last_time_sync = datetime.now(UTC)
@@ -469,17 +476,31 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         if kind not in masks:
             raise ValueError("unknown clear operation")
         async with self._write_lock:
+            self._require_running()
             await self.client.async_clear_statistics(**masks[kind])
             self.control_commands += 1
             self._last_info_at = None
         await self.async_request_refresh()
 
-    async def _execute_state_write(self, **values: int) -> None:
+    async def _execute_state_write(
+        self, update: Callable[[StatusData], dict[str, int]] | None = None, **values: int
+    ) -> None:
         self._require_device_controls()
         async with self._write_lock:
+            # The snapshot used for a bit merge and its confirmed replacement
+            # belong to this same transaction, including queued callers.
+            await self._async_update_data_locked()
+            self._require_running()
+            if update is not None:
+                values = update(self._require_status())
             await self.client.async_set_state(**values)
             self.control_commands += 1
-        await self.async_request_refresh()
+            confirmed = await self._async_update_data_locked()
+            self.async_set_updated_data(confirmed)
+
+    def _require_running(self) -> None:
+        if self._shutdown:
+            raise RuntimeError("KC761 coordinator is shut down")
 
     def _validate_source(self, source: int) -> None:
         if not 0 <= source <= 2:
@@ -562,6 +583,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         restored, so a single-entry device never has two active sessions.
         """
         async with self._write_lock:
+            self._require_running()
             old_client = self.client
             old_transport = self.transport_type
             old_host, old_port = self.host, self.port
@@ -599,6 +621,10 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                     raise UpdateFailed("KC761 returned no device information")
                 self._validate_device_info(info)
                 await candidate.async_get_status()
+            except asyncio.CancelledError:
+                await self._close_client_quietly(candidate)
+                self._last_info_at = None
+                raise
             except Exception as candidate_error:
                 await self._close_client_quietly(candidate)
                 try:
@@ -684,7 +710,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 restored_info = info
                 restored_info_at = datetime.now(UTC)
             return restored, restored_info, restored_info_at
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             await self._close_client_quietly(restored)
             raise
 
@@ -724,12 +750,14 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
                 transport=transport,
                 on_push=self._async_push if on_push else None,
                 task_creator=self._create_hass_task,
+                device_info_validator=self._validate_device_info,
             )
         return KC761Client(
             host,
             port,
             on_push=self._async_push if on_push else None,
             task_creator=self._create_hass_task,
+            device_info_validator=self._validate_device_info,
         )
 
     def _create_hass_task(self, coroutine: Any, name: str) -> asyncio.Task[None]:
@@ -759,14 +787,7 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         if self._reload_scheduled or self._shutdown:
             return
         self._reload_scheduled = True
-        self._start_background(
-            self._async_reload_after_hardware_change(),
-            "kc761-hardware-reload",
-        )
-
-    async def _async_reload_after_hardware_change(self) -> None:
-        await asyncio.sleep(0)
-        await self._hass.config_entries.async_reload(self.entry.entry_id)
+        self._hass.config_entries.async_schedule_reload(self.entry.entry_id)
 
     def _increase_backoff(self) -> None:
         self._backoff_base = (

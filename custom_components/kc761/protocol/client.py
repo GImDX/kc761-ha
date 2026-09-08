@@ -381,12 +381,16 @@ class KC761Client:
         on_push: PushCallback | None = None,
         task_creator: TaskCreator = _asyncio_task_creator,
         spectrum_channel_counts: tuple[int, int, int] | None = None,
+        device_info_validator: Callable[[DeviceInfo], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
         self.on_push = on_push
         self.task_creator = task_creator
+        self._device_info_validator = device_info_validator
+        self._connection_generation = 0
+        self._validated_write_generation: int | None = None
         if spectrum_channel_counts is not None and len(spectrum_channel_counts) != 3:
             raise ValueError("spectrum channel counts must contain three entries")
         # Retain the public attribute for diagnostics/older callers, but do
@@ -444,6 +448,7 @@ class KC761Client:
                     pass
             await self.transport.async_close()
             await self.transport.async_connect()
+            self._connection_generation += 1
             self.consecutive_protocol_errors = 0
             self._reader_task = self.task_creator(self._reader_loop(), "kc761-reader")
 
@@ -580,6 +585,20 @@ class KC761Client:
         async with self._request_lock:
             if not self.connected:
                 await self.async_connect()
+            if self._device_info_validator is not None:
+                generation = self._connection_generation
+                if self._validated_write_generation != generation:
+                    try:
+                        response = await self._async_request_locked(CMD_GET_DEVICE_INFO)
+                        if not isinstance(response, DecodedFrame) or not isinstance(response.data, DeviceInfo):
+                            raise TransactionError("device info response did not decode")
+                        self._device_info_validator(response.data)
+                        if not self.connected or self._connection_generation != generation:
+                            raise TransportError("KC761 connection changed during identity verification")
+                        self._validated_write_generation = generation
+                    except (Exception, asyncio.CancelledError):
+                        await self.async_close()
+                        raise
             sync = self._allocate_sync()
             request = request_builder(sync)
             command = validate_write_request(request)
