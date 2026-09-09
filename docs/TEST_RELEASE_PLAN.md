@@ -19,7 +19,7 @@
 1. Ruff；
 2. 所有 JSON 解析与 Python compileall；
 3. Node `--check` 和 `tests/frontend_card_contract.mjs`；
-4. 全量 pytest，branch coverage 不低于 95%；
+4. 全量 pytest，综合覆盖率与独立分支覆盖率均不低于 95%；生成 coverage JSON 后运行 `tests/check_branch_coverage.py`，缺失、无效或不足阈值的报告必须失败，不能用综合百分比代替分支百分比；
 5. `pip check`；
 6. `git diff --check` 和公开文档隐私扫描。
 
@@ -32,7 +32,7 @@
 - Python 3.14 安装及固定测试依赖；
 - Ruff、JSON、compileall；
 - Node 24 前端语法与契约；
-- pytest branch coverage ≥95%；
+- pytest 综合覆盖率 ≥95%，并用 `tests/check_branch_coverage.py` 单独验证分支覆盖率 ≥95%；
 - 官方 Hassfest；
 - HACS integration validation。
 
@@ -73,6 +73,9 @@
 - Options Flow 无单位项和手动道数项；自动候选长度、实际点数与卡片/存档/CSV 一致，保留观测/推断依据，1024/4096 软件测试不冒充实机验证；
 - 谱图卡自动出现在卡片选择器，普通视图能选择历史谱图；
 - ROI/Data cursor/缩放刷新后保留，Ctrl+滚轮缩放，线性/对数设置持久；
+- 能量轴默认与复位视窗从 0 keV 开始；手动 Ctrl+滚轮缩小可回到实际 CH0 并跨刷新保留，不改写原始标定或 ROI；
+- Ctrl 横向、Shift 纵向缩放以绘图区光标为锚点，线性/对数均覆盖；双击绘图区复位双轴，纵轴刻度长度受限且不截断原始数据精度；
+- 采谱忙态仍可打开 Configure；构建指纹应同时核对实际 HTTP 内容与刷新后的卡片实例，不以版本号或服务器文件哈希单独证明页面已更新；
 - 游标交互流畅，数据变化仍触发完整重绘；
 - 断开后实体 unavailable，恢复后 available；
 - unload、reload、HA restart 后无残留任务或重复连接；
@@ -102,6 +105,8 @@
 若验证写操作，必须使用专门测试设备、逐命令授权、完整 ACK/读回/断电恢复记录。既有自动校时仍属于写入：授权保留该行为的部署必须如实记录，不能描述为零写入，也不据此通过其它控制或清空门禁。默认发布检查不授权人工真实设备写入。
 
 ## 7. 发布步骤
+
+本轮授权检查点（2026-09-09）：第 5 项已整体验收，用户授权自主推进到 Release 草稿供确认，并补充授权提交两份收尾文档后推进 `main`。可准备候选、推送候选分支运行 CI、在同一候选提交全绿且可快进时推进 `main`、创建 draft prerelease；不强制推送、不公开发布、不部署生产。以下完整发布步骤中的公开 tag/Release 收尾须待草稿确认及相应授权，草稿完成不等于 RC 已发布。
 
 1. 在独立发布工作树完成实现、测试、文档和二次审查；
 2. 每一阶段只暂存命名文件并创建原子提交；
