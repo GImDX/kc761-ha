@@ -1,6 +1,6 @@
 # KC761x Home Assistant 集成架构
 
-状态：当前 `0.2.0-rc.9` 候选规范；逐阶段验证状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)，不是全部发布门禁通过声明。
+状态：当前 `0.2.0` 规范；逐阶段验证状态见 [PRE_RELEASE_COVERAGE.md](PRE_RELEASE_COVERAGE.md)，不是全部发布门禁通过声明。
 
 ## 1. 范围
 

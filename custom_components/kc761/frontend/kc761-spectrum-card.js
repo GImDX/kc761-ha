@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0-rc.9";
+const CARD_VERSION = "0.2.0";
 // The loader fingerprints this file; never embed its own content hash here.
 const CARD_BUILD = resourceBuildFingerprint(new URL(import.meta.url).searchParams.get("build"));
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;

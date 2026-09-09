@@ -51,7 +51,10 @@ def json_shape(value):
 
 
 def manifest_version_to_pep440(version: str) -> str:
-    """Map the integration's prerelease manifest version to PEP 440."""
+    """Map the integration's manifest version to PEP 440."""
+    stable_match = re.fullmatch(r"\d+\.\d+\.\d+", version)
+    if stable_match is not None:
+        return version
     match = re.fullmatch(
         r"(?P<base>\d+\.\d+\.\d+)-(?P<phase>alpha|rc)\.(?P<number>\d+)",
         version,
@@ -63,7 +66,7 @@ def manifest_version_to_pep440(version: str) -> str:
 
 
 class IntegrationStaticTests(unittest.TestCase):
-    def test_manifest_is_release_candidate_and_local_polling(self) -> None:
+    def test_manifest_is_stable_release_and_local_polling(self) -> None:
         manifest = json.loads((ROOT / "custom_components" / "kc761" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(
             list(manifest),
@@ -83,7 +86,7 @@ class IntegrationStaticTests(unittest.TestCase):
             ],
         )
         self.assertEqual(manifest["version"], VERSION)
-        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+-rc\.\d+$")
+        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+$")
         self.assertEqual(manifest["dependencies"], ["bluetooth", "frontend", "http"])
         self.assertNotIn("homeassistant", manifest)
         self.assertTrue(manifest["config_flow"])
@@ -106,6 +109,7 @@ class IntegrationStaticTests(unittest.TestCase):
             manifest_version_to_pep440(manifest["version"]),
         )
         for manifest_version, expected in (
+            ("1.2.3", "1.2.3"),
             ("1.2.3-alpha.0", "1.2.3a0"),
             ("10.20.30-alpha.42", "10.20.30a42"),
             ("1.2.3-rc.1", "1.2.3rc1"),
@@ -113,7 +117,7 @@ class IntegrationStaticTests(unittest.TestCase):
             with self.subTest(manifest_version=manifest_version):
                 self.assertEqual(manifest_version_to_pep440(manifest_version), expected)
         with self.assertRaises(ValueError):
-            manifest_version_to_pep440("1.2.3")
+            manifest_version_to_pep440("1.2.3-beta.1")
 
     def test_frontend_and_manifest_versions_are_coherent(self) -> None:
         manifest = json.loads(

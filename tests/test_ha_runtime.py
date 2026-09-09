@@ -251,7 +251,7 @@ def test_frontend_build_tracks_exact_bytes_and_registers_once(tmp_path: Path) ->
             assert run(async_setup(hass, {}))
         register.assert_called_once_with(hass)
         add_url.assert_called_once_with(
-            hass, "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9&build=" + hashlib.sha256(content).hexdigest()
+            hass, "/kc761/kc761-spectrum-card.js?v=0.2.0&build=" + hashlib.sha256(content).hexdigest()
         )
         hass.async_add_executor_job.assert_called_once()
         assert hass.async_add_executor_job.call_args.args[1] == card
@@ -292,7 +292,7 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9&build="
+        "/kc761/kc761-spectrum-card.js?v=0.2.0&build="
         + hashlib.sha256(
             (Path(__file__).parents[1] / "custom_components/kc761/frontend/kc761-spectrum-card.js").read_bytes()
         ).hexdigest(),
