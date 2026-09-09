@@ -130,7 +130,7 @@ class IntegrationStaticTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(f'const CARD_VERSION = "{VERSION}";', frontend)
         self.assertIn(
-            'f"/kc761/kc761-spectrum-card.js?v={VERSION}"',
+            'f"/kc761/kc761-spectrum-card.js?v={VERSION}&build={build}"',
             (ROOT / "custom_components" / "kc761" / "__init__.py").read_text(
                 encoding="utf-8"
             ),
@@ -444,7 +444,12 @@ class IntegrationStaticTests(unittest.TestCase):
         self.assertNotIn("GRID.right", frontend)
         self.assertNotIn("min_rows", frontend)
         self.assertNotIn("rows: 8", frontend)
-        self.assertNotIn("s" + "hift", frontend.lower())
+        # Shift is now the explicit Y-zoom modifier, not a cursor gesture.
+        self.assertIn("if (!native.ctrlKey && !native.shiftKey) return;", frontend)
+        self.assertIn("native.ctrlKey ? this._zoomXAtPointer", frontend)
+        self.assertIn("formatter: formatCountTick", frontend)
+        self.assertIn('on("dblclick", this._chartDoubleClickHandler)', frontend)
+        self.assertIn("{ capture: true, passive: false }", frontend)
         self.assertIn('renderer: "svg"', frontend)
         # Hash normalized content so Git/Windows checkout line endings do not
         # turn a byte-identical vendor file into a false drift failure.

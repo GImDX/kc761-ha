@@ -1,4 +1,6 @@
 const CARD_VERSION = "0.2.0-rc.9";
+// The loader fingerprints this file; never embed its own content hash here.
+const CARD_BUILD = resourceBuildFingerprint(new URL(import.meta.url).searchParams.get("build"));
 const ECHARTS_URL = `/kc761/echarts.esm.min.js?v=${CARD_VERSION}`;
 const SUPPORTED_CHANNEL_COUNTS = Object.freeze([1024, 2048, 4096]);
 const MAX_CHANNEL = 2047;
@@ -452,6 +454,30 @@ function diagnosticsExportPayload() {
   };
 }
 
+function resourceBuildFingerprint(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : "unknown";
+}
+
+function formatCountTick(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  if (number === 0) return "0";
+  const magnitude = Math.abs(number);
+  if (magnitude >= 0.01 && magnitude < 100000) return String(Number(number.toPrecision(4)));
+  // At most nine characters, including a sign and a three-digit exponent.
+  const compact = (digits) => number.toExponential(digits).replace(/\.?0+e/, "e").replace("e+", "e");
+  const label = compact(2);
+  return label.length <= 9 ? label : compact(1);
+}
+
+function diagnosticsRegisteredBuild() {
+  try {
+    return resourceBuildFingerprint(globalThis.customElements?.get?.("kc761-spectrum-card")?.resourceBuild);
+  } catch (_error) {
+    return "unknown";
+  }
+}
+
 function diagnosticsContext(registry = diagnosticsListenerRegistry()) {
   let customElementDefined = false;
   try {
@@ -470,6 +496,10 @@ function diagnosticsContext(registry = diagnosticsListenerRegistry()) {
     module_evaluated: moduleEvaluated,
     card_instances: Number(registry?.cards?.size) || 0,
     resource_version_match: diagnosticsResourceVersionMatch(),
+    resource_version_match_basis: "version_only_not_build",
+    resource_build: CARD_BUILD,
+    registered_card_build: diagnosticsRegisteredBuild(),
+    resource_build_basis: "module_url_not_content_verification",
     page_session: diagnosticsPageSession(),
     diagnostics_schema: DIAGNOSTICS_SCHEMA_VERSION,
   };
@@ -1332,6 +1362,8 @@ function removeEditorHandoffMarker() {
 }
 
 class KC761SpectrumCard extends HTMLElement {
+  static get resourceBuild() { return CARD_BUILD; }
+
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
@@ -1370,8 +1402,15 @@ class KC761SpectrumCard extends HTMLElement {
     this._colors = { ...COLOR_FALLBACKS };
     this._cursor = { roiStart: 0, roiEnd: this._maxChannel(), data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
+    this._xFullDomain = false;
+    this._yZoom = 1;
+    this._yView = null;
     this._zoomDatasetKey = null;
     this._zoomHandler = null;
+    this._chartEventSource = null;
+    this._chartDoubleClickHandler = null;
+    this._chartWheelHandler = null;
+    this._chartWheelElement = null;
     this._dataMode = "live";
     this._viewStateKey = null;
     this._viewPersistTimer = null;
@@ -1491,7 +1530,7 @@ class KC761SpectrumCard extends HTMLElement {
         },
         {
           name: "diagnostics",
-          title: "Diagnostics",
+          title: "Advanced diagnostics",
           type: "expandable",
           flatten: true,
           schema: [{ name: "diagnostics", default: false, selector: { boolean: {} } }],
@@ -1508,11 +1547,11 @@ class KC761SpectrumCard extends HTMLElement {
         show_legend: "Show legend",
         show_actions: "Show actions",
         show_peak: "Show peak",
-        diagnostics: "Test diagnostics",
+        diagnostics: "Diagnostics",
       })[schema.name] || schema.name,
       computeHelper: (schema) => {
         if (schema.name === "refresh_interval") return "0 disables automatic capture; enabled values are 5–3600 seconds.";
-        if (schema.name === "diagnostics") return "Redacted session-only lifecycle logging; use Export diagnostics to download.";
+        if (schema.name === "diagnostics") return "Off by default. When enabled, logging survives reloads in this browser tab session until explicitly switched off. Export diagnostics downloads a local JSON file; nothing is automatically uploaded. Redaction is best-effort: review the file before sharing.";
         return undefined;
       },
       assertConfig: (config) => KC761SpectrumCard.validateConfig(config, { allowMissingEntity: true }),
@@ -1606,6 +1645,7 @@ class KC761SpectrumCard extends HTMLElement {
 
   connectedCallback() {
     const reconnecting = this._detached;
+    this.setAttribute("data-kc761-build", CARD_BUILD);
     this._detached = false;
     diagnosticsRecord("connected");
     if (this._diagnosticsEnabled) {
@@ -1626,7 +1666,7 @@ class KC761SpectrumCard extends HTMLElement {
     this._detached = true;
     this._entityGeneration += 1;
     this._busyState = false;
-    this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+    this._syncOperationUI();
     this._historyRequestToken += 1;
     this._historySelectionToken += 1;
     this._historyLoadPromise = null;
@@ -1656,6 +1696,7 @@ class KC761SpectrumCard extends HTMLElement {
       // HA can replace the state object while a dashboard is reloading.
     }
     this._hass = hass;
+    this._spectrumUnavailable = true;
     if (!this._config) return;
     this._scheduleThemeRefresh();
     if (!this._config.entity) {
@@ -1726,6 +1767,7 @@ class KC761SpectrumCard extends HTMLElement {
       return;
     }
     this._entryId = current.attributes.config_entry_id;
+    this._spectrumUnavailable = false;
     this._setDestructiveActionsEnabled(current.attributes.destructive_actions_enabled);
     const historySelect = this.shadowRoot.querySelector("#history");
     if ((!historySelect || historySelect.value === "latest") && (current !== previous || !this._data)) {
@@ -1791,7 +1833,7 @@ class KC761SpectrumCard extends HTMLElement {
           <div class="roi"><div class="roi-slider" role="group" aria-label="ROI channel range"><div class="roi-slider-track"><span id="roi-range-fill" class="roi-slider-fill"></span></div><input id="roi-start" type="range" min="0" max="2047" step="1" value="0" aria-label="ROI start channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0"><input id="roi-end" type="range" min="0" max="2047" step="1" value="2047" aria-label="ROI end channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="2047"><div class="roi-values"><span id="roi-start-value">Start CH 0</span><span aria-hidden="true">·</span><span id="roi-end-value">End CH 2047</span></div></div>
           </div>
           <div class="data-slider-row"><label class="data-slider-label">Data cursor<div class="data-slider" role="group" aria-label="Data cursor channel"><div class="data-slider-track"></div><input id="data-cursor-slider" type="range" min="0" max="2047" step="1" value="0" role="slider" aria-label="Data cursor channel" aria-valuemin="0" aria-valuemax="2047" aria-valuenow="0" aria-valuetext="Channel 0"><div class="data-values"><span id="data-cursor-channel">CH 0</span><span id="data-cursor-readout">—</span></div></div></label></div>
-          <div class="help">Use the ROI handles to select a range and the Data cursor slider to inspect a point. The chart line is an indicator only.</div>
+          <div class="help">Use the ROI handles to select a range and the Data cursor slider to inspect a point. Ctrl+wheel zooms X; Shift+wheel zooms Y. Both zoom around the pointer. Double-click the plot to reset both axes.</div>
         </div>
         <div class="summary">
           <div data-summary="acquired">Acquired<b id="acquired">—</b></div><div data-summary="runtime">Accumulation<b id="runtime">—</b></div>
@@ -1807,6 +1849,7 @@ class KC761SpectrumCard extends HTMLElement {
           <span class="spacer"></span><button class="danger" data-clear="spectrum" hidden>Clear spectrum</button>
           <button class="danger" data-clear="dose_curve" hidden>Clear dose curve</button><button class="danger" data-clear="cumulative_dose" hidden>Clear cumulative dose</button>
         </div>
+        <div id="busy-indicator" class="help" role="status" aria-live="polite" hidden></div>
         <div id="status" class="status"></div>
       </ha-card>`;
     this.shadowRoot.querySelector("#title").textContent = this._config.title || "KC761 Spectrum";
@@ -2005,6 +2048,25 @@ class KC761SpectrumCard extends HTMLElement {
     this.shadowRoot?.querySelectorAll?.("[data-clear]")?.forEach((button) => {
       button.hidden = !this._destructiveActionsEnabled;
     });
+    this._syncOperationUI();
+  }
+
+  _syncOperationUI() {
+    const unavailable = this._detached || !this._entryId || this._spectrumUnavailable;
+    // Configure, diagnostics export and local view controls do not issue data
+    // operations and must remain usable during an initial or automatic capture.
+    for (const selector of ["#capture", "#save", "#csv", "#source", "#history"]) {
+      const node = this.shadowRoot?.querySelector(selector);
+      if (node) node.disabled = Boolean(this._busyState || unavailable);
+    }
+    this.shadowRoot?.querySelectorAll?.("[data-clear]")?.forEach((button) => {
+      button.disabled = Boolean(this._busyState || unavailable || !this._destructiveActionsEnabled || !this._device);
+    });
+    const indicator = this.shadowRoot?.querySelector("#busy-indicator");
+    if (indicator) {
+      indicator.hidden = !this._busyState;
+      indicator.textContent = this._busyState ? "Working…" : "";
+    }
   }
 
   _resetEntityRuntime() {
@@ -2026,6 +2088,9 @@ class KC761SpectrumCard extends HTMLElement {
     this._summaryCache = null;
     this._cursor = { roiStart: 0, roiEnd: this._maxChannel(), data: 0 };
     this._zoom = { ...ZOOM_DEFAULT };
+    this._xFullDomain = false;
+    this._yZoom = 1;
+    this._yView = null;
     this._zoomDatasetKey = null;
     this._dataMode = "live";
     this._viewStateKey = null;
@@ -2426,10 +2491,17 @@ class KC761SpectrumCard extends HTMLElement {
       data: this._dataCursorChannel(Number.isFinite(dataCursor) ? Math.round(dataCursor) : 0),
     };
     const zoomStart = Number(state?.zoom?.start_channel);
+    this._xFullDomain = state?.x_full_domain === true;
     const zoomEnd = Number(state?.zoom?.end_channel);
     this._zoom = Number.isFinite(zoomStart) && Number.isFinite(zoomEnd)
       ? this._zoomFromChannelRange(zoomStart, zoomEnd)
       : { ...ZOOM_DEFAULT };
+    const yZoom = state?.y_zoom;
+    this._yZoom = typeof yZoom === "number" && Number.isFinite(yZoom) ? clamp(yZoom, 0.01, 1) : 1;
+    const yView = state?.y_view;
+    this._yView = yView && [yView.min, yView.max, yView.full_max].every((value) => typeof value === "number" && Number.isFinite(value))
+      && yView.min >= 0 && yView.max > yView.min && yView.full_max >= yView.max
+      ? { min: yView.min, max: yView.max, full_max: yView.full_max } : null;
     this._updateRoiSliderUI();
     this._updateDataCursorUI();
     this._updateZoomReadout();
@@ -2449,6 +2521,9 @@ class KC761SpectrumCard extends HTMLElement {
       roi: { start_channel: roiStart, end_channel: roiEnd },
       data_cursor_channel: this._dataCursorChannel(this._cursor.data),
       zoom: { start_channel: zoomStart, end_channel: zoomEnd },
+      x_full_domain: this._xFullDomain === true,
+      y_zoom: this._yZoom,
+      y_view: this._yView ? { ...this._yView } : null,
     };
   }
 
@@ -2535,6 +2610,9 @@ class KC761SpectrumCard extends HTMLElement {
 
   _resetZoomState() {
     this._zoom = { ...ZOOM_DEFAULT };
+    this._xFullDomain = false;
+    this._yZoom = 1;
+    this._yView = null;
     this._updateZoomReadout();
   }
 
@@ -2551,13 +2629,140 @@ class KC761SpectrumCard extends HTMLElement {
     if (!payload) return;
     const start = Number(payload.start);
     const end = Number(payload.end);
-    if (Number.isFinite(start) && Number.isFinite(end)) this._setZoomRange(start, end);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      this._setZoomRange(this._axisToChannelZoom(start), this._axisToChannelZoom(end));
+    }
   }
 
   _resetZoom() {
     this._resetZoomState();
     this._scheduleViewStatePersist({ flush: true });
+    const [min, max] = this._xRange();
+    this._chart?.setOption?.({ xAxis: { min, max } }, { silent: true });
     if (this._chart) this._chart.dispatchAction({ type: "dataZoom", dataZoomIndex: [0, 1], start: 0, end: 100 });
+    this._applyYZoom();
+  }
+
+  _yZoomMaximum(zoom = this._yZoom) {
+    if (zoom >= 1) return null; // Restore ECharts' ordinary automatic maximum.
+    const logarithmic = this._yAxis === "log";
+    const maximum = Math.max(logarithmic ? 10 : 1, this._ensurePointCache().peak?.[2] || 0);
+    return logarithmic ? Math.max(1.01, Math.exp(Math.log(maximum) * zoom)) : Math.max(1, maximum * zoom);
+  }
+
+  _applyYZoom() {
+    this._chart?.setOption?.({ yAxis: this._yAxisBounds() }, { lazyUpdate: false, silent: true });
+  }
+
+  _yAxisBounds() {
+    const baseline = this._yAxis === "log" ? 1 : 0;
+    const minimum = Math.max(baseline, this._yView?.min || 0);
+    return this._yView && this._yView.max > minimum
+      ? { min: minimum, max: this._yView.max }
+      : { min: baseline, max: this._yZoomMaximum() };
+  }
+
+  _wheelPlotPosition(chart, native) {
+    // SVG child offsetX/Y belong to the child, not the plotting viewport.
+    // Viewport bounds include its actual padding offset and CSS transform.
+    const viewport = chart.getZr()?.painter?.getViewportRoot?.();
+    const element = viewport?.getBoundingClientRect ? viewport : this._chartWheelElement;
+    const rect = element?.getBoundingClientRect();
+    if (!rect || !(rect.width > 0) || !(rect.height > 0)
+      || !Number.isFinite(native.clientX) || !Number.isFinite(native.clientY)) return null;
+    return [(native.clientX - rect.left) * chart.getWidth() / rect.width,
+      (native.clientY - rect.top) * chart.getHeight() / rect.height];
+  }
+
+  _anchoredWindow(low, high, anchor, factor, minimum, maximum, minimumSpan) {
+    if (![low, high, anchor, factor, minimum, maximum, minimumSpan].every(Number.isFinite)
+      || high <= low || maximum <= minimum) return null;
+    const span = clamp((high - low) * factor, minimumSpan, maximum - minimum);
+    if (Math.abs(span - (high - low)) <= Math.max(1, high - low) * 1e-10) return null;
+    let start = anchor - (anchor - low) * (span / (high - low));
+    start = clamp(start, minimum, maximum - span);
+    return [start, start + span];
+  }
+
+  _zoomYAtPointer(chart, point, factor) {
+    const extent = chart.getModel().getComponent("yAxis").axis.scale.getExtent();
+    const logarithmic = this._yAxis === "log";
+    const transform = (value) => logarithmic ? Math.log(Math.max(1, value)) : value;
+    const inverse = (value) => logarithmic ? Math.exp(value) : value;
+    // A refresh must not enlarge the minimum zoom span of a saved fixed window.
+    const fullMax = this._yView?.full_max ?? Math.max(logarithmic ? 10 : 1,
+      this._ensurePointCache().peak?.[2] || 0, extent[1]);
+    const fullSpan = transform(fullMax);
+    const anchor = transform(chart.convertFromPixel({ yAxisIndex: 0 }, point[1]));
+    const next = this._anchoredWindow(transform(extent[0]), transform(extent[1]), anchor, factor,
+      0, fullSpan, Math.min(fullSpan, Math.max(logarithmic ? 0 : 1, fullSpan * 0.01)));
+    if (!next || !next.every(Number.isFinite)) return false;
+    this._yZoom = Number(((next[1] - next[0]) / fullSpan).toFixed(6));
+    this._yView = this._yZoom >= 1 ? null : { min: inverse(next[0]), max: inverse(next[1]), full_max: fullMax };
+    this._updateZoomReadout();
+    this._scheduleViewStatePersist();
+    this._applyYZoom();
+    return true;
+  }
+
+  _zoomXAtPointer(chart, point, factor) {
+    const extent = chart.getModel().getComponent("xAxis").axis.scale.getExtent();
+    const mode = this._readXAxisMode();
+    const [minimum, maximum] = this._xRange(mode, true);
+    const span = maximum - minimum;
+    const anchor = chart.convertFromPixel({ xAxisIndex: 0 }, point[0]);
+    const next = this._anchoredWindow(extent[0], extent[1], anchor, factor, minimum, maximum, span * this._zoomMinSpan() / 100);
+    if (!next || !next.every(Number.isFinite)) return false;
+    const before = { ...this._zoom };
+    const domainChanged = mode === "energy" && !this._xFullDomain && minimum < 0;
+    if (domainChanged) {
+      this._xFullDomain = true;
+      chart.setOption({ xAxis: { min: minimum, max: maximum } }, { silent: true });
+    }
+    chart.dispatchAction({ type: "dataZoom", dataZoomIndex: [0, 1],
+      start: (next[0] - minimum) / span * 100, end: (next[1] - minimum) / span * 100 });
+    if (domainChanged) {
+      this._updateZoomReadout();
+      this._scheduleViewStatePersist();
+    }
+    return domainChanged || Math.abs(before.start - this._zoom.start) > 0.0001 || Math.abs(before.end - this._zoom.end) > 0.0001;
+  }
+
+  _eventInsidePlot(chart, event) {
+    return !this._detached && chart === this._chart && this._points().length > 0
+      && Number.isFinite(event?.offsetX) && Number.isFinite(event?.offsetY)
+      && chart.containPixel({ gridIndex: 0 }, [event.offsetX, event.offsetY]);
+  }
+
+  _bindChartEvents() {
+    if (!this._chart || this._zoomHandler) return;
+    const chart = this._chart;
+    this._zoomHandler = (event) => this._onZoom(event);
+    chart.on("datazoom", this._zoomHandler);
+    this._chartEventSource = chart.getZr();
+    // One zrender listener covers both empty plot background and series or
+    // overlays. Do not also bind ECharts/native dblclick and fire twice.
+    this._chartDoubleClickHandler = (event) => {
+      if (this._eventInsidePlot(chart, event)) this._resetZoom();
+    };
+    this._chartWheelElement = this.shadowRoot.querySelector("#chart");
+    this._chartWheelHandler = (native) => {
+      if (this._detached || chart !== this._chart) return;
+      const point = this._wheelPlotPosition(chart, native);
+      if (!point || !this._eventInsidePlot(chart, { offsetX: point[0], offsetY: point[1] })) return;
+      // ECharts' inside controller consumes wheel before checking its Ctrl
+      // modifier. Handle both modifiers here using viewport client coordinates,
+      // while leaving ordinary or clamped no-op browser scrolling intact.
+      native.stopImmediatePropagation();
+      if (!native.ctrlKey && !native.shiftKey) return;
+      const delta = Number.isFinite(native.deltaY) ? -native.deltaY : native.wheelDelta;
+      if (!Number.isFinite(delta) || delta === 0) return;
+      const factor = delta > 0 ? 0.8 : 1.25;
+      const changed = native.ctrlKey ? this._zoomXAtPointer(chart, point, factor) : this._zoomYAtPointer(chart, point, factor);
+      if (changed) native.preventDefault?.(); // Ctrl also wins for Ctrl+Shift.
+    };
+    this._chartEventSource.on("dblclick", this._chartDoubleClickHandler);
+    this._chartWheelElement.addEventListener("wheel", this._chartWheelHandler, { capture: true, passive: false });
   }
 
   _zoomChannelRange() {
@@ -2574,7 +2779,7 @@ class KC761SpectrumCard extends HTMLElement {
     const reset = this.shadowRoot?.querySelector("#reset-zoom");
     const [start, end] = this._zoomChannelRange();
     const text = `View CH ${start}–${end}`;
-    const full = this._zoom.start <= 0.0001 && this._zoom.end >= 99.9999;
+    const full = this._zoom.start <= 0.0001 && this._zoom.end >= 99.9999 && !this._xFullDomain && this._yZoom >= 1 && !this._yView;
     if (readout) {
       readout.textContent = text;
       readout.title = text;
@@ -2586,8 +2791,14 @@ class KC761SpectrumCard extends HTMLElement {
   _zoomOptions(colors, divider) {
     const range = this._clampZoom(this._zoom.start, this._zoom.end);
     this._zoom = range;
+    let start = this._channelToAxisZoom(range.start);
+    let end = this._channelToAxisZoom(range.end);
+    // A saved all-negative window or non-monotonic calibration may have no
+    // usable physical interval. Show the default domain without rewriting the
+    // saved channel bounds (switching to channel mode still exposes them).
+    if (end <= start) { start = 0; end = 100; }
     const common = {
-      xAxisIndex: [0], filterMode: "none", start: range.start, end: range.end,
+      xAxisIndex: [0], filterMode: "none", start, end,
       minSpan: this._zoomMinSpan(), zoomLock: false,
     };
     return [
@@ -2907,7 +3118,7 @@ class KC761SpectrumCard extends HTMLElement {
     const generation = this._entityGeneration;
     const entryId = this._entryId;
     this._busyState = true;
-    this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    this._syncOperationUI();
     if (success) this._setStatus("Working…");
     try {
       await operation();
@@ -2918,7 +3129,7 @@ class KC761SpectrumCard extends HTMLElement {
     } finally {
       if (this._requestIsCurrent(generation, entryId)) {
         this._busyState = false;
-        this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+        this._syncOperationUI();
         this._syncAutoRefresh();
         if (this._refreshAfterVisible && !this._documentIsHidden()) this._scheduleVisibleRefresh();
       }
@@ -3028,10 +3239,11 @@ class KC761SpectrumCard extends HTMLElement {
     return cache.xSorted.get(xMode);
   }
 
-  _xRange(xMode = this._readXAxisMode()) {
+  _xRange(xMode = this._readXAxisMode(), fullDomain = this._xFullDomain) {
     const cache = this._ensurePointCache();
     if (!cache.points.length) return [0, 1];
-    if (!cache.xRanges.has(xMode)) {
+    const key = `${xMode}:${fullDomain === true}`;
+    if (!cache.xRanges.has(key)) {
       const values = this._xValues(cache, xMode);
       let minimum = values[0];
       let maximum = values[0];
@@ -3039,9 +3251,45 @@ class KC761SpectrumCard extends HTMLElement {
         minimum = Math.min(minimum, values[index]);
         maximum = Math.max(maximum, values[index]);
       }
-      cache.xRanges.set(xMode, [minimum, maximum === minimum ? minimum + 1 : maximum]);
+      // Default display clips negative extrapolation; manual Ctrl zoom uses
+      // the complete domain. Neither changes calibration, counts or exports.
+      cache.xRanges.set(key, xMode === "energy"
+        ? [fullDomain ? Math.min(0, minimum) : 0, Math.max(1, maximum)]
+        : [minimum, maximum === minimum ? minimum + 1 : maximum]);
     }
-    return cache.xRanges.get(xMode);
+    return cache.xRanges.get(key);
+  }
+
+  _channelToAxisZoom(percent) {
+    const cache = this._ensurePointCache();
+    if (percent <= 0 || percent >= 100 || cache.points.length < 2) return clamp(percent, 0, 100);
+    const mode = this._readXAxisMode();
+    const values = this._xValues(cache, mode);
+    const index = (percent / 100) * (values.length - 1);
+    const lower = Math.floor(index);
+    const value = values[lower] + (values[Math.min(lower + 1, values.length - 1)] - values[lower]) * (index - lower);
+    const [minimum, maximum] = this._xRange(mode);
+    return clamp(((value - minimum) / (maximum - minimum)) * 100, 0, 100);
+  }
+
+  _axisToChannelZoom(percent) {
+    const cache = this._ensurePointCache();
+    // Endpoints remain full-range markers in the existing channel-based
+    // persistence schema, even though energy mode clips the negative domain.
+    if (percent <= 0 || percent >= 100 || cache.points.length < 2) return clamp(percent, 0, 100);
+    const mode = this._readXAxisMode();
+    const values = this._xValues(cache, mode);
+    const [minimum, maximum] = this._xRange(mode);
+    const target = minimum + (percent / 100) * (maximum - minimum);
+    const sorted = this._xValuesSorted(cache, mode);
+    let index = this._nearestIndex(values, target, sorted);
+    if (sorted) {
+      const lower = values[index] > target ? Math.max(0, index - 1) : index;
+      const upper = Math.min(values.length - 1, lower + 1);
+      const span = values[upper] - values[lower];
+      index = lower + (span > 0 ? clamp((target - values[lower]) / span, 0, 1) : 0);
+    }
+    return (index / (values.length - 1)) * 100;
   }
 
   _nearestIndex(values, target, sorted = false) {
@@ -3172,6 +3420,7 @@ class KC761SpectrumCard extends HTMLElement {
 
   _seriesOverlays(cache, xMode, logarithmic) {
     const points = cache.points;
+    if (!points.length) return { markArea: { data: [] }, markLine: { data: [] }, markPoint: { data: [] } };
     const [roiStart, roiEnd] = this._roi();
     const roiStartPoint = this._pointForChannel(roiStart) || points[0];
     const roiEndPoint = this._pointForChannel(roiEnd) || points[points.length - 1];
@@ -3283,7 +3532,7 @@ class KC761SpectrumCard extends HTMLElement {
       yAxis: {
         type: logarithmic ? "log" : "value", name: logarithmic ? "Counts (log)" : "Counts", nameLocation: "end", nameRotate: 0, nameGap: 6,
         nameTextStyle: { color: secondary, align: "left", verticalAlign: "bottom", padding: [0, 0, 4, 0] },
-        min: logarithmic ? 1 : 0, axisLabel: { color: secondary, hideOverlap: true, showMinLabel: true, showMaxLabel: true, margin: 8 }, axisLine: { lineStyle: { color: divider } },
+        ...this._yAxisBounds(), axisLabel: { color: secondary, hideOverlap: true, showMinLabel: true, showMaxLabel: true, margin: 8, formatter: formatCountTick }, axisLine: { lineStyle: { color: divider } },
         splitLine: { lineStyle: { color: divider, opacity: 0.45 } },
       },
       series: [{
@@ -3349,6 +3598,14 @@ class KC761SpectrumCard extends HTMLElement {
     this._cancelChartResize();
     if (this._chart && this._zoomHandler) this._chart.off("datazoom", this._zoomHandler);
     this._zoomHandler = null;
+    if (this._chartEventSource) {
+      this._chartEventSource.off("dblclick", this._chartDoubleClickHandler);
+    }
+    if (this._chartWheelElement && this._chartWheelHandler) this._chartWheelElement.removeEventListener("wheel", this._chartWheelHandler, true);
+    this._chartEventSource = null;
+    this._chartDoubleClickHandler = null;
+    this._chartWheelHandler = null;
+    this._chartWheelElement = null;
     if (this._chart) this._chart.dispose();
     this._chart = null;
   }
@@ -3388,8 +3645,7 @@ class KC761SpectrumCard extends HTMLElement {
     if (!chartElement) return null;
     this._echarts = module.default || module;
     this._chart = this._echarts.init(chartElement, null, { renderer: "svg", useDirtyRect: false });
-    this._zoomHandler = (event) => this._onZoom(event);
-    this._chart.on("datazoom", this._zoomHandler);
+    this._bindChartEvents();
     this._resizeObserver = new ResizeObserver(() => this._scheduleChartResize());
     this._resizeObserver.observe(chartElement);
     return this._chart;

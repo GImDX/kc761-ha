@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { verifyChartGestures, verifyPhysicalEnergyRenderer, verifyYAxisLabels } from "./frontend_chart_renderer.mjs";
 
 class FakeNode {
   constructor(selector = "") {
@@ -121,6 +124,10 @@ class FakeShadowRoot extends FakeNode {
   }
 
   querySelectorAll(selector) {
+    if (selector === "button") {
+      return ["#configure", "#export-diagnostics", "#reset-zoom", "#capture", "#save", "#csv"]
+        .map((id) => this.querySelector(id)).concat(this.querySelectorAll("[data-clear]"));
+    }
     if (selector !== "[data-clear]") return [];
     return ["spectrum", "dose_curve", "cumulative_dose"].map((kind) => {
       const node = this.querySelector(`[data-clear=${kind}]`);
@@ -132,6 +139,7 @@ class FakeShadowRoot extends FakeNode {
 
 class FakeHTMLElement {
   constructor() {
+    this.attributes = new Map();
     this.style = {
       values: new Map(),
       setProperty: (name, value) => this.style.values.set(name, String(value)),
@@ -140,6 +148,9 @@ class FakeHTMLElement {
     this.isConnected = false;
     this.parentElement = null;
   }
+
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
 
   attachShadow() {
     this.shadowRoot = new FakeShadowRoot();
@@ -283,7 +294,10 @@ globalThis.ResizeObserver = class {
 };
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
 
-await import(new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js", import.meta.url));
+const cardModuleURL = new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js", import.meta.url);
+const expectedCardBuild = createHash("sha256").update(await readFile(cardModuleURL)).digest("hex");
+cardModuleURL.searchParams.set("build", expectedCardBuild);
+await import(cardModuleURL);
 const rebuildRegistry = window.__kc761SpectrumRebuildRegistry;
 const rebuildObserver = MutationObserver.instances.at(-1);
 assert.ok(rebuildRegistry.active, "late registration window remains active");
@@ -351,6 +365,7 @@ assert.ok(targetedRegistry.targetQueryCount > 96 && targetedRegistry.targetQuery
 documentNodes.splice(0);
 
 const Card = customElements.get("kc761-spectrum-card");
+assert.equal(Card.resourceBuild, expectedCardBuild, "registered class retains its own module's content URL marker");
 assert.ok(Card);
 assert.equal(Card.getStubConfig().entity, undefined);
 assert.equal(Card.getStubConfig().show_peak, true);
@@ -652,6 +667,10 @@ assert.equal(deepExportedDiagnostics.includes("points=[1,2]"), false);
 const deepPayload = JSON.parse(deepExportedDiagnostics);
 assert.ok(Number.isSafeInteger(deepPayload.page_session) && deepPayload.page_session > 0);
 assert.ok(deepPayload.diagnostics_context.resource_version_match === "unknown");
+assert.equal(deepPayload.diagnostics_context.resource_version_match_basis, "version_only_not_build");
+assert.equal(deepPayload.diagnostics_context.resource_build, expectedCardBuild);
+assert.equal(deepPayload.diagnostics_context.registered_card_build, expectedCardBuild);
+assert.equal(deepPayload.diagnostics_context.resource_build_basis, "module_url_not_content_verification");
 assert.ok(deepPayload.export_snapshot.roots <= 256);
 assert.ok(deepPayload.export_snapshot.nodes <= 10000);
 assert.ok(deepPayload.export_snapshot.error_cards >= 1);
@@ -683,6 +702,8 @@ const secondDiagnosticsCard = new Card();
 secondDiagnosticsCard.setConfig({ entity: "sensor.diagnostics_second", diagnostics: true });
 assert.equal(window._listenerCounts.get("error"), 1);
 await import(new URL("../custom_components/kc761/frontend/kc761-spectrum-card.js?diagnostics-repeat=1", import.meta.url));
+assert.equal(customElements.get("kc761-spectrum-card"), Card, "later imports cannot replace the registered class");
+assert.equal(Card.resourceBuild, expectedCardBuild, "later unversioned import cannot relabel an old class");
 assert.equal(window._listenerCounts.get("error"), 1);
 diagnosticsCard.disconnectedCallback();
 secondDiagnosticsCard.disconnectedCallback();
@@ -724,6 +745,7 @@ const shadowHost = { parentElement: null, getRootNode: () => ({ host: pathAncest
 card.parentElement = null;
 card.getRootNode = () => ({ host: shadowHost });
 card.connectedCallback();
+assert.equal(card.getAttribute("data-kc761-build"), expectedCardBuild, "DOM identifies the actual instance class");
 assert.equal(card.shadowRoot.querySelector("#editor-controls").hidden, true, "dashboard edit wrapper hides editor-only controls");
 assert.equal(card.shadowRoot.querySelector("#configure").hidden, false, "edit-mode card with path keeps Configure visible");
 card.preview = false;
@@ -1010,6 +1032,7 @@ let resolveECharts;
 let chartInitCalls = 0;
 const concurrentChart = {
   on() {}, off() {}, dispose() {}, resize() {},
+  getZr: () => ({ on() {}, off() {} }),
 };
 const chartCard = new Card();
 chartCard.setConfig({ entity: "sensor.chart_init_spectrum" });
@@ -1755,4 +1778,143 @@ assert.equal(lifecycleCard._data.snapshot_id, "resumed", "a newly mounted lifecy
 assert.equal(lifecycleCard._busyState, false);
 lifecycleCard.disconnectedCallback();
 
+// Physical energy display clips only the axis domain, never the source data.
+const physicalCard = new Card();
+physicalCard.setConfig({ entity: "sensor.physical_axis", diagnostics: false });
+const physicalPoints = Array.from({ length: 2048 }, (_, channel) => [channel, channel * 2 - 227.773223876953, channel + 1]);
+const physicalData = { source: 0, channel: 0, point_count: 2048, snapshot_id: "latest", points: physicalPoints };
+const rawPhysicalJSON = JSON.stringify(physicalData);
+physicalCard._setData(physicalData);
+assert.equal(physicalCard._option().xAxis.min, 0);
+assert.equal(physicalCard._option().xAxis.max, physicalPoints.at(-1)[1]);
+assert.equal(physicalCard._option().series[0].data[0][0], physicalPoints[0][1], "negative calibrated values remain in the plotted series");
+assert.deepEqual(physicalCard._zoom, { start: 0, end: 100 });
+// A pre-existing channel-coordinate viewport restores the same positive bins.
+physicalCard._zoom = physicalCard._zoomFromChannelRange(400, 1200);
+physicalCard._scheduleViewStatePersist({ flush: true });
+const restoredPhysical = new Card();
+restoredPhysical.setConfig({ entity: "sensor.physical_axis", diagnostics: false });
+restoredPhysical._setData(physicalData);
+assert.deepEqual(restoredPhysical._zoomChannelRange(), [400, 1200]);
+const physicalZoom = restoredPhysical._option().dataZoom[0];
+// Existing zoom normalization rounds percentages to four decimal places.
+assert.ok(Math.abs(physicalZoom.start / 100 * physicalPoints.at(-1)[1] - physicalPoints[400][1]) < 0.005);
+assert.ok(Math.abs(physicalZoom.end / 100 * physicalPoints.at(-1)[1] - physicalPoints[1200][1]) < 0.005);
+restoredPhysical._onZoom({ start: physicalZoom.start, end: physicalZoom.end });
+assert.deepEqual(restoredPhysical._zoomChannelRange(), [400, 1200], "axis zoom events round-trip channel persistence");
+restoredPhysical.shadowRoot.querySelector("#xaxis").value = "channel";
+assert.equal(restoredPhysical._option().xAxis.min, 0);
+assert.equal(restoredPhysical._option().xAxis.max, 2047);
+assert.deepEqual(restoredPhysical._zoomChannelRange(), [400, 1200], "axis switch preserves meaningful user zoom");
+restoredPhysical._resetZoom();
+assert.deepEqual(restoredPhysical._zoomChannelRange(), [0, 2047], "channel reset exposes all channels including negative-energy bins");
+restoredPhysical.shadowRoot.querySelector("#xaxis").value = "energy";
+assert.equal(restoredPhysical._option().xAxis.min, 0);
+assert.equal(restoredPhysical._option().dataZoom[0].start, 0);
+restoredPhysical._resetZoom();
+const resetPhysical = new Card();
+resetPhysical.setConfig({ entity: "sensor.physical_axis", diagnostics: false });
+resetPhysical._setData(physicalData);
+assert.deepEqual(resetPhysical._zoom, { start: 0, end: 100 }, "full-range marker survives reset and reload");
+assert.equal(resetPhysical._option().xAxis.min, 0);
+assert.equal(JSON.stringify(physicalData), rawPhysicalJSON, "viewing and persistence never mutate the original spectrum");
+for (const energies of [[-4, -3, -2], [4, 3, 2], [2, -3, 4], [NaN, Infinity, -Infinity]]) {
+  const pathological = new Card();
+  pathological.setConfig({ entity: "sensor.pathological_energy" });
+  pathological._setData({ points: energies.map((energy, index) => [index, energy, 1]) });
+  pathological._zoom = { start: 20, end: 80 };
+  const option = pathological._option();
+  assert.equal(option.xAxis.min, 0);
+  assert.ok(Number.isFinite(option.xAxis.max) && option.xAxis.max > 0);
+  assert.ok(option.dataZoom[0].start < option.dataZoom[0].end, "pathological calibration retains a usable display domain");
+}
+
+// CSV is downloaded verbatim from the established backend, not from the
+// clipped axis or rendered points.
+let physicalCSVBlob;
+const physicalURL = globalThis.URL;
+globalThis.URL = { createObjectURL: (blob) => { physicalCSVBlob = blob; return "blob:physical-csv"; }, revokeObjectURL() {} };
+physicalCard._entryId = "physical-entry";
+const rawCSV = "channel,energy_kev,counts\n0,-227.773223876953,1\n";
+physicalCard._call = async () => ({ filename: "spectrum.csv", content: rawCSV });
+await physicalCard._csv();
+assert.equal(await physicalCSVBlob.text(), rawCSV, "negative raw calibration survives CSV export unchanged");
+globalThis.URL = physicalURL;
+
+// An initial info request and its silent automatic capture leave local editor
+// access usable, while conflicting actions are locked with a visible cue.
+const busyUICard = new Card();
+busyUICard.setConfig({ entity: "sensor.busy_ui", diagnostics: false });
+busyUICard._entryId = "busy-ui-entry";
+busyUICard._setData(physicalData);
+busyUICard._draw = () => {};
+let resolveBusyInfo;
+let resolveBusyCapture;
+busyUICard._call = (message) => new Promise((resolve) => {
+  if (message.type === "kc761/info") resolveBusyInfo = resolve;
+  else resolveBusyCapture = resolve;
+});
+let openedBusyEditor = 0;
+busyUICard._openEditor = () => { openedBusyEditor += 1; };
+const busyInitial = busyUICard._loadInitial();
+assert.ok(!busyUICard.shadowRoot.querySelector("#configure").disabled, "Configure is usable before info finishes");
+busyUICard.shadowRoot.querySelector("#configure").click();
+assert.equal(openedBusyEditor, 1);
+resolveBusyInfo({ sensor_types: [2, 0, 0], destructive_actions_enabled: false });
+await Promise.resolve();
+assert.equal(busyUICard._busyState, true);
+assert.ok(!busyUICard.shadowRoot.querySelector("#configure").disabled, "silent capture does not disable Configure");
+assert.ok(!busyUICard.shadowRoot.querySelector("#export-diagnostics").disabled);
+assert.equal(busyUICard.shadowRoot.querySelector("#reset-zoom").disabled, true, "busy start preserves full-range reset semantics");
+for (const selector of ["#capture", "#save", "#csv", "#source", "#history"]) {
+  assert.equal(busyUICard.shadowRoot.querySelector(selector).disabled, true);
+}
+assert.equal(busyUICard.shadowRoot.querySelector("#busy-indicator").hidden, false);
+assert.match(busyUICard.shadowRoot.querySelector("#busy-indicator").textContent, /Working/);
+resolveBusyCapture(physicalData);
+await busyInitial;
+assert.equal(busyUICard.shadowRoot.querySelector("#busy-indicator").hidden, true);
+assert.equal(busyUICard.shadowRoot.querySelector("#capture").disabled, false);
+assert.equal(busyUICard.shadowRoot.querySelector("#reset-zoom").disabled, true, "busy completion does not accidentally enable Reset");
+assert.ok(busyUICard.shadowRoot.querySelectorAll("[data-clear]").every((button) => button.hidden && button.disabled));
+await busyUICard._busy(async () => { throw new Error("Offline capture failed"); }, "");
+assert.equal(busyUICard.shadowRoot.querySelector("#busy-indicator").hidden, true);
+assert.match(busyUICard.shadowRoot.querySelector("#status").textContent, /Offline capture failed/);
+assert.equal(busyUICard.shadowRoot.querySelector("#capture").disabled, false);
+await busyUICard._busy(async () => { busyUICard._spectrumUnavailable = true; }, "");
+assert.equal(busyUICard.shadowRoot.querySelector("#capture").disabled, true, "busy completion cannot enable unavailable data operations");
+assert.ok(!busyUICard.shadowRoot.querySelector("#configure").disabled);
+
+const diagnosticsForm = Card.getConfigForm();
+const advancedDiagnostics = diagnosticsForm.schema.find((group) => group.name === "diagnostics");
+assert.equal(advancedDiagnostics.title, "Advanced diagnostics");
+assert.equal(advancedDiagnostics.type, "expandable");
+assert.ok(!advancedDiagnostics.expanded);
+assert.equal(advancedDiagnostics.schema[0].default, false);
+assert.equal(Card.validateConfig({ entity: "sensor.default_diagnostics" }).diagnostics, false);
+assert.equal(diagnosticsForm.computeLabel({ name: "diagnostics" }), "Diagnostics");
+const diagnosticsHelp = diagnosticsForm.computeHelper({ name: "diagnostics" });
+for (const explanation of [/Off by default/, /survives reloads/, /browser tab session/, /local JSON/, /nothing is automatically uploaded/, /review the file before sharing/]) {
+  assert.match(diagnosticsHelp, explanation);
+}
+const rendererEvidence = verifyPhysicalEnergyRenderer(Card);
+verifyChartGestures(Card);
+verifyYAxisLabels(Card);
+console.log("real ECharts gestures: double-click reset / Shift-wheel Y / lifecycle / persistence ok");
+console.log(`real ECharts ${rendererEvidence.engine} SVG renderer: zero-bound/ROI/zoom contract ok`);
+const originalBuildRegistry = globalThis.customElements;
+try {
+  for (const query of ["fingerprint-test=legacy", "build=not-a-hash", `build=${"f".repeat(64)}`]) {
+    const buildDefinitions = new Map();
+    globalThis.customElements = {
+      get: (name) => buildDefinitions.get(name),
+      define: (name, value) => buildDefinitions.set(name, value),
+    };
+    await import(new URL(`../custom_components/kc761/frontend/kc761-spectrum-card.js?${query}`, import.meta.url));
+    assert.equal(globalThis.customElements.get("kc761-spectrum-card").resourceBuild,
+      query === `build=${"f".repeat(64)}` ? "f".repeat(64) : "unknown");
+  }
+} finally {
+  globalThis.customElements = originalBuildRegistry;
+}
 console.log("frontend card contract: ok");

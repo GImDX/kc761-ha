@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,11 @@ _RAW_SENSOR_KEYS = tuple(
 )
 
 
+def _frontend_build(path: Path) -> str:
+    """Fingerprint the exact served bytes outside the event loop."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the KC761 domain (configuration is entry based)."""
     del config
@@ -72,8 +78,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
         from .websocket_api import async_register as async_register_websocket_api
 
-        async_register_websocket_api(hass)
         frontend_dir = Path(__file__).parent / "frontend"
+        build = await hass.async_add_executor_job(_frontend_build, frontend_dir / "kc761-spectrum-card.js")
+        async_register_websocket_api(hass)
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(
@@ -90,7 +97,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         )
         ha_frontend.add_extra_js_url(
             hass,
-            f"/kc761/kc761-spectrum-card.js?v={VERSION}",
+            f"/kc761/kc761-spectrum-card.js?v={VERSION}&build={build}",
         )
         hass.data[marker] = True
     return True

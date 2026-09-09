@@ -8,6 +8,7 @@ with ordinary pytest; every coroutine is driven with ``asyncio.run``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -233,6 +234,52 @@ class StrictSingleClient(FakeClient):
         await super().async_close()
 
 
+def test_frontend_build_tracks_exact_bytes_and_registers_once(tmp_path: Path) -> None:
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    card = frontend / "kc761-spectrum-card.js"
+    urls = []
+    for content in (b"same-version\n", b"same-version\n", b"same-version\r\n"):
+        card.write_bytes(content)
+        hass = make_hass()
+        with (
+            patch("custom_components.kc761.__file__", str(tmp_path / "__init__.py")),
+            patch("custom_components.kc761.websocket_api.async_register") as register,
+            patch("homeassistant.components.frontend.add_extra_js_url") as add_url,
+        ):
+            assert run(async_setup(hass, {}))
+            assert run(async_setup(hass, {}))
+        register.assert_called_once_with(hass)
+        add_url.assert_called_once_with(
+            hass, "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9&build=" + hashlib.sha256(content).hexdigest()
+        )
+        hass.async_add_executor_job.assert_called_once()
+        assert hass.async_add_executor_job.call_args.args[1] == card
+        routes = hass.http.async_register_static_paths.await_args.args[0]
+        assert routes[0].url_path == "/kc761/kc761-spectrum-card.js"
+        assert routes[0].path == str(card)
+        assert routes[0].cache_headers is True
+        assert "lovelace" not in hass.data, "automatic module registration does not create resource records"
+        urls.append(add_url.call_args.args[1])
+    assert urls[0] == urls[1], "unchanged contents have a stable loading address"
+    assert urls[1] != urls[2], "even a byte-only change invalidates the old loading address"
+
+
+def test_frontend_missing_asset_does_not_register_an_unfingerprinted_url(tmp_path: Path) -> None:
+    hass = make_hass()
+    with (
+        patch("custom_components.kc761.__file__", str(tmp_path / "__init__.py")),
+        patch("custom_components.kc761.websocket_api.async_register") as register,
+        patch("homeassistant.components.frontend.add_extra_js_url") as add_url,
+        pytest.raises(FileNotFoundError),
+    ):
+        run(async_setup(hass, {}))
+    register.assert_not_called()
+    add_url.assert_not_called()
+    hass.http.async_register_static_paths.assert_not_awaited()
+    assert not hass.data.get("kc761_api_registered")
+
+
 def test_entry_setup_unload_reload_and_failure() -> None:
     hass = make_hass()
     assert callable(CONFIG_SCHEMA)
@@ -245,7 +292,10 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     register.assert_called_once_with(hass)
     add_extra_js_url.assert_called_once_with(
         hass,
-            "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9",
+        "/kc761/kc761-spectrum-card.js?v=0.2.0-rc.9&build="
+        + hashlib.sha256(
+            (Path(__file__).parents[1] / "custom_components/kc761/frontend/kc761-spectrum-card.js").read_bytes()
+        ).hexdigest(),
     )
     hass.http.async_register_static_paths.assert_awaited_once()
     static_paths = hass.http.async_register_static_paths.await_args.args[0]
