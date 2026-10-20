@@ -2,7 +2,7 @@
 
 KC761x 是一个面向 Home Assistant 的 HACS 自定义集成，支持通过局域网 TCP 或 Home Assistant Bluetooth 连接 KC761 系列便携式核辐射分析仪。
 
-当前版本：`0.2.0`。最低 Home Assistant 版本为 `2026.7.0`；功能、升级说明与验证边界见[版本说明](docs/RELEASE_NOTES_0.2.0.md)和[发布前补全记录](docs/PRE_RELEASE_COVERAGE.md)。
+当前版本：`0.2.1`。最低 Home Assistant 版本为 `2026.7.0`；功能、升级说明与验证边界见[版本说明](docs/RELEASE_NOTES_0.2.1.md)和[发布前补全记录](docs/PRE_RELEASE_COVERAGE.md)。
 
 文档与代码中的版本号不自动证明 HACS 或 GitHub 已公开发布该版本；安装时以实际已发布的版本为准。
 
@@ -21,7 +21,7 @@ KC761x 是一个面向 Home Assistant 的 HACS 自定义集成，支持通过局
 
 ## 安装
 
-1. 在 HACS 中把 `https://github.com/GImDX/kc761-ha` 添加为“集成”类型的自定义仓库。
+1. 在 HACS 的集成列表搜索 `KC761x`。本项目已获准加入 HACS 默认仓库；如列表尚未显示，也可把 `https://github.com/GImDX/kc761-ha` 添加为“集成”类型的自定义仓库。
 2. 下载 KC761x，重启 Home Assistant。
 3. 在“设置 → 设备与服务 → 添加集成”中搜索 `KC761x`。
 4. 选择 `TCP` 或 `BLE`，完成连接预检。设备返回的 `DEVICE_ID` 用作唯一标识；地址变更应使用“重新配置”。
