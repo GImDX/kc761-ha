@@ -27,6 +27,7 @@ from custom_components.kc761 import (  # noqa: E402
     CONFIG_SCHEMA,
     async_migrate_entry,
     async_reload_entry,
+    async_remove_entry,
     async_setup,
     async_setup_entry,
     async_unload_entry,
@@ -280,8 +281,9 @@ def test_frontend_missing_asset_does_not_register_an_unfingerprinted_url(tmp_pat
     assert not hass.data.get("kc761_api_registered")
 
 
-def test_entry_setup_unload_reload_and_failure() -> None:
+def test_entry_setup_unload_reload_and_failure(tmp_path: Path) -> None:
     hass = make_hass()
+    hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
     assert callable(CONFIG_SCHEMA)
     with (
         patch("custom_components.kc761.websocket_api.async_register") as register,
@@ -305,6 +307,9 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     }
     assert hass.data[DOMAIN] == {}
     entry = make_entry()
+    saved_archive_marker = tmp_path / ".storage" / DOMAIN / entry.entry_id / "saved.json.gz"
+    saved_archive_marker.parent.mkdir(parents=True)
+    saved_archive_marker.write_bytes(b"preserve across reload and unload")
     fake = MagicMock()
     fake.async_config_entry_first_refresh = AsyncMock()
     fake.async_start = AsyncMock()
@@ -317,8 +322,10 @@ def test_entry_setup_unload_reload_and_failure() -> None:
     hass.bus.async_listen_once.assert_called_once()
     run(async_reload_entry(hass, entry))
     hass.config_entries.async_reload.assert_awaited_once_with(entry.entry_id)
+    assert saved_archive_marker.exists()
     assert run(async_unload_entry(hass, entry)) is True
     fake.async_shutdown.assert_awaited_once()
+    assert saved_archive_marker.exists()
 
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
     assert run(async_unload_entry(hass, entry)) is False
@@ -457,6 +464,153 @@ def test_entry_setup_unload_reload_and_failure() -> None:
         "sensor.gamma_raw_cps",
         entity_category=None,
         disabled_by=None,
+    )
+
+
+def test_remove_entry_without_runtime_data_deletes_only_its_archive(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry()
+        archive_root = tmp_path / ".storage" / DOMAIN
+        target = archive_root / entry.entry_id
+        sibling = archive_root / "entry-2"
+        SpectrumArchive(target).save(consistency_snapshot(1024, minute=12))
+        (target / ".unfinished.tmp").write_bytes(b"partial save")
+        SpectrumArchive(sibling).save(consistency_snapshot(1024, minute=13))
+
+        await async_remove_entry(hass, entry)
+
+        assert not target.exists()
+        assert len(list(sibling.glob("*.json.gz"))) == 1
+        assert (sibling / ".metadata.json").exists()
+        hass.async_add_executor_job.assert_called_once()
+        assert hass.async_add_executor_job.call_args.args[0].__name__ == "delete_entry"
+
+    run(exercise())
+
+
+def test_remove_entry_stops_coordinator_left_by_failed_unload(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry()
+        target = tmp_path / ".storage" / DOMAIN / entry.entry_id
+        archive = SpectrumArchive(target)
+        archive.save(consistency_snapshot(1024, minute=14))
+        residual = SimpleNamespace(async_shutdown=AsyncMock(), _archive=archive)
+        entry.runtime_data = residual
+        sibling_coordinator = object()
+        hass.data[DOMAIN] = {entry.entry_id: residual, "sibling-entry": sibling_coordinator}
+        hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
+
+        assert await async_unload_entry(hass, entry) is False
+        await async_remove_entry(hass, entry)
+
+        residual.async_shutdown.assert_awaited_once()
+        assert not target.exists()
+        assert hass.data[DOMAIN] == {"sibling-entry": sibling_coordinator}
+
+    run(exercise())
+
+
+def test_remove_entry_retries_transient_shutdown_error_and_drains_archive(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry()
+        fake = FakeClient(info=make_info((2, 8, 5)), status=make_status())
+        with patch.object(coordinator_module.DataUpdateCoordinator, "__init__", return_value=None):
+            with patch.object(coordinator_module, "KC761Client", return_value=fake):
+                coordinator = coordinator_module.KC761Coordinator(hass, entry)
+
+        target = tmp_path / ".storage" / DOMAIN / entry.entry_id
+        coordinator._archive = SpectrumArchive(target)
+        coordinator._archive.save(consistency_snapshot(1024, minute=15))
+        hass.data[DOMAIN] = {entry.entry_id: coordinator, "sibling-entry": object()}
+        hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
+        close_attempts = 0
+
+        async def executor_job(target_function, *args):
+            nonlocal close_attempts
+            if getattr(target_function, "__name__", None) == "close":
+                close_attempts += 1
+                if close_attempts == 1:
+                    raise OSError("transient archive close failure")
+            return await asyncio.to_thread(target_function, *args)
+
+        hass.async_add_executor_job.side_effect = executor_job
+        base_shutdown = AsyncMock()
+        with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", base_shutdown):
+            assert await async_unload_entry(hass, entry) is False
+            await async_remove_entry(hass, entry)
+
+        assert close_attempts == 2
+        assert coordinator._shutdown_complete is True
+        assert coordinator._client_closed is True
+        assert fake.close_calls == 1
+        assert not target.exists()
+        assert "sibling-entry" in hass.data[DOMAIN]
+        assert base_shutdown.await_count == 2
+        await coordinator.async_shutdown()
+        assert close_attempts == 2
+        with pytest.raises(RuntimeError, match="shut down"):
+            await coordinator.async_list_saved_spectra()
+        with pytest.raises(RuntimeError, match="shut down"):
+            await coordinator.async_get_saved_spectrum("bad")
+
+    run(exercise())
+
+
+def test_remove_entry_still_cleans_after_repeated_shutdown_errors(tmp_path: Path, caplog) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry()
+        target = tmp_path / ".storage" / DOMAIN / entry.entry_id
+        SpectrumArchive(target).save(consistency_snapshot(1024, minute=16))
+        wrong_archive = tmp_path / "wrong-archive"
+        wrong_archive.mkdir()
+        wrong_marker = wrong_archive / "preserve.txt"
+        wrong_marker.write_text("still owned elsewhere", encoding="utf-8")
+        residual = SimpleNamespace(
+            async_shutdown=AsyncMock(side_effect=RuntimeError("stop failed")),
+            _archive=SpectrumArchive(wrong_archive),
+        )
+        sibling_coordinator = object()
+        hass.data[DOMAIN] = {entry.entry_id: residual, "sibling-entry": sibling_coordinator}
+
+        await async_remove_entry(hass, entry)
+
+        assert residual.async_shutdown.await_count == 2
+        assert not target.exists()
+        assert wrong_marker.exists()
+        assert hass.data[DOMAIN] == {"sibling-entry": sibling_coordinator}
+
+    run(exercise())
+    assert any("after retry" in record.getMessage() for record in caplog.records)
+
+
+def test_remove_entry_records_archive_filesystem_errors(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    async def exercise() -> None:
+        hass = make_hass()
+        hass.config.path.side_effect = lambda *parts: str(tmp_path.joinpath(*parts))
+        entry = make_entry()
+        archive = SpectrumArchive(tmp_path / ".storage" / DOMAIN / entry.entry_id)
+        residual = SimpleNamespace(async_shutdown=AsyncMock(), _archive=archive)
+        sibling_coordinator = object()
+        hass.data[DOMAIN] = {entry.entry_id: residual, "sibling-entry": sibling_coordinator}
+        with patch.object(SpectrumArchive, "delete_entry", side_effect=OSError("disk unavailable")):
+            with pytest.raises(OSError, match="disk unavailable"):
+                await async_remove_entry(hass, entry)
+        residual.async_shutdown.assert_awaited_once()
+        assert hass.data[DOMAIN] == {"sibling-entry": sibling_coordinator}
+
+    run(exercise())
+    assert any(
+        "Failed to remove spectrum archive" in record.getMessage()
+        and "entry-1" in record.getMessage()
+        for record in caplog.records
     )
 
 

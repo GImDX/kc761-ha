@@ -7,12 +7,14 @@ import csv
 import gzip
 import json
 import tempfile
-from threading import Barrier
+from threading import Barrier, Event
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from custom_components.kc761.const import DOMAIN
 from custom_components.kc761.spectrum import SpectrumArchive, SpectrumSnapshot
 
 
@@ -265,6 +267,127 @@ class SpectrumArchiveTests(unittest.TestCase):
             self.assertEqual(metadata[0]["snapshot_id"], values[2].snapshot_id)
             self.assertEqual(archive.load(values[1].snapshot_id), values[1])
             self.assertFalse((Path(directory) / f"{values[0].snapshot_id}.json.gz").exists())
+
+    def test_delete_entry_removes_only_its_snapshot_index_and_temporary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory)
+            archive_root = config_path / ".storage" / DOMAIN
+            target = archive_root / "entry-1"
+            sibling = archive_root / "entry-2"
+            archive = SpectrumArchive(target)
+            archive.save(snapshot(minute=1))
+            (target / ".orphan.tmp").write_text("partial", encoding="utf-8")
+            SpectrumArchive(sibling).save(snapshot(minute=2, source=1))
+
+            self.assertTrue((target / ".metadata.json").exists())
+            self.assertEqual(len(list(target.glob("*.json.gz"))), 1)
+            archive.delete_entry(config_path, "entry-1")
+
+            self.assertFalse(target.exists())
+            self.assertEqual(len(list(sibling.glob("*.json.gz"))), 1)
+            self.assertTrue((sibling / ".metadata.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "archive is closed"):
+                archive.save(snapshot(minute=3))
+
+    def test_delete_entry_treats_missing_directory_as_already_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory)
+            archive = SpectrumArchive(config_path / ".storage" / DOMAIN / "missing")
+            archive.delete_entry(config_path, "missing")
+            self.assertFalse((config_path / ".storage").exists())
+
+    def test_delete_entry_rejects_traversal_mismatched_paths_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory)
+            archive_root = config_path / ".storage" / DOMAIN
+            outside = config_path / "outside"
+            outside.mkdir()
+            marker = outside / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+
+            for invalid_entry_id in (None, "", ".", "..", "../outside", "..\\outside", "entry:stream", "entry\x00"):
+                with self.assertRaisesRegex(ValueError, "config entry ID"):
+                    SpectrumArchive(archive_root / ".." / "outside").delete_entry(
+                        config_path,
+                        invalid_entry_id,
+                    )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                SpectrumArchive(outside).delete_entry(config_path, "entry-1")
+            self.assertTrue(marker.exists())
+
+            linked_target = archive_root / "entry-1"
+            linked_target.mkdir(parents=True)
+            with patch.object(
+                SpectrumArchive,
+                "_is_link_or_junction",
+                new=staticmethod(lambda path: path == linked_target),
+            ):
+                with self.assertRaisesRegex(ValueError, "linked KC761 entry archive"):
+                    SpectrumArchive(linked_target).delete_entry(config_path, "entry-1")
+            self.assertTrue(marker.exists())
+
+            with patch.object(
+                SpectrumArchive,
+                "_is_link_or_junction",
+                new=staticmethod(lambda path: path == config_path / ".storage"),
+            ):
+                with self.assertRaisesRegex(ValueError, "linked storage path"):
+                    SpectrumArchive(linked_target).delete_entry(config_path, "entry-1")
+            self.assertTrue(marker.exists())
+
+            with patch.object(
+                SpectrumArchive,
+                "_is_link_or_junction",
+                new=staticmethod(lambda path: path == archive_root),
+            ):
+                with self.assertRaisesRegex(ValueError, "linked storage path"):
+                    SpectrumArchive(linked_target).delete_entry(config_path, "entry-1")
+            self.assertTrue(marker.exists())
+
+            target_file = archive_root / "entry-file"
+            target_file.write_text("keep", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not a directory"):
+                SpectrumArchive(target_file).delete_entry(config_path, "entry-file")
+            self.assertTrue(target_file.exists())
+
+            link_probes = (
+                (SimpleNamespace(is_symlink=lambda: True), True),
+                (SimpleNamespace(is_symlink=lambda: False, is_junction=lambda: True), True),
+                (SimpleNamespace(is_symlink=lambda: False, is_junction=lambda: False), False),
+                (SimpleNamespace(is_symlink=lambda: False), False),
+            )
+            for probe, expected_link in link_probes:
+                self.assertEqual(SpectrumArchive._is_link_or_junction(probe), expected_link)
+
+    def test_delete_entry_waits_for_in_progress_save_and_rejects_late_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory)
+            target = config_path / ".storage" / DOMAIN / "entry-1"
+            archive = SpectrumArchive(target)
+            writing_index = Event()
+            finish_index = Event()
+            write_index = archive._write_index
+
+            def paused_write(index: dict[str, dict[str, object]]) -> None:
+                writing_index.set()
+                if not finish_index.wait(timeout=5):
+                    raise TimeoutError("test did not release the in-progress save")
+                write_index(index)
+
+            with patch.object(archive, "_write_index", side_effect=paused_write):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    saving = executor.submit(archive.save, snapshot())
+                    self.assertTrue(writing_index.wait(timeout=5))
+                    deleting = executor.submit(archive.delete_entry, config_path, "entry-1")
+                    self.assertFalse(deleting.done())
+                    finish_index.set()
+                    saving.result(timeout=5)
+                    deleting.result(timeout=5)
+
+            self.assertFalse(target.exists())
+            with self.assertRaisesRegex(RuntimeError, "archive is closed"):
+                archive.save(snapshot(minute=1))
+            self.assertFalse(target.exists())
 
     def test_index_survives_restart_without_reloading_unchanged_archives(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

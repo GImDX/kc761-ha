@@ -165,6 +165,8 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self._write_lock = asyncio.Lock()
         self._shutdown_lock = asyncio.Lock()
         self._shutdown = False
+        self._shutdown_complete = False
+        self._client_closed = False
         self._profile_logged = False
         self._reload_scheduled = False
         self.reconnects = 0
@@ -338,9 +340,9 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
         self._notify_entities()
 
     async def async_shutdown(self) -> None:
-        """Cancel coordinator work and close the owned TCP client."""
+        """Cancel coordinator work, drain archive I/O, and close its client."""
         async with self._shutdown_lock:
-            if self._shutdown:
+            if self._shutdown_complete:
                 return
             self._shutdown = True
             tasks = [task for task in self._background_tasks if task is not asyncio.current_task()]
@@ -353,8 +355,13 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
             # Cancel owned tasks before acquiring their transaction lock.
             # Non-background callers finish/reject before the final close.
             async with self._write_lock:
-                self._auto_upload_spectrum.reset()
-                await self.client.async_close()
+                if not self._client_closed:
+                    self._auto_upload_spectrum.reset()
+                    await self.client.async_close()
+                    self._client_closed = True
+            if self._archive is not None:
+                await self._hass.async_add_executor_job(self._archive.close)
+            self._shutdown_complete = True
 
     async def async_capture_spectrum(self, source: int | None = None) -> SpectrumSnapshot:
         """Capture one complete configured spectrum and publish the single entity payload."""
@@ -396,16 +403,19 @@ class KC761Coordinator(DataUpdateCoordinator[KC761Snapshot]):
     async def async_save_spectrum(self, source: int | None = None) -> SpectrumSnapshot:
         """Capture and persist one spectrum using the bounded private archive."""
         snapshot = await self.async_capture_spectrum(source)
+        self._require_running()
         archive = self._require_archive()
         await self._hass.async_add_executor_job(archive.save, snapshot)
         self.last_spectrum_save = datetime.now(UTC)
         return snapshot
 
     async def async_list_saved_spectra(self) -> list[dict[str, Any]]:
+        self._require_running()
         archive = self._require_archive()
         return await self._hass.async_add_executor_job(archive.list_metadata)
 
     async def async_get_saved_spectrum(self, snapshot_id: str) -> SpectrumSnapshot:
+        self._require_running()
         archive = self._require_archive()
         return await self._hass.async_add_executor_job(archive.load, snapshot_id)
 

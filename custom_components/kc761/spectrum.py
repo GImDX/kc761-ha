@@ -9,6 +9,8 @@ import io
 import json
 import os
 import re
+import shutil
+import stat
 import zlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,6 +25,7 @@ from .const import (
     SPECTRUM_LENGTH_CONFIDENCE_LEGACY,
     SPECTRUM_LENGTH_CONFIDENCE_OBSERVED,
     SPECTRUM_STATUS_COMPLETE,
+    DOMAIN,
 )
 from .const import CHANNEL_KEYS, MAX_SAVED_SPECTRA, SPECTRUM_CHANNEL_COUNTS
 
@@ -270,15 +273,17 @@ class SpectrumArchive:
     """A bounded per-config-entry archive outside Home Assistant Recorder."""
 
     def __init__(self, directory: Path, *, maximum: int = MAX_SAVED_SPECTRA) -> None:
-        self.directory = directory
+        self.directory = Path(directory)
         self.maximum = maximum
         self._index: dict[str, dict[str, Any]] | None = None
         self._index_dirty = False
         self._lock = RLock()
+        self._closed = False
 
     def save(self, snapshot: SpectrumSnapshot) -> None:
         """Atomically save gzip data; a sidecar failure is retried without hiding data."""
         with self._lock:
+            self._require_open()
             self.directory.mkdir(parents=True, exist_ok=True)
             index = self._ensure_index()
             destination = self._path(snapshot.snapshot_id)
@@ -305,6 +310,7 @@ class SpectrumArchive:
     def list_metadata(self) -> list[dict[str, Any]]:
         """Return newest-first metadata while skipping unreadable private files."""
         with self._lock:
+            self._require_open()
             if not self.directory.exists():
                 self._index = {}
                 return []
@@ -319,7 +325,59 @@ class SpectrumArchive:
 
     def load(self, snapshot_id: str) -> SpectrumSnapshot:
         with self._lock:
+            self._require_open()
             return self._load_path(self._path(snapshot_id))
+
+    def close(self) -> None:
+        """Reject later archive operations after draining the current one."""
+        with self._lock:
+            self._closed = True
+
+    def delete_entry(self, config_directory: Path, entry_id: str) -> None:
+        """Close and remove only this config entry's archive directory."""
+        with self._lock:
+            self._closed = True
+            if (
+                not isinstance(entry_id, str)
+                or not entry_id
+                or entry_id in {".", ".."}
+                or "/" in entry_id
+                or "\\" in entry_id
+                or ":" in entry_id
+                or "\x00" in entry_id
+            ):
+                raise ValueError("invalid KC761 config entry ID for archive removal")
+
+            config_path = Path(os.path.abspath(config_directory))
+            archive_root = Path(os.path.abspath(config_path / ".storage" / DOMAIN))
+            expected = Path(os.path.abspath(archive_root / entry_id))
+            target = Path(os.path.abspath(self.directory))
+            if expected.parent != archive_root or target != expected:
+                raise ValueError("KC761 archive path does not match its config entry")
+
+            storage_path = config_path / ".storage"
+            if self._is_link_or_junction(storage_path) or self._is_link_or_junction(archive_root):
+                raise ValueError("refusing to remove a KC761 archive through a linked storage path")
+            if self._is_link_or_junction(target):
+                raise ValueError("refusing to remove a linked KC761 entry archive")
+            try:
+                mode = target.lstat().st_mode
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(mode):
+                raise ValueError("KC761 entry archive path is not a directory")
+            shutil.rmtree(target)
+
+    @staticmethod
+    def _is_link_or_junction(path: Path) -> bool:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction and is_junction())
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("KC761 spectrum archive is closed")
 
     def _path(self, snapshot_id: str) -> Path:
         if not _SAFE_ID.fullmatch(snapshot_id):

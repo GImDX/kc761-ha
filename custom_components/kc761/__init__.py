@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from .const import (
     PLATFORMS,
     VERSION,
 )
+from .spectrum import SpectrumArchive
 
 try:
     from homeassistant.config_entries import ConfigEntry
@@ -32,6 +35,7 @@ except ImportError:  # pragma: no cover - permits protocol-only offline checks
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN) if cv is not None else None
 CONFIG_ENTRY_VERSION = 7
+_LOGGER = logging.getLogger(__name__)
 
 _REMOVED_BINARY_SENSOR_KEYS = (
     "auto_upload_enabled",
@@ -221,3 +225,44 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_shutdown()
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Stop any residual coordinator and remove this entry's private archive."""
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+
+    if coordinator is not None:
+        try:
+            await coordinator.async_shutdown()
+        except Exception:
+            _LOGGER.exception(
+                "Failed to stop KC761 coordinator while removing entry %s; retrying",
+                entry.entry_id,
+            )
+            try:
+                await coordinator.async_shutdown()
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to stop KC761 coordinator after retry while removing entry %s",
+                    entry.entry_id,
+                )
+
+    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+
+    archive_directory = Path(hass.config.path(".storage", DOMAIN, entry.entry_id))
+    archive = getattr(coordinator, "_archive", None) if coordinator is not None else None
+    archive_matches_entry = (
+        isinstance(archive, SpectrumArchive)
+        and Path(os.path.abspath(archive.directory)) == Path(os.path.abspath(archive_directory))
+    )
+    if not archive_matches_entry:
+        archive = SpectrumArchive(archive_directory)
+
+    config_directory = Path(hass.config.path())
+    try:
+        await hass.async_add_executor_job(archive.delete_entry, config_directory, entry.entry_id)
+    except OSError:
+        _LOGGER.exception("Failed to remove spectrum archive for KC761 entry %s", entry.entry_id)
+        raise
